@@ -244,14 +244,19 @@ file), or the board last saw TASK there."
 
 (defun org-varde--context ()
   "Where the heading sits in org, for a fresh session.
-That is its outline path and the nearest ancestor's prose, within
-`org-varde-context-words'."
+That is its file, its outline path and the nearest ancestor's prose,
+within `org-varde-context-words'.  The file is named in full and as
+org-mode: a bare \"notes.org\" reads as a web address, and the session
+can read the rest of the file itself."
   (save-excursion
     (org-back-to-heading t)
     (let* ((path (org-get-outline-path))
-           (file (and buffer-file-name (file-name-nondirectory buffer-file-name)))
+           (file (buffer-file-name (buffer-base-buffer)))
            (parent (when (and path (org-up-heading-safe)) (org-varde--body)))
-           (text (concat "From org: " (string-join (delq nil (append (list file) path)) " > ")
+           (text (concat "This task is a heading in an org-mode file"
+                         (when file (concat ", " (expand-file-name file)))
+                         (when path (concat ", under: " (string-join path " > ")))
+                         "."
                          (when (and parent (not (string-empty-p parent)))
                            (concat "\n\nThe parent heading says:\n" parent))))
            (words (split-string text "[ \t]+" t)))

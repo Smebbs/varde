@@ -197,7 +197,7 @@ may be the one meant."
   (org-varde-test-with-org org-varde-test--org
     (org-varde-test--goto "Fix the login bug")
     (let ((c (org-varde--context)))
-      (should (string-match-p "From org: .*\\.org > Area" c))
+      (should (string-match-p "org-mode file, /.*\\.org, under: Area\\." c))
       (should (string-match-p "Everything about logging in\\." c)))
     (let ((org-varde-context-words 3))
       (should (string-suffix-p "…" (org-varde--context))))))
