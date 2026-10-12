@@ -100,19 +100,31 @@ impl App<'_> {
     }
 
     /// What follows a directory prompt: the directories Tab could
-    /// complete it to, in at most half the `width`, or else its `keys`.
-    fn prompt_keys(&self, keys: &str, width: usize) -> String {
-        if self.matches.is_empty() {
-            return keys.to_string();
+    /// complete it to, the one in the line in view and marked, in at most
+    /// half the `width`; or else its `keys`.
+    fn prompt_tail(&self, keys: &str, width: usize) -> Vec<Span<'static>> {
+        let Some(menu) = &self.menu else { return vec![keys.to_string().dark_gray()] };
+        let names: Vec<String> = menu.names.iter().map(|n| clean(n)).collect();
+        let fits = |shown: &[String]| shown.iter().map(|n| n.width() + 2).sum::<usize>() + 6 <= width / 2;
+        let at = menu.at.unwrap_or(0);
+        let mut from = 0;
+        while from < at && !fits(&names[from..=at]) {
+            from += 1;
         }
-        let mut out = String::new();
-        for m in &self.matches {
-            let m = format!("  {}", clean(m));
-            if out.width() + m.width() + 3 > width / 2 {
-                out.push_str("  …");
-                break;
-            }
-            out.push_str(&m);
+        let mut to = at + 1;
+        while to < names.len() && fits(&names[from..=to]) {
+            to += 1;
+        }
+        let mut out = Vec::new();
+        if from > 0 {
+            out.push("  …".dark_gray());
+        }
+        for (i, n) in names.iter().enumerate().take(to).skip(from) {
+            out.push("  ".into());
+            out.push(if menu.at == Some(i) { n.clone().reversed() } else { n.clone().dark_gray() });
+        }
+        if to < names.len() {
+            out.push("  …".dark_gray());
         }
         out
     }
@@ -132,24 +144,18 @@ impl App<'_> {
             Mode::Help => Line::from("any key closes this".dark_gray()),
             Mode::Recall(q) => Line::from(vec!["Recall: ".bold(), Span::raw(clean(q)), "▏".into()]),
             Mode::Move(_, dir) => {
-                let keys = self.prompt_keys("  RET move  Tab complete  C-u clear  Esc cancel", width);
-                let room = width.saturating_sub(17 + 1 + keys.width());
-                Line::from(vec![
-                    "Move to project: ".bold(),
-                    Span::raw(left_clip(&clean(dir), room)),
-                    "▏".into(),
-                    keys.dark_gray(),
-                ])
+                let tail = self.prompt_tail("  RET move  Tab complete  C-u clear  Esc cancel", width);
+                let room = width.saturating_sub(17 + 1 + tail.iter().map(Span::width).sum::<usize>());
+                let mut line = vec!["Move to project: ".bold(), Span::raw(left_clip(&clean(dir), room)), "▏".into()];
+                line.extend(tail);
+                Line::from(line)
             }
             Mode::Where(_, dir) => {
-                let keys = self.prompt_keys("  RET create  Tab complete  C-u clear  Esc back", width);
-                let room = width.saturating_sub(23 + 1 + keys.width());
-                Line::from(vec![
-                    "Project for this task: ".bold(),
-                    Span::raw(left_clip(&clean(dir), room)),
-                    "▏".into(),
-                    keys.dark_gray(),
-                ])
+                let tail = self.prompt_tail("  RET create  Tab complete  C-u clear  Esc back", width);
+                let room = width.saturating_sub(23 + 1 + tail.iter().map(Span::width).sum::<usize>());
+                let mut line = vec!["Project for this task: ".bold(), Span::raw(left_clip(&clean(dir), room)), "▏".into()];
+                line.extend(tail);
+                Line::from(line)
             }
             Mode::Worktree(..) => ask("Work in a separate git worktree?  [Y/n]".into()),
             Mode::Project(_, _, choices, i) => {

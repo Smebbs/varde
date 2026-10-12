@@ -136,8 +136,8 @@ struct App<'a> {
     found: Option<Found>,
     message: String,
     /// The directories Tab could complete a directory prompt to, shown
-    /// until the next key.
-    matches: Vec<String>,
+    /// until a key other than Tab.
+    menu: Option<Menu>,
     /// Unread tasks whose tmux window has rung; `None` until the first
     /// refresh, which rings nothing.
     rung: Option<HashSet<String>>,
@@ -198,7 +198,7 @@ impl<'a> App<'a> {
             expanded: false,
             found: None,
             message: String::new(),
-            matches: Vec::new(),
+            menu: None,
             rung: None,
             redraw: false,
             stale: false,
@@ -389,7 +389,7 @@ impl<'a> App<'a> {
 
     fn key(&mut self, key: KeyEvent) -> Option<Away> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        self.matches.clear();
+        let menu = self.menu.take();
         match std::mem::replace(&mut self.mode, Mode::Normal) {
             Mode::Help => {}
             Mode::New(mut draft) => match draft.key(key) {
@@ -408,8 +408,8 @@ impl<'a> App<'a> {
             Mode::Where(draft, mut dir) => match key.code {
                 KeyCode::Enter => self.create(&draft, &dir),
                 KeyCode::Esc => self.mode = Mode::New(draft),
-                KeyCode::Tab => {
-                    self.matches = complete_dir(&mut dir);
+                KeyCode::Tab | KeyCode::BackTab => {
+                    self.menu = tab(&mut dir, menu, key.code == KeyCode::BackTab);
                     self.mode = Mode::Where(draft, dir);
                 }
                 _ => {
@@ -433,8 +433,8 @@ impl<'a> App<'a> {
             Mode::Move(task, mut dir) => match key.code {
                 KeyCode::Enter => self.move_task(&task, &dir),
                 KeyCode::Esc => {}
-                KeyCode::Tab => {
-                    self.matches = complete_dir(&mut dir);
+                KeyCode::Tab | KeyCode::BackTab => {
+                    self.menu = tab(&mut dir, menu, key.code == KeyCode::BackTab);
                     self.mode = Mode::Move(task, dir);
                 }
                 _ => {
@@ -932,10 +932,35 @@ fn home_in(dir: &str) -> String {
     }
 }
 
-/// Tab in a directory prompt: `line` completed as a shell completes a
-/// directory, as far as the directories it could name agree; their names
-/// when that is no further. Hidden ones only once a `.` is typed.
-fn complete_dir(line: &mut String) -> Vec<String> {
+/// The directories in `parent` Tab could complete a directory prompt to,
+/// and the one it last put in the line.
+struct Menu {
+    parent: String,
+    names: Vec<String>,
+    at: Option<usize>,
+}
+
+/// Tab, or Shift-Tab when `back`, in a directory prompt: the next (or
+/// previous) directory of the `menu` the last Tab listed put in the
+/// line, or else the line completed.
+fn tab(line: &mut String, menu: Option<Menu>, back: bool) -> Option<Menu> {
+    let Some(mut menu) = menu else { return complete_dir(line) };
+    let n = menu.names.len();
+    let at = match (menu.at, back) {
+        (None, false) => 0,
+        (None, true) => n - 1,
+        (Some(i), false) => (i + 1) % n,
+        (Some(i), true) => (i + n - 1) % n,
+    };
+    *line = format!("{}{}/", menu.parent, menu.names[at]);
+    menu.at = Some(at);
+    Some(menu)
+}
+
+/// `line` completed as a shell completes a directory, as far as the
+/// directories it could name agree; those directories when that is no
+/// further. Hidden ones only once a `.` is typed.
+fn complete_dir(line: &mut String) -> Option<Menu> {
     if line.trim() == "~" {
         line.push('/');
     }
@@ -944,7 +969,7 @@ fn complete_dir(line: &mut String) -> Vec<String> {
         None => (String::new(), line.clone()),
     };
     let dir = if parent.is_empty() { ".".to_string() } else { home_in(&parent) };
-    let Ok(entries) = std::fs::read_dir(dir) else { return Vec::new() };
+    let Ok(entries) = std::fs::read_dir(dir) else { return None };
     let mut names: Vec<String> = entries
         .flatten()
         .filter(|e| e.path().is_dir())
@@ -952,7 +977,7 @@ fn complete_dir(line: &mut String) -> Vec<String> {
         .filter(|n| n.starts_with(&stem) && (stem.starts_with('.') || !n.starts_with('.')))
         .collect();
     names.sort();
-    let Some(first) = names.first() else { return Vec::new() };
+    let first = names.first()?;
     let common = names.iter().fold(first.as_str(), |a, b| {
         let end = a
             .char_indices()
@@ -966,9 +991,9 @@ fn complete_dir(line: &mut String) -> Vec<String> {
     } else if common.len() > stem.len() {
         *line = format!("{parent}{common}");
     } else {
-        return names;
+        return Some(Menu { parent, names, at: None });
     }
-    Vec::new()
+    None
 }
 
 /// A key typed into a one-line prompt: Backspace, C-w or Alt-Backspace
@@ -1289,6 +1314,7 @@ mod tests {
         }
         std::fs::write(dir.path().join("projects/varfile"), "").unwrap();
         let root = dir.path().display().to_string();
+        let complete_dir = |line: &mut String| complete_dir(line).map(|m| m.names).unwrap_or_default();
         let mut line = format!("{root}/pro");
         assert!(complete_dir(&mut line).is_empty());
         assert_eq!(line, format!("{root}/projects/"), "one match, closed with a slash");
@@ -1329,9 +1355,9 @@ mod tests {
     }
 
     #[test]
-    fn tab_in_the_new_tasks_project_line_completes_and_lists() {
+    fn tab_in_the_new_tasks_project_line_completes_lists_and_picks() {
         let (dir, paths) = temp_paths();
-        for d in ["alpha", "alps"] {
+        for d in ["alpha", "alps", "alto"] {
             std::fs::create_dir(dir.path().join(d)).unwrap();
         }
         let mut app = board(&paths, &[]);
@@ -1340,15 +1366,43 @@ mod tests {
         key(&mut app, KeyCode::Enter);
         let Mode::Where(_, line) = &mut app.mode else { panic!("not asking the project") };
         *line = format!("{}/a", dir.path().display());
+        let line = |app: &App| match &app.mode {
+            Mode::Where(_, l) => l.rsplit_terminator('/').next().unwrap().to_string(),
+            _ => panic!("left the prompt"),
+        };
         key(&mut app, KeyCode::Tab);
-        assert!(matches!(&app.mode, Mode::Where(_, l) if l.ends_with("/alp")), "common prefix");
+        assert_eq!(line(&app), "al", "common prefix");
         key(&mut app, KeyCode::Tab);
-        let s = screen(&mut app, 120, 10);
-        assert!(s.contains("alpha  alps"), "{s}");
-        key(&mut app, KeyCode::Char('h'));
-        assert!(!screen(&mut app, 120, 10).contains("alpha  alps"), "gone at the next key");
+        assert!(screen(&mut app, 120, 10).contains("alpha  alps  alto"));
         key(&mut app, KeyCode::Tab);
-        assert!(matches!(&app.mode, Mode::Where(_, l) if l.ends_with("/alpha/")));
+        assert_eq!(line(&app), "alpha", "the next Tab picks the first");
+        key(&mut app, KeyCode::Tab);
+        assert_eq!(line(&app), "alps");
+        key(&mut app, KeyCode::BackTab);
+        key(&mut app, KeyCode::BackTab);
+        assert_eq!(line(&app), "alto", "Shift-Tab goes back, round the end");
+        assert!(screen(&mut app, 120, 10).contains("alpha  alps  alto"), "listed while picking");
+        key(&mut app, KeyCode::Char('x'));
+        assert!(!screen(&mut app, 120, 10).contains("alpha  alps"), "gone at another key");
+        assert!(matches!(&app.mode, Mode::Where(_, l) if l.ends_with("/alto/x")), "the pick kept");
+    }
+
+    #[test]
+    fn the_picked_directory_stays_in_view() {
+        let (dir, paths) = temp_paths();
+        let names: Vec<String> = (0..20).map(|i| format!("dir{i:02}")).collect();
+        for n in &names {
+            std::fs::create_dir(dir.path().join(n)).unwrap();
+        }
+        let mut app = board(&paths, &[]);
+        app.mode = Mode::Where(Draft::default(), format!("{}/", dir.path().display()));
+        key(&mut app, KeyCode::Tab);
+        for _ in 0..16 {
+            key(&mut app, KeyCode::Tab);
+        }
+        assert!(matches!(&app.mode, Mode::Where(_, l) if l.ends_with("/dir14/")));
+        let s = screen(&mut app, 80, 10);
+        assert!(s.contains("dir14") && !s.contains("dir00") && s.contains("…"), "{s}");
     }
 
     #[test]

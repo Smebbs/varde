@@ -10,7 +10,8 @@ follow [Semantic Versioning](https://semver.org).
 
 - Tab completes directory names in the board's project prompts (a new
   task's project and `m`, move), as a shell does: as far as the
-  directories agree, then a list of them.
+  directories agree, then a list of them, which further Tabs (and
+  Shift-Tab) pick from.
 - C-w and Alt-Backspace in the board's project prompts rub out the last
   directory, as in fish.
 
