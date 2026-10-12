@@ -4,22 +4,18 @@ Notable changes to varde and org-varde. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions
 follow [Semantic Versioning](https://semver.org).
 
-## Unreleased
+## 1.0.3 - 2026-10-12
 
 ### Added
 
-- Tab completes directory names in the board's project prompts (a new
-  task's project and `m`, move), as a shell does: as far as the
-  directories agree, then a list of them, which further Tabs (and
-  Shift-Tab) pick from.
-- C-w and Alt-Backspace in the board's project prompts rub out the last
-  directory, as in fish.
+- Tab completes directories in the board's project prompts (a new
+  task's project, and `m`); more Tabs and Shift-Tab pick from the list.
+- C-w and Alt-Backspace in those prompts rub out the last directory.
 
 ### Changed
 
-- `e` on the board edits a task without a cairn in the new-task form,
-  its title and context filled in, where it opened `$EDITOR`. C-g in
-  the form still goes to the editor.
+- `e` on a task without a cairn edits it in the new-task form, not
+  `$EDITOR`; C-g in the form still opens the editor.
 
 ## 1.0.2 - 2026-10-12
 
