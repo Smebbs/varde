@@ -141,7 +141,8 @@ fn a_new_task_can_be_written_in_the_editor() {
     let editor = e.path("editor");
     std::fs::write(
         &editor,
-        "#!/bin/sh\nsed -i 's/^Cache$/Cache by locale/' \"$1\"\nprintf 'Start in cache.rs\\nthen the tests\\n' >> \"$1\"\n",
+        // Not `sed -i`, which BSD sed (macOS) takes differently.
+        "#!/bin/sh\nsed 's/^Cache$/Cache by locale/' \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"\nprintf 'Start in cache.rs\\nthen the tests\\n' >> \"$1\"\n",
     )
     .unwrap();
     std::fs::set_permissions(&editor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
