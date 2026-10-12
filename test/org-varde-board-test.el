@@ -353,6 +353,67 @@ does not move the task back."
     (org-varde-board-toggle-group)
     (should-not (string-match-p "Forge" (buffer-string)))))
 
+(ert-deftest org-varde-board-keeps-to-the-project-it-was-opened-from ()
+  (let ((data (org-varde-board-test--data
+               '(("needs_you" "Needs you" ("T0000000000000000000AAA111" "Elsewhere" "waiting" nil))
+                 ("open" "Open" ("T0000000000000000000BBB222" "Here" "open" nil))))))
+    (plist-put (car (plist-get (car (plist-get data :groups)) :rows)) :project "/home/u/other")
+    (org-varde-board-test--with data
+      (let ((header (lambda () (substring-no-properties header-line-format))))
+        (setq org-varde-board--project "/home/u/proj" org-varde-board--scoped t)
+        (org-varde-board--render)
+        (should (string-match-p "^Needs you  0$" (buffer-string)))
+        (should-not (string-match-p "Elsewhere" (buffer-string)))
+        (should (string-prefix-p " proj · 1 in other projects, 1 needs you (. all)   " (funcall header)))
+        (should (eq (key-binding ".") #'org-varde-board-toggle-project))
+        (org-varde-board-toggle-project)
+        (should (string-match-p "Elsewhere" (buffer-string)))
+        (should (string-prefix-p " every project (. only proj)" (funcall header)))
+        ;; A project with no task on the board yet keeps to nothing.
+        (setq org-varde-board--project "/home/u/new" org-varde-board--scoped t)
+        (org-varde-board--render)
+        (should (string-match-p "Elsewhere" (buffer-string)))
+        (should (string-prefix-p " every project (none in new yet)" (funcall header)))
+        (should-error (org-varde-board-toggle-project) :type 'user-error)
+        (setq org-varde-board--project nil)
+        (org-varde-board--render)
+        (should-error (org-varde-board-toggle-project) :type 'user-error)))))
+
+(ert-deftest org-varde-board-opens-on-the-project-of-the-buffer-it-is-called-from ()
+  (org-varde-test-with-varde
+    (let ((repo (expand-file-name "repo" org-varde-test-dir)))
+      (make-directory (expand-file-name ".git" repo) t)
+      (make-directory (expand-file-name "src" repo))
+      (org-varde-test-reply "show" (format "{\"v\":1,\"project\":%S,\"version\":0}" repo))
+      (cl-letf (((symbol-function 'org-varde-reconcile) #'ignore)
+                ((symbol-function 'org-varde-refresh) #'ignore))
+        (with-temp-buffer
+          (setq default-directory (expand-file-name "src/" repo))
+          (org-varde-board))
+        (should (member (format "show --project %s/ --json" (expand-file-name "src" repo))
+                        (org-varde-test-calls)))
+        (with-current-buffer org-varde-board-buffer
+          (should (equal org-varde-board--project repo))
+          (should org-varde-board--scoped)
+          ;; Called again from the board, it keeps what it keeps to.
+          (setq org-varde-board--scoped nil)
+          (org-varde-board)
+          (should-not org-varde-board--scoped))
+        (let ((org-varde-board-scope 'all))
+          (with-temp-buffer
+            (setq default-directory (expand-file-name "src/" repo))
+            (org-varde-board)))
+        (with-current-buffer org-varde-board-buffer
+          (should (equal org-varde-board--project repo))
+          (should-not org-varde-board--scoped))
+        ;; Outside a repository there is no project to keep to.
+        (org-varde-test-reply "show" (format "{\"v\":1,\"project\":%S,\"version\":0}" org-varde-test-dir))
+        (with-temp-buffer
+          (setq default-directory (file-name-as-directory org-varde-test-dir))
+          (org-varde-board))
+        (with-current-buffer org-varde-board-buffer
+          (should-not org-varde-board--project))))))
+
 (ert-deftest org-varde-board-renders-without-data ()
   (org-varde-board-test--with nil
     (should (string-match-p "Waiting for varde" (buffer-string)))))

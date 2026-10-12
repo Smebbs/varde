@@ -50,6 +50,9 @@ enum Cmd {
         /// collapsed groups (Parked).
         #[arg(long)]
         all: bool,
+        /// Only the tasks of the project DIR (default: here) is in.
+        #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = ".")]
+        project: Option<PathBuf>,
     },
     /// Create a task.
     New {
@@ -493,7 +496,7 @@ fn main() -> ExitCode {
 fn dispatch(paths: &Paths, cmd: Option<Cmd>) -> Result<i32> {
     let Some(cmd) = cmd else { return tui::run(paths).map(|_| 0) };
     let result = match cmd {
-        Cmd::List { json, all } => list::run(paths, json, all),
+        Cmd::List { json, all, project } => list::run(paths, json, all, project.as_deref()),
         Cmd::Doctor { json } => doctor::run(paths, json),
         Cmd::Eval { all, since, json } => eval::run(paths, all, since.as_deref(), json),
         Cmd::New { title, project, body, external, from, json } => {

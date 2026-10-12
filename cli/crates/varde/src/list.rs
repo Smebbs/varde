@@ -1,26 +1,44 @@
 //! `varde list`: the board, as a table or as JSON for clients.
 
+use std::path::Path;
 use std::time::Duration;
 
 use anyhow::Result;
 use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
-use varde_core::board::{self, Board};
+use varde_core::board::{self, Board, Elsewhere};
 
 use crate::{now_ms, Paths};
 
-pub fn run(paths: &Paths, json: bool, all: bool) -> Result<()> {
+pub fn run(paths: &Paths, json: bool, all: bool, project: Option<&Path>) -> Result<()> {
     let store = paths.open(Duration::from_secs(2))?;
     let now = now_ms();
-    let board = board::build(&store, now, local_midnight_ms(), all, &crate::process::alive)?;
+    let mut board = board::build(&store, now, local_midnight_ms(), all, &crate::process::alive)?;
     if !all {
         crate::sweep::kick(paths, &board, now)?;
     }
+    let gone = match project {
+        Some(dir) => Some(board.only(&crate::start::project_of(&store, dir)?.display().to_string())),
+        None => None,
+    };
     if json {
         println!("{}", serde_json::to_string(&board)?);
     } else {
         print!("{}", table(&board, now, all, columns()));
+        if let Some(gone) = gone.filter(|g| g.tasks > 0) {
+            println!("{}", elsewhere(gone));
+        }
     }
     Ok(())
+}
+
+/// What a board kept to one project leaves out, said in a line.
+pub fn elsewhere(gone: Elsewhere) -> String {
+    let n = gone.tasks;
+    let mut out = format!("{n} task{} in other projects", if n == 1 { "" } else { "s" });
+    if gone.need_you > 0 {
+        out.push_str(&format!(", {} need{} you", gone.need_you, if gone.need_you == 1 { "s" } else { "" }));
+    }
+    out
 }
 
 pub fn local_midnight_ms() -> i64 {

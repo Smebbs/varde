@@ -4,6 +4,19 @@ Notable changes to varde and org-varde. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions
 follow [Semantic Versioning](https://semver.org).
 
+## Unreleased
+
+### Added
+
+- The board keeps to the project it is opened in: the TUI (in tmux or
+  not) from its directory, org-varde from the buffer's. Its title or
+  header line says how many tasks are in other projects, and how many
+  of those need you. `.` switches to every project and back. A project
+  with no task on the board yet, or a directory outside a repository,
+  shows every project. `[board] scope = "all"` in the config, or
+  `org-varde-board-scope`, opens every project instead.
+- `varde list --project [DIR]` lists only that project's tasks.
+
 ## 1.0.3 - 2026-10-12
 
 ### Added

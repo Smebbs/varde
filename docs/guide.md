@@ -61,6 +61,7 @@ varde show --project         # what holds across this project's tasks
 varde edit --project         # correct it
 varde eval                   # what memory was worth here (--all, --since 30d, --json)
 varde list                   # the board as text (--all: old done and dropped tasks too)
+varde list --project         # only this project's tasks (or --project DIR)
 ```
 
 Refer to a task by the six characters the board shows; its first four
@@ -141,6 +142,13 @@ work has not landed) and Parked. A `●` marks a task that needs you and
 whose latest turn nobody has looked at yet. A deferred task's row ends
 with `← <short>` of the task it came from. `?` lists every key.
 
+Opened inside a repository, the board keeps to that project's tasks,
+once it has one on the board. Its title names the project and says how
+many tasks are in other projects, and how many of those need you. `.`
+switches between this project and every project. Opened outside a
+repository, it shows every project. `[board] scope = "all"` in the
+config opens it on every project instead.
+
 | Key | Does |
 |---|---|
 | `j`/`k` | Move. `G` or End goes to the last row, Home to the first. |
@@ -159,6 +167,7 @@ with `← <short>` of the task it came from. `?` lists every key.
 | `=` | The task's diff, new files included. For a task without a worktree, what is uncommitted in the checkout it shares. |
 | `/` | Recall in this project. In its pane, `j`/`k` pick a hit, RET goes to its task, `s` starts it (reopening it if closed), and Tab switches between this project and every project. |
 | Tab | Open or close the Parked group. |
+| `.` | Keep to the project the board was opened in, or show every project. |
 | `g` / C-l / `q` | Refresh / redraw / quit. |
 
 Starting a done or parked task asks first, since it reopens it. Pasted
@@ -284,6 +293,9 @@ holdout = 0.0                     # the share of fresh sessions given no memory 
 default = "ask"                   # ask, always or never: whether a first run gets a worktree
 dir = ".worktrees"                # in the repo, or e.g. "~/worktrees/{repo}"
 branch_prefix = "varde/"
+
+[board]
+scope = "project"                 # project or all: whether the board opens kept to the project you are in
 ```
 
 A file with a key varde does not know, or a value it cannot use, is

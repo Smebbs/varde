@@ -47,6 +47,57 @@
 (defconst org-varde-board-buffer "*varde*"
   "The board's buffer name.")
 
+(defcustom org-varde-board-scope 'project
+  "Whether the board opens kept to the project you open it from.
+`project' keeps it to the repository of the buffer `org-varde-board' is
+called from, once that project has a task on the board; `all' shows
+every project.  \\<org-varde-board-mode-map>\\[org-varde-board-toggle-project] on the board switches."
+  :type '(choice (const :tag "The project it is opened from" project)
+                 (const :tag "Every project" all))
+  :group 'org-varde)
+
+(defvar-local org-varde-board--project nil
+  "The project the board was opened from; nil outside a repository.")
+
+(defvar-local org-varde-board--scoped nil
+  "Whether the board keeps to `org-varde-board--project'.")
+
+(defun org-varde-board--project-of (dir)
+  "The project DIR is in, as varde records it; nil outside a repository."
+  (unless (file-remote-p dir)
+    (when-let* ((project (ignore-errors
+                           (plist-get (org-varde--varde-json "show" "--project" (expand-file-name dir) "--json")
+                                      :project))))
+      (and (file-exists-p (expand-file-name ".git" project)) project))))
+
+(defun org-varde-board--has (project)
+  "Whether PROJECT has a task on the board."
+  (seq-some (lambda (group)
+              (seq-some (lambda (row) (equal (plist-get row :project) project))
+                        (plist-get group :rows)))
+            (plist-get org-varde-board-data :groups)))
+
+(defun org-varde-board--scope-line (kept hidden need-you)
+  "What the board keeps to, for the header line.
+KEPT is whether it keeps to its project, leaving out HIDDEN tasks, of
+which NEED-YOU need you."
+  (let* ((project org-varde-board--project)
+         (name (and project (propertize (file-name-nondirectory (directory-file-name project))
+                                        'face 'bold)))
+         (key (propertize "." 'face 'help-key-binding)))
+    (cond
+     ((not project) "")
+     ((and kept (> hidden 0))
+      (concat name " · " (format "%d in other projects" hidden)
+              (if (> need-you 0)
+                  (propertize (format ", %d need%s you" need-you (if (= need-you 1) "s" ""))
+                              'face 'org-varde-board-waiting)
+                "")
+              " (" key " all)"))
+     (kept name)
+     ((not org-varde-board--scoped) (concat "every project (" key " only " name ")"))
+     (t (concat "every project (none in " name " yet)")))))
+
 (defun org-varde-board--age (ms)
   "MS milliseconds as a short age."
   (let ((s (/ (max 0 ms) 1000)))
@@ -140,6 +191,11 @@ Every window showing it stays on the task it was on."
                               (get-buffer-window-list buffer nil t)))
              (here (funcall spot (point)))
              (now (truncate (* 1000 (float-time))))
+             (project (and org-varde-board--scoped org-varde-board--project))
+             ;; A project with no task on the board yet keeps to nothing.
+             (kept (and project (org-varde-board--has project)))
+             (hidden 0)
+             (need-you 0)
              (inhibit-read-only t))
         (erase-buffer)
         (cond
@@ -151,7 +207,10 @@ Every window showing it stays on the task it was on."
           (insert (propertize "Waiting for varde…\n" 'face 'org-varde-board-empty)))
          (t
           (dolist (group (plist-get org-varde-board-data :groups))
-            (let* ((rows (plist-get group :rows))
+            (let* ((all (plist-get group :rows))
+                   (rows (if kept
+                             (seq-filter (lambda (row) (equal (plist-get row :project) project)) all)
+                           all))
                    (key (plist-get group :key))
                    (closed (xor (plist-get group :collapsed)
                                 (member key org-varde-board--toggled))))
@@ -162,13 +221,31 @@ Every window showing it stays on the task it was on."
                                   'face 'org-varde-board-empty)
                       "\n")
               (put-text-property (line-beginning-position 0) (point) 'org-varde-group key)
+              (setq hidden (+ hidden (- (length all) (length rows))))
+              (when (equal key "needs_you")
+                (setq need-you (- (length all) (length rows))))
               (unless closed
                 (dolist (row rows) (org-varde-board--row row now key)))))))
+        (setq header-line-format
+              (let ((scope (org-varde-board--scope-line kept hidden need-you)))
+                (concat " " (if (string-empty-p scope) "" (concat scope "   ")) (org-varde-board--header))))
         (org-varde-board--goto-task (car here) (cdr here))
         (dolist (w windows)
           (save-excursion
             (org-varde-board--goto-task (cadr w) (cddr w))
             (set-window-point (car w) (point))))))))
+
+(defun org-varde-board-toggle-project ()
+  "Keep the board to the project it was opened from, or show every one."
+  (interactive)
+  (let* ((project (or org-varde-board--project
+                      (user-error "The board was opened outside a project, so it shows every one")))
+         (name (file-name-nondirectory (directory-file-name project))))
+    (unless (org-varde-board--has project)
+      (user-error "No tasks in %s yet, so the board shows every project" name))
+    (setq org-varde-board--scoped (not org-varde-board--scoped))
+    (org-varde-board--render)
+    (message (if org-varde-board--scoped "Only %s" "Every project") name)))
 
 (defun org-varde-board--row-at-point ()
   "The board row at point."
@@ -441,7 +518,8 @@ task in the region."
     ("s" "show (e there edits the cairn)" org-varde-show)
     ("S" "its project cairn" org-varde-show-project)
     ("E" "edit the project cairn" org-varde-edit-project-cairn)
-    ("/" "recall" org-varde-recall)]])
+    ("/" "recall" org-varde-recall)
+    ("." "this project, or every one" org-varde-board-toggle-project)]])
 
 (defvar-keymap org-varde-board-mode-map
   :parent special-mode-map
@@ -462,6 +540,7 @@ task in the region."
   "N" #'org-varde-board-new
   "m" #'org-varde-board-move
   "TAB" #'org-varde-board-toggle-group
+  "." #'org-varde-board-toggle-project
   "g" #'org-varde-refresh
   "C-n" #'org-varde-board-next-task
   "C-p" #'org-varde-board-previous-task
@@ -505,12 +584,19 @@ What is used most, and where the rest is."
 
 ;;;###autoload
 (defun org-varde-board ()
-  "Show the varde board."
+  "Show the varde board.
+It keeps to the project of the buffer it is called from, as
+`org-varde-board-scope' says."
   (interactive)
   (unless org-varde-mode (org-varde-mode 1))
-  (with-current-buffer (get-buffer-create org-varde-board-buffer)
-    (unless (derived-mode-p 'org-varde-board-mode) (org-varde-board-mode))
-    (org-varde-board--render))
+  (let* ((opened (not (equal (buffer-name) org-varde-board-buffer)))
+         (project (and opened (org-varde-board--project-of default-directory))))
+    (with-current-buffer (get-buffer-create org-varde-board-buffer)
+      (unless (derived-mode-p 'org-varde-board-mode) (org-varde-board-mode))
+      (when opened
+        (setq org-varde-board--project project
+              org-varde-board--scoped (eq org-varde-board-scope 'project)))
+      (org-varde-board--render)))
   (pop-to-buffer-same-window org-varde-board-buffer)
   ;; Headings and tasks changed while Emacs was away come into step now.
   (org-varde-reconcile)

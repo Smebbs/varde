@@ -245,6 +245,35 @@ pub fn build(
     Ok(Board { v: 2, groups })
 }
 
+/// What a board kept to one project leaves out.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Elsewhere {
+    pub tasks: usize,
+    /// Of those, the ones in Needs you.
+    pub need_you: usize,
+}
+
+impl Board {
+    /// Whether any row is in `project`.
+    pub fn has(&self, project: &str) -> bool {
+        self.groups.iter().flat_map(|g| &g.rows).any(|r| r.project.as_deref() == Some(project))
+    }
+
+    /// Keeps only the rows of `project`, and says what went.
+    pub fn only(&mut self, project: &str) -> Elsewhere {
+        let mut gone = Elsewhere::default();
+        for g in &mut self.groups {
+            let before = g.rows.len();
+            g.rows.retain(|r| r.project.as_deref() == Some(project));
+            gone.tasks += before - g.rows.len();
+            if g.key == "needs_you" {
+                gone.need_you += before - g.rows.len();
+            }
+        }
+        gone
+    }
+}
+
 /// Lower is more urgent: needing you, then working, then anything else.
 fn urgency(status: Option<Status>) -> u8 {
     match status {
@@ -594,5 +623,18 @@ mod tests {
         assert!(row("started").git.is_some());
         assert!(!row("not started").tracked);
         assert!(row("not started").git.is_none());
+    }
+
+    #[test]
+    fn a_board_kept_to_one_project_counts_what_it_leaves_out() {
+        let (_d, mut s) = store();
+        crate::task::create(&s, "here", None, Some("/a"), None, 1).unwrap();
+        crate::task::create(&s, "nowhere", None, None, None, 2).unwrap();
+        ingest(&mut s, "b", Kind::Prompt, Some("waiting"), 3);
+        ingest(&mut s, "b", Kind::TurnEnd { agents: 0, shells: 0 }, None, 4);
+        let mut b = build(&s, 5, 0, false, &|_, _| true).unwrap();
+        assert!(b.has("/a") && b.has("/tmp/p") && !b.has("/c"));
+        assert_eq!(b.only("/a"), Elsewhere { tasks: 2, need_you: 1 });
+        assert_eq!(keys(&b)[2], ("open", vec!["here"]));
     }
 }

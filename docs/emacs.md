@@ -152,6 +152,13 @@ The menu also has these keys, which work on the board directly too:
   VARDE_PROJECT, its own or inherited, gets the new one on itself, so
   its next start does not move the task back.
 
+The board keeps to the project of the buffer you open it from, once
+that project has a task on the board. The header line names it and
+says how many tasks are in other projects, and how many of those need
+you. `.` switches between this project and every project. Opened from
+a buffer outside a repository, it shows every project. Set
+`org-varde-board-scope` to `all` to open it on every project instead.
+
 To move, use `C-n`/`C-p` between tasks and `M-n`/`M-p` between groups. TAB
 folds a group, `g` refreshes and `q` quits. `d`, `P` and `a` act on
 every task in the region, so a full Inbox is cleared in one go. `RET`

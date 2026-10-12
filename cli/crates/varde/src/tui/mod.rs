@@ -132,6 +132,14 @@ struct App<'a> {
     scroll: u16,
     /// Whether collapsed groups (Parked) are opened.
     expanded: bool,
+    /// The project the board was opened in; `None` outside a repository.
+    here: Option<String>,
+    /// Whether the board keeps to `here`, when it has tasks there.
+    scoped: bool,
+    /// Whether `here` has tasks on the board.
+    here_has: bool,
+    /// What keeping to `here` left out, while it does.
+    elsewhere: Option<board::Elsewhere>,
     /// Recall results, shown in the detail pane until dismissed.
     found: Option<Found>,
     message: String,
@@ -156,6 +164,8 @@ pub fn run(paths: &Paths) -> Result<()> {
         anyhow::bail!("the board needs a terminal; varde list prints it");
     }
     let mut app = App::new(paths, tmux::here());
+    app.here = paths.open(BUSY).ok().and_then(|s| here_project(&s).ok().flatten());
+    app.scoped = crate::config::get().board.scope == crate::config::Scope::Project;
     app.refresh()?;
     // Read before the board takes the screen, so its warning is not
     // written over it.
@@ -196,6 +206,10 @@ impl<'a> App<'a> {
             project_detail: false,
             scroll: 0,
             expanded: false,
+            here: None,
+            scoped: true,
+            here_has: false,
+            elsewhere: None,
             found: None,
             message: String::new(),
             menu: None,
@@ -281,6 +295,12 @@ impl<'a> App<'a> {
         let mut board = board::build(&store, now, crate::list::local_midnight_ms(), false, &process::alive)?;
         let kicked = crate::sweep::kick(self.paths, &board, now);
         self.watch_tmux(&store, &mut board, now);
+        // Kept to the project only now: the sweep and tmux see every task.
+        self.here_has = self.here.as_ref().is_some_and(|p| board.has(p));
+        self.elsewhere = match &self.here {
+            Some(p) if self.scoped && self.here_has => Some(board.only(p)),
+            _ => None,
+        };
         let Board { groups, .. } = board;
         self.items.clear();
         for g in groups {
@@ -679,8 +699,25 @@ impl<'a> App<'a> {
                 self.expanded = !self.expanded;
                 self.stale = true;
             }
+            KeyCode::Char('.') => self.toggle_scope(),
             _ => {}
         }
+    }
+
+    /// Keep to the project the board was opened in, or show every one.
+    fn toggle_scope(&mut self) {
+        let Some(here) = &self.here else {
+            self.message = "the board was opened outside a project, so it shows every one".into();
+            return;
+        };
+        let name = crate::list::project_name(Some(here)).to_string();
+        if !self.here_has {
+            self.message = format!("no tasks in {name} yet, so the board shows every project");
+            return;
+        }
+        self.scoped = !self.scoped;
+        self.stale = true;
+        self.message = if self.scoped { format!("only {name}") } else { "every project".into() };
     }
 
     /// Open the detail pane on the task, or on its project cairn; the same
@@ -1057,6 +1094,35 @@ mod tests {
         let mut app = App::new(paths, None);
         app.refresh().unwrap();
         app
+    }
+
+    #[test]
+    fn the_board_keeps_to_its_project_until_dot_shows_every_one() {
+        let (_dir, paths) = temp_paths();
+        let store = paths.open(BUSY).unwrap();
+        task::create(&store, "Here", None, Some("/src/app"), None, 1).unwrap();
+        task::create(&store, "There", None, Some("/src/lib"), None, 2).unwrap();
+        let mut app = App::new(&paths, None);
+        app.here = Some("/src/app".into());
+        app.refresh().unwrap();
+        let s = screen(&mut app, 80, 12);
+        assert!(s.contains("varde · app · 1 task in other projects  . all") && !s.contains("There"), "{s}");
+        key(&mut app, KeyCode::Char('.'));
+        assert_eq!(app.message, "every project");
+        let s = screen(&mut app, 80, 12);
+        assert!(s.contains("every project  . only app") && s.contains("There"), "{s}");
+        key(&mut app, KeyCode::Char('.'));
+        assert!(!screen(&mut app, 80, 12).contains("There"));
+
+        // A project with no tasks on the board keeps to nothing.
+        app.here = Some("/src/new".into());
+        app.refresh().unwrap();
+        assert!(screen(&mut app, 80, 12).contains("every project (none in new yet)"));
+        key(&mut app, KeyCode::Char('.'));
+        assert_eq!(app.message, "no tasks in new yet, so the board shows every project");
+        app.here = None;
+        key(&mut app, KeyCode::Char('.'));
+        assert!(app.message.contains("outside a project") && screen(&mut app, 80, 12).contains("There"));
     }
 
     #[test]

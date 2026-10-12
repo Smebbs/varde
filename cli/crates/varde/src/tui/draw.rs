@@ -14,7 +14,7 @@ use varde_core::title::clean;
 
 use super::draft::draw_draft;
 use super::{busy, App, Close, Found, Item, Mode, BUSY};
-use crate::list::{age, clip, pad, project_name};
+use crate::list::{age, clip, elsewhere, pad, project_name};
 use crate::{now_ms, process};
 
 impl App<'_> {
@@ -41,7 +41,7 @@ impl App<'_> {
             })
             .collect();
         let list = List::new(items)
-            .block(Block::default().title(" varde ").borders(Borders::TOP))
+            .block(Block::default().title(self.scope_title()).borders(Borders::TOP))
             .highlight_style(Style::default().add_modifier(Modifier::REVERSED));
         // ratatui scrolls only as far as the selection needs and never
         // back, so the list is never left scrolled past what fills it, and
@@ -97,6 +97,19 @@ impl App<'_> {
         }
 
         f.render_widget(Paragraph::new(line).wrap(Wrap { trim: false }), bottom);
+    }
+
+    /// The board's title: which project it keeps to, what that leaves
+    /// out, and what `.` does.
+    fn scope_title(&self) -> String {
+        let Some(here) = &self.here else { return " varde ".into() };
+        let name = clean(project_name(Some(here)));
+        match self.elsewhere {
+            Some(gone) if gone.tasks > 0 => format!(" varde · {name} · {}  . all ", elsewhere(gone)),
+            Some(_) => format!(" varde · {name} "),
+            None if self.here_has => format!(" varde · every project  . only {name} "),
+            None => format!(" varde · every project (none in {name} yet) "),
+        }
     }
 
     /// What follows a directory prompt: the directories Tab could
@@ -239,6 +252,7 @@ const HELP: [(&str, &[(&str, &str)]); 4] = [
         &[
             ("j/k", "move; G/End last, Home first"),
             ("space", "mark; a, d and p act on all"),
+            (".", "this project, or every one"),
             ("g", "refresh"),
             ("C-l", "redraw the screen"),
             ("Esc", "unmark, close the pane"),

@@ -22,6 +22,23 @@ pub struct Config {
     pub agents: BTreeMap<String, Agent>,
     pub memory: Memory,
     pub worktree: Worktree,
+    pub board: BoardConfig,
+}
+
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct BoardConfig {
+    /// `project` (the default) or `all`: whether the board opens kept to
+    /// the project it is opened in, or showing every project.
+    pub scope: Scope,
+}
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Scope {
+    #[default]
+    Project,
+    All,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -246,6 +263,7 @@ mod tests {
     fn every_key_is_optional_and_unknown_ones_are_refused() {
         let c: Config = toml::from_str("").unwrap();
         assert!(c.memory.enabled && c.agent.is_none() && c.branch_prefix() == "varde/");
+        assert_eq!(c.board.scope, Scope::Project);
         let c: Config = toml::from_str(
             r#"
             agent = "pi"
@@ -257,6 +275,8 @@ mod tests {
             default = "always"
             dir = "../{repo}.worktrees"
             branch_prefix = "me/"
+            [board]
+            scope = "all"
             "#,
         )
         .unwrap();
@@ -265,6 +285,7 @@ mod tests {
         assert_eq!(c.launch("claude", vec!["claude".into(), "-n".into()]), ["claude-wrapper", "--x", "-n"]);
         assert_eq!(c.launch("pi", vec!["pi".into()]), ["pi"]);
         assert_eq!(c.worktree.default, Some(Policy::Always));
+        assert_eq!(c.board.scope, Scope::All);
         assert_eq!(c.worktree_dir(Path::new("/src/app")), Path::new("/src/app.worktrees"));
         assert!(toml::from_str::<Config>("[worktree]\ndefualt = \"always\"").is_err());
     }

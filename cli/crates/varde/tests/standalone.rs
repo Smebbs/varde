@@ -113,6 +113,49 @@ fn sigterm_ends_the_board_with_the_terminal_given_back() {
 }
 
 #[test]
+fn list_keeps_to_a_project_when_asked() {
+    let e = env();
+    std::fs::create_dir(e.path("other")).unwrap();
+    e.ok(&["new", "Here", "--project", &e.path("work").to_string_lossy()]);
+    e.ok(&["new", "There", "--project", &e.path("other").to_string_lossy()]);
+    let all = e.ok(&["list"]);
+    assert!(all.contains("Here") && all.contains("There"), "{all}");
+    let here = e.ok(&["list", "--project", &e.path("work").to_string_lossy()]);
+    assert!(here.contains("Here") && !here.contains("There"), "{here}");
+    assert!(here.ends_with("1 task in other projects"), "{here}");
+    let mut c = e.cmd(&["list", "--json", "--project"]);
+    let board: Value =
+        serde_json::from_slice(&c.current_dir(e.path("other")).output().unwrap().stdout).unwrap();
+    let titles: Vec<&str> = board["groups"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .flat_map(|g| g["rows"].as_array().unwrap())
+        .map(|r| r["title"].as_str().unwrap())
+        .collect();
+    assert_eq!(titles, ["There"]);
+}
+
+#[test]
+fn the_board_opened_in_a_repository_keeps_to_it_until_dot() {
+    let e = env();
+    let Some(t) = Tmux::start(e.dir.path()) else { return eprintln!("no tmux; skipped") };
+    let pane = t.tmux(&["display", "-p", "-t", "t", "#{pane_id}"]).unwrap();
+    std::fs::create_dir(e.repo()).unwrap();
+    git(&e.repo(), &["init", "-q", "-b", "main"]);
+    e.ok(&["new", "In the repo", "--project", &e.repo().to_string_lossy()]);
+    prepared(&e);
+    let repo = e.repo().display().to_string();
+    t.type_in(&pane, &format!("cd '{repo}' && {}", e.typed(env!("CARGO_BIN_EXE_varde"))));
+    let shown = || t.tmux(&["capture-pane", "-p", "-t", &pane]).unwrap();
+    wait("the board", || shown().contains("In the repo"));
+    assert!(shown().contains("varde · repo · 1 task in other projects") && !shown().contains("Try it"));
+    t.tmux(&["send-keys", "-t", &pane, "."]).unwrap();
+    wait("every project", || shown().contains("Try it"));
+    t.tmux(&["send-keys", "-t", &pane, "q"]).unwrap();
+}
+
+#[test]
 fn an_edit_that_changes_nothing_says_so_on_the_board() {
     let e = env();
     let Some(t) = Tmux::start(e.dir.path()) else { return eprintln!("no tmux; skipped") };

@@ -39,7 +39,7 @@ the contract. What org-varde does beyond it is Emacs's own business.
 
 | Command | Returns |
 |---|---|
-| `varde list --json [--all]` | The board: groups, already ordered and labelled. `--all` adds old done tasks and a Dropped group. |
+| `varde list --json [--all] [--project [DIR]]` | The board: groups, already ordered and labelled. `--all` adds old done tasks and a Dropped group. `--project` keeps only the rows of the project DIR (default: here) is in. |
 | `varde new --json [--project DIR] [--body -] [--external REF] -- TITLE` | `{"id", "short"}` of the new task. `--body -` reads it from stdin. |
 | `varde set TASK [--title=T] [--body -] [--project DIR]` | Refreshes the title or body from where the client keeps them. `--project` moves the task to the project DIR is in (its repository root, as `new` takes it) and prints `moved <short> to <project>`; already there, it does nothing and prints nothing. A move is refused (exit 1, nothing changed, the title and body included) while the task has an active worktree or a live session, which belong to the old checkout; show the message. Past runs keep their directories and the cairn stays with the task; the next start is a fresh conversation in the new project, given that project's cairn. |
 | `varde accept TASK…` | Moves Inbox tasks into Open. |
