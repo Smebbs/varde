@@ -971,11 +971,14 @@ fn complete_dir(line: &mut String) -> Vec<String> {
     Vec::new()
 }
 
-/// A key typed into a one-line prompt: Backspace, C-u clearing it, or a
-/// character.
+/// A key typed into a one-line prompt: Backspace, C-w or Alt-Backspace
+/// rubbing out the last directory, C-u clearing it, or a character.
 fn edit_line(line: &mut String, key: KeyEvent) {
     let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+    let alt = key.modifiers.contains(KeyModifiers::ALT);
     match key.code {
+        KeyCode::Char('w') if ctrl => rub_dir(line),
+        KeyCode::Backspace if alt || ctrl => rub_dir(line),
         KeyCode::Backspace => {
             line.pop();
         }
@@ -983,6 +986,13 @@ fn edit_line(line: &mut String, key: KeyEvent) {
         KeyCode::Char(c) if !ctrl => line.push(c),
         _ => {}
     }
+}
+
+/// Rub out the last directory of a path, and the slash after it, as fish
+/// does: `~/projects/varde/` and `~/projects/va` both become `~/projects/`.
+fn rub_dir(line: &mut String) {
+    let kept = line.trim_end_matches('/').rfind(['/', ' ']).map_or(0, |i| i + 1);
+    line.truncate(kept);
 }
 
 /// Closing from the board: never merging or removing.
@@ -1297,6 +1307,25 @@ mod tests {
         let mut nothing = format!("{root}/nowhere/x");
         assert!(complete_dir(&mut nothing).is_empty());
         assert_eq!(nothing, format!("{root}/nowhere/x"));
+    }
+
+    #[test]
+    fn ctrl_w_rubs_out_a_directory_and_ctrl_u_the_line() {
+        let mut line = "~/projects/varde/".to_string();
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        edit_line(&mut line, ctrl('w'));
+        assert_eq!(line, "~/projects/");
+        line.push_str("va");
+        edit_line(&mut line, KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
+        assert_eq!(line, "~/projects/");
+        edit_line(&mut line, ctrl('w'));
+        edit_line(&mut line, ctrl('w'));
+        assert_eq!(line, "");
+        edit_line(&mut line, ctrl('w'));
+        assert_eq!(line, "", "nothing left to rub out");
+        line.push_str("/srv/p");
+        edit_line(&mut line, ctrl('u'));
+        assert_eq!(line, "");
     }
 
     #[test]
