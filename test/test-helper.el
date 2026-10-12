@@ -82,7 +82,11 @@ from `<subcommand>.once-err', and a one-time answer from `<subcommand>.once-out'
                                      process-environment)))
      (with-temp-file fake (insert org-varde-test--fake-varde))
      (set-file-modes fake #o755)
-     (unwind-protect (progn ,@body)
+     (unwind-protect
+         ;; Under kqueue (macOS) a watch on the store the fake varde
+         ;; writes into stops batch Emacs running process sentinels.
+         (cl-letf (((symbol-function 'file-notify-add-watch) #'ignore))
+           ,@body)
        ;; Nothing the test started may outlive it.
        (org-varde-test-wait)
        ;; `org-varde-start' turns the mode on, watching this test's store:

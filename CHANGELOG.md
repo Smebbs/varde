@@ -4,6 +4,13 @@ Notable changes to varde and org-varde. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions
 follow [Semantic Versioning](https://semver.org).
 
+## Unreleased
+
+### Fixed
+
+- org-varde starts a task without blocking Emacs, which waited while
+  varde made the worktree (minutes, in a repository with submodules).
+
 ## 1.0.1 - 2026-10-12
 
 ### Added

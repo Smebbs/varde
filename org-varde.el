@@ -783,91 +783,145 @@ TITLE names a workspace made for it."
 
 ;;; --- Starting ----------------------------------------------------------------
 
-(defun org-varde--plan (task want context &optional title)
-  "Ask varde to start TASK (WANT is nil, \"--fresh\" or \"--fork\").
+(defun org-varde--plan (task want context title then fail)
+  "Ask varde to start TASK, without waiting.
+WANT is nil, \"--fresh\" or \"--fork\".
 CONTEXT, when non-nil, is org context for a fresh session.  TITLE names
-the task in a question."
+the task in a question.  THEN and FAIL are as for
+`org-varde--plan-answering'."
   (let* ((file (and context (make-temp-file "varde-context-" nil ".md")))
          (args (append (list "start" task "--json")
                        (and want (list want))
                        (and file (list "--context-file" file))
                        (pcase org-varde-use-worktree
                          ('always '("--worktree" "always"))
-                         ('never '("--worktree" "never"))))))
+                         ('never '("--worktree" "never")))))
+         (cleanup (lambda () (when file (delete-file file)))))
     ;; `make-temp-file' given the text announces "Wrote ..." on every start.
     (when file (write-region context nil file nil 'silent))
-    (unwind-protect (org-varde--plan-answering args title)
-      (when file (delete-file file)))))
+    (org-varde--plan-answering args title
+                               (lambda (plan) (funcall cleanup) (funcall then plan))
+                               (lambda (why) (funcall cleanup) (funcall fail why)))))
 
 (defvar org-varde--answers nil
   "Answers given while the board starts the tasks in a region, as a plist.
 The worktree answer holds for every task in it.  The project answer is
 only the next one's default: each task may belong to another project.")
 
-(defun org-varde--plan-answering (args &optional title)
-  "Run varde with ARGS, answering what it asks about a task's first run.
-varde asks with an `ask' plan; each question is asked at most once.
-TITLE names the task in a question."
-  (let ((plan (apply #'org-varde--varde-json args)))
-    (pcase (and (equal (plist-get plan :action) "ask") (plist-get plan :ask))
-      ((and "project" (guard (not (member "--project" args))))
-       (let* ((choices (append (plist-get plan :choices) nil))
-              (default (or (plist-get org-varde--answers :project) (car choices)))
-              (project (expand-file-name
-                        (read-directory-name (format "Project directory for %s: " (or title "this task"))
-                                             default default))))
-         (when org-varde--background
-           (setq org-varde--answers (plist-put org-varde--answers :project project)))
-         (org-varde--plan-answering (append args (list "--project" project)) title)))
-      ((and "worktree" (guard (not (member "--worktree" args))))
-       (let ((worktree (or (plist-get org-varde--answers :worktree)
-                           (if (y-or-n-p (if org-varde--background
-                                             "Work in separate git worktrees, for every task in the region? "
-                                           "Work in a separate git worktree? "))
-                               "always" "never"))))
-         (when org-varde--background
-           (setq org-varde--answers (plist-put org-varde--answers :worktree worktree)))
-         (org-varde--plan-answering (append args (list "--worktree" worktree)) title)))
-      ('nil plan)
-      (other (error "Varde asked again about the %s" other)))))
+(defun org-varde--plan-answering (args title then fail)
+  "Run varde with ARGS without waiting, answering what it asks.
+It asks about a task's first run, with an `ask' plan; each question is
+asked at most once.
+TITLE names the task in a question.  THEN gets the plan.  FAIL gets
+varde's message, or `quit' when a question was quit."
+  ;; Creating a worktree can take minutes: a repository's submodules are
+  ;; cloned into it.  The callbacks run after the caller's bindings are
+  ;; gone, so they are bound again for the questions and for THEN.
+  (let ((background org-varde--background)
+        (answers org-varde--answers))
+    (org-varde--varde-async
+     args
+     (lambda (out)
+       (let ((org-varde--background background)
+             (org-varde--answers answers)
+             plan next)
+         (when (condition-case e
+                   (progn (setq plan (org-varde--json out)
+                                next (org-varde--answer plan args title))
+                          t)
+                 (quit (funcall fail 'quit) nil)
+                 (error (message "org-varde: %s" (error-message-string e))
+                        (funcall fail (error-message-string e))
+                        nil))
+           (if next
+               (org-varde--plan-answering next title then fail)
+             (funcall then plan)))))
+     (lambda ()
+       (let ((org-varde--background background)
+             (org-varde--answers answers))
+         (funcall fail "varde failed; see *Messages*"))))))
 
-(defun org-varde--start (task title want context &optional planned)
-  "Start, resume or go to TASK's session, titled TITLE.
+(defun org-varde--answer (plan args title)
+  "ARGS with the answer to what PLAN asks added, or nil if it asks nothing.
+TITLE names the task in the question."
+  (pcase (and (equal (plist-get plan :action) "ask") (plist-get plan :ask))
+    ((and "project" (guard (not (member "--project" args))))
+     (let* ((choices (append (plist-get plan :choices) nil))
+            (default (or (plist-get org-varde--answers :project) (car choices)))
+            (project (expand-file-name
+                      (read-directory-name (format "Project directory for %s: " (or title "this task"))
+                                           default default))))
+       (when org-varde--background
+         (setq org-varde--answers (plist-put org-varde--answers :project project)))
+       (append args (list "--project" project))))
+    ((and "worktree" (guard (not (member "--worktree" args))))
+     (let ((worktree (or (plist-get org-varde--answers :worktree)
+                         (if (y-or-n-p (if org-varde--background
+                                           "Work in separate git worktrees, for every task in the region? "
+                                         "Work in a separate git worktree? "))
+                             "always" "never"))))
+       (when org-varde--background
+         (setq org-varde--answers (plist-put org-varde--answers :worktree worktree)))
+       (append args (list "--worktree" worktree))))
+    ('nil nil)
+    (other (error "Varde asked again about the %s" other))))
+
+(defun org-varde--start (task title want context &optional planned finished)
+  "Start, resume or go to TASK's session, titled TITLE, without waiting.
 WANT and CONTEXT are as for `org-varde--plan'.  PLANNED, if given, is
-called once varde has made its plan, after any question was answered."
+called once varde has made its plan, after any question was answered.
+FINISHED, if given, is called with nil once the session is started or
+gone to, or with why not: a message, or `quit'."
   ;; A task has one terminal here: a second session would have nowhere
   ;; to run but inside the first.
   (when (and want (org-varde--terminal-busy-p (org-varde--terminal task)))
     (user-error "%s is running in its terminal; end that session to start another"
                 (org-varde--short task)))
-  (let ((plan (org-varde--plan task want context title)))
-    (when planned (funcall planned))
-    (pcase (plist-get plan :action)
-      ("focus"
-       (let ((ours (org-varde--terminal task))
-             (typed (org-varde--tty-terminal (plist-get plan :tty))))
-         (cond (org-varde--background
-                (message "%s is already running" (org-varde--short task)))
-               (ours
-                (org-varde--workspace-open task title)
-                (pop-to-buffer-same-window ours))
-               (typed (org-varde--go-to-buffer typed))
-               (t (message "org-varde: %s is running in a terminal outside Emacs; C-u C-u forks it"
-                           (org-varde--short task))))))
-      ("run" (org-varde--open-terminal task title (plist-get plan :cwd) (plist-get plan :command)))
-      (other (error "Unexpected plan from varde: %S" other)))
-    (org-varde-refresh)))
+  (let ((finished (or finished #'ignore)))
+    (org-varde--plan
+     task want context title
+     (lambda (plan)
+       (funcall finished
+                (condition-case e
+                    (progn
+                      (when planned (funcall planned))
+                      (org-varde--follow-plan task title plan)
+                      (org-varde-refresh)
+                      nil)
+                  (error (message "org-varde: %s" (error-message-string e))
+                         (error-message-string e)))))
+     (lambda (why)
+       (when (eq why 'quit) (message "Quit"))
+       (funcall finished why)))))
+
+(defun org-varde--follow-plan (task title plan)
+  "Do what varde's PLAN says for TASK, titled TITLE."
+  (pcase (plist-get plan :action)
+    ("focus"
+     (let ((ours (org-varde--terminal task))
+           (typed (org-varde--tty-terminal (plist-get plan :tty))))
+       (cond (org-varde--background
+              (message "%s is already running" (org-varde--short task)))
+             (ours
+              (org-varde--workspace-open task title)
+              (pop-to-buffer-same-window ours))
+             (typed (org-varde--go-to-buffer typed))
+             (t (message "org-varde: %s is running in a terminal outside Emacs; C-u C-u forks it"
+                         (org-varde--short task))))))
+    ("run" (org-varde--open-terminal task title (plist-get plan :cwd) (plist-get plan :command)))
+    (other (error "Unexpected plan from varde: %S" other))))
 
 (defun org-varde--want (arg)
   "The start flag for prefix ARG."
   (pcase arg ('(4) "--fresh") ('(16) "--fork")))
 
 ;;;###autoload
-(defun org-varde-start (&optional arg)
+(defun org-varde-start (&optional arg finished)
   "Start the heading at point as a varde task, or pick it back up.
 It resumes where it ran, in the background, or goes to its terminal if
 it is running.  With a \\[universal-argument] prefix ARG, start a fresh
-session; with two, fork the last one."
+session; with two, fork the last one.  FINISHED is as for
+`org-varde--start'."
   (interactive "P")
   (unless (org-varde--heading-p)
     (user-error "Not on an org heading; the board (`org-varde-board') starts any task"))
@@ -886,18 +940,17 @@ session; with two, fork the last one."
          (context (save-excursion (org-varde--context))))
     ;; Starting reopens the task: the heading follows, once varde has
     ;; made its plan, so a question left unanswered changes neither.
-    (condition-case quit
-        (org-varde--start task title (org-varde--want arg) context
-                          (let ((heading (point-marker)))
-                            (lambda ()
-                              (org-with-point-at heading
-                                (when closed
-                                  (org-varde--set-keyword (org-varde--open-keyword))))
-                              (set-marker heading nil))))
-      (quit
-       ;; A task made for a closed heading just now is as closed as it.
-       (when (and made closed) (org-varde--varde closed task))
-       (signal (car quit) (cdr quit))))))
+    (let ((heading (point-marker)))
+      (org-varde--start task title (org-varde--want arg) context
+                        (lambda ()
+                          (org-with-point-at heading
+                            (when closed
+                              (org-varde--set-keyword (org-varde--open-keyword)))))
+                        (lambda (why)
+                          (set-marker heading nil)
+                          ;; A task made for a closed heading just now is as closed as it.
+                          (when (and (eq why 'quit) made closed) (org-varde--varde closed task))
+                          (when finished (funcall finished why)))))))
 
 (defun org-varde--archived-p ()
   "Whether the heading at point is archived.
@@ -905,11 +958,12 @@ That is in an archive file, or tagged ARCHIVE on itself or an ancestor."
   (or (member "ARCHIVE" (org-get-tags))
       (org-varde--archive-file-p (org-varde--file))))
 
-(defun org-varde-start-task (task title &optional arg)
+(defun org-varde-start-task (task title &optional arg finished)
   "Start TASK, titled TITLE, from outside org, with prefix ARG.
-A task linked to a heading is started from it, so its text is current."
-  (or (org-varde--at-heading task (lambda () (org-varde-start arg) t))
-      (org-varde--start task title (org-varde--want arg) nil)))
+A task linked to a heading is started from it, so its text is current.
+FINISHED is as for `org-varde--start'."
+  (or (org-varde--at-heading task (lambda () (org-varde-start arg finished) t))
+      (org-varde--start task title (org-varde--want arg) nil nil finished)))
 
 ;;;###autoload
 (defun org-varde-new-session (&optional directory)

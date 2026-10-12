@@ -271,6 +271,7 @@ may be the one meant."
     (org-varde-test-with-org org-varde-test--linked
       (org-varde-test--goto "Fix the login bug")
       (org-varde-start)
+      (org-varde-test-wait)
       (should (equal org-varde-test-terminals '(("/tmp/proj" "*varde xyz123*"))))
       (should (equal org-varde-test-sent '("varde run R1")))
       (should (equal (buffer-local-value 'org-varde--task (get-buffer "*varde xyz123*"))
@@ -289,13 +290,15 @@ may be the one meant."
   (org-varde-test-with-varde
     (org-varde-test--run-plan)
     (with-temp-buffer
-      (let ((here (current-buffer)))
+      (let ((here (window-buffer)))
         (org-varde--start org-varde-test--id "t" nil nil)
-        (should (eq (current-buffer) here))
+        (org-varde-test-wait)
+        (should (eq (window-buffer) here))
         (should (equal org-varde-test-sent '("varde run R1")))
         (let ((org-varde-start-goes t))
-          (org-varde--start org-varde-test--id "t" nil nil))
-        (should (eq (current-buffer) (get-buffer "*varde xyz123*")))))))
+          (org-varde--start org-varde-test--id "t" nil nil)
+          (org-varde-test-wait))
+        (should (eq (window-buffer) (get-buffer "*varde xyz123*")))))))
 
 ;; The board's RET on a region: nothing goes to a terminal, even one
 ;; already running.
@@ -303,11 +306,12 @@ may be the one meant."
   (org-varde-test-with-varde
     (org-varde-test--run-plan)
     (with-temp-buffer
-      (let ((here (current-buffer))
+      (let ((here (window-buffer))
             (org-varde-start-goes t)
             (org-varde--background t))
         (org-varde--start org-varde-test--id "t" nil nil)
-        (should (eq (current-buffer) here))
+        (org-varde-test-wait)
+        (should (eq (window-buffer) here))
         (should (equal org-varde-test-sent '("varde run R1")))
         (org-varde-test-reply "start" "{\"v\":1,\"action\":\"focus\",\"run\":\"R1\"}")
         (let* ((buffer (get-buffer "*varde xyz123*"))
@@ -315,7 +319,8 @@ may be the one meant."
           (unwind-protect
               (progn
                 (org-varde--start org-varde-test--id "t" nil nil)
-                (should (eq (current-buffer) here)))
+                (org-varde-test-wait)
+                (should (eq (window-buffer) here)))
             (delete-process proc)))))))
 
 (ert-deftest org-varde-starting-fills-the-task-workspace-and-comes-back ()
@@ -334,6 +339,7 @@ may be the one meant."
                 ((symbol-function 'pop-to-buffer-same-window)
                  (lambda (buffer) (push (cons current (buffer-name buffer)) shown))))
         (org-varde--start org-varde-test--id "t" nil nil)
+        (org-varde-test-wait)
         (should (equal current "main"))
         (should (member "xyz123 t" spaces))
         (should (equal shown '(("xyz123 t" . "*varde xyz123*"))))))))
@@ -355,7 +361,8 @@ may be the one meant."
     (org-varde-test--run-plan)
     (org-varde-test-reply-once "start" "{\"v\":1,\"action\":\"ask\",\"ask\":\"worktree\"}")
     (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
-      (org-varde--start org-varde-test--id "t" nil nil))
+      (org-varde--start org-varde-test--id "t" nil nil)
+      (org-varde-test-wait))
     (should (string-suffix-p "--worktree always" (car (last (org-varde-test-calls)))))
     (should (equal org-varde-test-sent '("varde run R1")))))
 
@@ -365,8 +372,11 @@ may be the one meant."
     (org-varde-test-reply "start" "{\"v\":1,\"action\":\"ask\",\"ask\":\"worktree\"}")
     (org-varde-test-with-org (replace-regexp-in-string "TODO Fix" "DONE Fix" org-varde-test--linked)
       (org-varde-test--goto "Fix the login bug")
-      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) (signal 'quit nil))))
-        (should (eq 'quit (condition-case nil (org-varde-start) (quit 'quit)))))
+      (let (why)
+        (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) (signal 'quit nil))))
+          (org-varde-start nil (lambda (w) (setq why w)))
+          (org-varde-test-wait))
+        (should (eq why 'quit)))
       (should (equal (org-get-todo-state) "DONE"))
       (should-not org-varde-test-sent))))
 
@@ -378,7 +388,8 @@ may be the one meant."
     (org-varde-test-with-org "* DONE Never linked\n:PROPERTIES:\n:VARDE_PROJECT: /tmp/proj\n:END:\n"
       (org-varde-test--goto "Never linked")
       (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) (signal 'quit nil))))
-        (should (eq 'quit (condition-case nil (org-varde-start) (quit 'quit)))))
+        (org-varde-start)
+        (org-varde-test-wait))
       (should (equal (org-get-todo-state) "DONE"))
       (should (member "done NEW111" (org-varde-test-calls))))))
 
@@ -396,7 +407,8 @@ may be the one meant."
     (org-varde-test--run-plan)
     (org-varde-test-reply-once "start" "{\"v\":1,\"action\":\"ask\",\"ask\":\"project\",\"choices\":[\"/p/repo\"]}")
     (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) "/p/repo/")))
-      (org-varde--start org-varde-test--id "t" nil nil))
+      (org-varde--start org-varde-test--id "t" nil nil)
+      (org-varde-test-wait))
     (should (string-suffix-p "--project /p/repo/" (car (last (org-varde-test-calls)))))
     (should (equal org-varde-test-sent '("varde run R1")))))
 
@@ -404,12 +416,14 @@ may be the one meant."
 ;; in it, and a task's project question offers the one before's answer.
 (ert-deftest org-varde-a-region-is-asked-about-worktrees-once ()
   (let (calls prompts defaults (worktree-asked 0))
-    (cl-letf (((symbol-function 'org-varde--varde-json)
-               (lambda (&rest args)
+    (cl-letf (((symbol-function 'org-varde--varde-async)
+               (lambda (args callback &rest _)
                  (push args calls)
-                 (cond ((not (member "--project" args)) '(:v 1 :action "ask" :ask "project" :choices ["/p/a"]))
-                       ((not (member "--worktree" args)) '(:v 1 :action "ask" :ask "worktree"))
-                       (t '(:v 1 :action "run")))))
+                 (funcall callback
+                          (cond ((not (member "--project" args))
+                                 "{\"v\":1,\"action\":\"ask\",\"ask\":\"project\",\"choices\":[\"/p/a\"]}")
+                                ((not (member "--worktree" args)) "{\"v\":1,\"action\":\"ask\",\"ask\":\"worktree\"}")
+                                (t "{\"v\":1,\"action\":\"run\"}")))))
               ((symbol-function 'read-directory-name)
                (lambda (prompt _dir default)
                  (push prompt prompts)
@@ -418,32 +432,37 @@ may be the one meant."
               ((symbol-function 'y-or-n-p) (lambda (&rest _) (setq worktree-asked (1+ worktree-asked)))))
       (let ((org-varde--background t)
             (org-varde--answers nil))
-        (org-varde--plan-answering '("start" "T1" "--json") "One")
-        (org-varde--plan-answering '("start" "T2" "--json") "Two"))
+        ;; As the board does: each starts once the one before is planned.
+        (org-varde--plan-answering '("start" "T1" "--json") "One"
+                                   (lambda (_) (org-varde--plan-answering '("start" "T2" "--json") "Two"
+                                                                          #'ignore #'ignore))
+                                   #'ignore))
       (should (= worktree-asked 1))
       (should (equal (nreverse prompts) '("Project directory for One: " "Project directory for Two: ")))
       (should (equal (nreverse defaults) '("/p/a" "/p/b/")))
       (should (equal (car calls) '("start" "T2" "--json" "--project" "/p/b/" "--worktree" "always")))
       ;; A start of its own keeps nothing.
       (should-not org-varde--answers)
-      (org-varde--plan-answering '("start" "T3" "--json") "Three")
+      (org-varde--plan-answering '("start" "T3" "--json") "Three" #'ignore #'ignore)
       (should (= worktree-asked 2))
       (should (equal (car defaults) "/p/a")))))
 
 (ert-deftest org-varde-a-question-asked-again-is-not-asked-forever ()
   (org-varde-test-with-varde
-    (org-varde-test-reply "start" "")
-    (let ((asked 0))
-      (cl-letf (((symbol-function 'org-varde--varde-json)
-                 (lambda (&rest _) '(:v 1 :action "ask" :ask "project" :choices [])))
-                ((symbol-function 'read-directory-name) (lambda (&rest _) (setq asked (1+ asked)) "/p/")))
-        (should-error (org-varde--plan-answering '("start" "T1" "--json"))))
-      (should (= asked 1)))
+    (org-varde-test-reply "start" "{\"v\":1,\"action\":\"ask\",\"ask\":\"project\",\"choices\":[]}")
+    (let ((asked 0) why)
+      (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) (setq asked (1+ asked)) "/p/")))
+        (org-varde--plan-answering '("start" "T1" "--json") nil #'ignore (lambda (w) (setq why w)))
+        (org-varde-test-wait))
+      (should (= asked 1))
+      (should (equal why "Varde asked again about the project")))
     ;; A failure is shown, not answered.
-    (cl-letf (((symbol-function 'org-varde--varde-json)
-               (lambda (&rest _) (signal 'org-varde-varde-error '("git worktree add --worktree-ish failed"))))
-              ((symbol-function 'y-or-n-p) (lambda (&rest _) (error "Asked"))))
-      (should-error (org-varde--plan-answering '("start" "T1" "--json")) :type 'org-varde-varde-error))))
+    (org-varde-test-fail-once "start" "varde: git worktree add --worktree-ish failed")
+    (let (why)
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) (error "Asked"))))
+        (org-varde--plan-answering '("start" "T1" "--json") nil #'ignore (lambda (w) (setq why w)))
+        (org-varde-test-wait))
+      (should (stringp why)))))
 
 (ert-deftest org-varde-doctor-shows-the-report-when-a-check-fails ()
   (org-varde-test-with-varde
@@ -463,7 +482,8 @@ may be the one meant."
           (progn
             (with-current-buffer buffer (setq org-varde--task org-varde-test--id))
             (org-varde--start org-varde-test--id "t" nil nil)
-            (should (eq (current-buffer) buffer))
+            (org-varde-test-wait)
+            (should (eq (window-buffer) buffer))
             (should-not org-varde-test-sent))
         (delete-process proc)))))
 
@@ -477,7 +497,8 @@ may be the one meant."
             (org-varde-test-reply "start" (format "{\"v\":1,\"action\":\"focus\",\"run\":\"R1\",\"tty\":\"%s\"}"
                                                   (process-tty-name proc)))
             (org-varde--start org-varde-test--id "t" nil nil)
-            (should (eq (current-buffer) buffer))
+            (org-varde-test-wait)
+            (should (eq (window-buffer) buffer))
             ;; It is left as it is: not taken over as the task's terminal.
             (should-not (buffer-local-value 'org-varde--task buffer))
             (should-not org-varde-test-terminals)
@@ -489,6 +510,7 @@ may be the one meant."
   (org-varde-test-with-varde
     (org-varde-test-reply "start" "{\"v\":1,\"action\":\"focus\",\"run\":\"R1\",\"tty\":\"/dev/pts/9999\"}")
     (org-varde--start org-varde-test--id "t" nil nil)
+    (org-varde-test-wait)
     (should-not org-varde-test-terminals)
     (should-not org-varde-test-sent)))
 
@@ -654,6 +676,7 @@ DONE was lost, asks nothing again: no worktree choice, no second close."
     (org-varde-test-with-org (replace-regexp-in-string "TODO Fix" "DONE Fix" org-varde-test--linked)
       (org-varde-test--goto "Fix the login bug")
       (org-varde-start)
+      (org-varde-test-wait)
       (with-current-buffer (find-buffer-visiting file)
         (org-varde-test--goto "Fix the login bug")
         (should (equal (org-get-todo-state) "TODO"))))))
@@ -1141,6 +1164,7 @@ time does."
                                                        org-varde-test--parkable)
       (org-varde-test--goto "Forge integration")
       (org-varde-start)
+      (org-varde-test-wait)
       (with-current-buffer (find-buffer-visiting file)
         (org-varde-test--goto "Forge integration")
         (should (equal (org-get-todo-state) "TODO"))))))

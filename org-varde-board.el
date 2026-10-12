@@ -235,21 +235,38 @@ question offers the last answer."
   (if (not (use-region-p))
       (let ((row (org-varde-board--row-at-point)))
         (org-varde-start-task (plist-get row :task) (plist-get row :title) arg))
-    (let* ((org-varde--background t)
-           (org-varde--answers nil)
-           (all (org-varde-board--rows))
+    (let* ((all (org-varde-board--rows))
            (rows (seq-remove (lambda (r) (member (plist-get r :state) '("done" "parked" "dropped")))
                              all))
-           failed)
-      (dolist (row rows)
-        (condition-case err
-            (org-varde-start-task (plist-get row :task) (plist-get row :title) arg)
-          (error (push (format "%s: %s" (plist-get row :short) (error-message-string err))
-                       failed))))
-      (message "Started, or already running: %d of %d%s%s" (- (length rows) (length failed)) (length rows)
-               (if (= (length rows) (length all)) ""
-                 (format "; %d closed or parked skipped" (- (length all) (length rows))))
-               (if failed (concat "; " (string-join (nreverse failed) "; ")) "")))))
+           (failed nil)
+           (said (lambda ()
+                   (message "Started, or already running: %d of %d%s%s"
+                            (- (length rows) (length failed)) (length rows)
+                            (if (= (length rows) (length all)) ""
+                              (format "; %d closed or parked skipped" (- (length all) (length rows))))
+                            (if failed (concat "; " (string-join (reverse failed) "; ")) ""))))
+           (next nil))
+      ;; One at a time, each once the last is started: a question is
+      ;; asked once for them all, and two never ask at once.
+      (setq next (lambda (left)
+                   (if (null left)
+                       (funcall said)
+                     (let* ((row (car left))
+                            (fail (lambda (why)
+                                    (push (format "%s: %s" (plist-get row :short) why) failed))))
+                       (condition-case err
+                           (org-varde-start-task
+                            (plist-get row :task) (plist-get row :title) arg
+                            (lambda (why)
+                              ;; A quit stops the rest.
+                              (unless (eq why 'quit)
+                                (when why (funcall fail why))
+                                (funcall next (cdr left)))))
+                         (error (funcall fail (error-message-string err))
+                                (funcall next (cdr left))))))))
+      (let ((org-varde--background t)
+            (org-varde--answers nil))
+        (funcall next rows)))))
 
 (defun org-varde-board-done ()
   "Close the task at point, or every task in the region."
