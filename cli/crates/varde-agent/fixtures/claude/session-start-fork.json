@@ -1,0 +1,11 @@
+{
+ "session_id": "d27ddb09-cdd2-4031-835a-817072d9ace4",
+ "transcript_path": "/home/user/.claude/projects/-home-user-proj/d27ddb09-cdd2-4031-835a-817072d9ace4.jsonl",
+ "cwd": "/home/user/proj",
+ "hook_event_name": "SessionStart",
+ "source": "fork",
+ "seconds_since_last_response": 1,
+ "context_tokens": 20161,
+ "prompt_cache_likely_expired": false,
+ "estimated_cache_write_usd": 0.0403
+}

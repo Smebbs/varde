@@ -1,0 +1,15 @@
+[package]
+name = "varde-agent"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+serde_json.workspace = true
+uuid.workspace = true
+varde-core = { path = "../varde-core" }
+
+[dev-dependencies]
+tempfile.workspace = true

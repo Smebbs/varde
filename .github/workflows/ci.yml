@@ -1,0 +1,78 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  rust:
+    name: Rust (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli
+      - name: Install tmux (and GNU timeout, which tests use)
+        if: runner.os == 'macOS'
+        run: |
+          brew install tmux coreutils
+          echo "$(brew --prefix coreutils)/libexec/gnubin" >> "$GITHUB_PATH"
+      - name: Install tmux
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y tmux
+      - run: cargo fmt --check
+      - run: cargo clippy --all-targets --locked -- -D warnings
+      - run: cargo test --locked
+
+  msrv:
+    name: Rust 1.88
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.88
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: cli
+      - run: cargo check --all-targets --locked
+
+  emacs:
+    name: Emacs ${{ matrix.emacs }}
+    strategy:
+      fail-fast: false
+      matrix:
+        emacs: ['29.1', '30.1']
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: purcell/setup-emacs@master
+        with:
+          version: ${{ matrix.emacs }}
+      - name: Byte-compile
+        run: >
+          emacs --batch -Q -L . -l test/test-helper.el
+          --eval '(setq byte-compile-error-on-warn t)'
+          -f batch-byte-compile org-varde.el org-varde-board.el
+      - name: Test
+        run: >
+          emacs --batch -Q -L . -L test -l test-helper -l ert
+          -l org-varde -l org-varde-board
+          -l org-varde-test -l org-varde-board-test
+          -f ert-run-tests-batch-and-exit

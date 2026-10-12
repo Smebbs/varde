@@ -1,0 +1,9 @@
+{
+ "session_id": "23af6c13-105c-4831-8f1b-8622e6d045d7",
+ "transcript_path": "/home/user/.claude/projects/-home-user-proj/23af6c13-105c-4831-8f1b-8622e6d045d7.jsonl",
+ "cwd": "/home/user/proj",
+ "prompt_id": "7c9daa82-426b-439a-8b7f-7ec746218b15",
+ "permission_mode": "default",
+ "hook_event_name": "UserPromptSubmit",
+ "prompt": "Run ls once with the Bash tool and then say done."
+}

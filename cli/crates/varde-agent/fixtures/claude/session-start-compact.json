@@ -1,0 +1,7 @@
+{
+ "session_id": "23af6c13-105c-4831-8f1b-8622e6d045d7",
+ "transcript_path": "/home/user/.claude/projects/-home-user-proj/23af6c13-105c-4831-8f1b-8622e6d045d7.jsonl",
+ "cwd": "/home/user/proj",
+ "hook_event_name": "SessionStart",
+ "source": "compact"
+}

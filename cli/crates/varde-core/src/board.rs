@@ -1,0 +1,598 @@
+//! The board as data: rows already grouped, ordered and labelled, so no
+//! client decides what is shown or in what order.
+
+use anyhow::Result;
+use rusqlite::params;
+use serde::Serialize;
+
+use crate::status::Status;
+use crate::store::{self, Store};
+
+/// How far back an older run of a task is looked at for a live session.
+const RECENT_MS: i64 = 7 * 24 * 3600 * 1000;
+
+#[derive(Debug, Serialize)]
+pub struct Board {
+    pub v: u32,
+    pub groups: Vec<Group>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Group {
+    pub key: &'static str,
+    pub label: &'static str,
+    /// Shown as its heading and count only, until someone opens it.
+    pub collapsed: bool,
+    pub rows: Vec<Row>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Row {
+    pub task: String,
+    /// What people type to refer to the task.
+    pub short: String,
+    pub title: String,
+    pub project: Option<String>,
+    /// `working`, `delegated`, `waiting`, `blocked`, `exited`, `open`,
+    /// `done`, `parked` or `dropped`.
+    pub status: &'static str,
+    /// The task's own state: `open`, `done`, `parked` or `dropped`.
+    pub state: String,
+    /// Unix ms of the last change to the task's state, Inbox or link,
+    /// however it was made.
+    pub changed: i64,
+    /// Sub-agents and background shells the session's last turn left
+    /// running; 0 unless it is `delegated` or `waiting`.
+    pub agents: u32,
+    pub shells: u32,
+    /// In Needs you: its session finished a turn, or asked for a decision,
+    /// that nobody has looked at yet. These come first.
+    pub unread: bool,
+    /// Arrived without you creating it, from a session or deferred from
+    /// one, and not yet acted on.
+    pub inbox: bool,
+    /// Where the task lives elsewhere, e.g. `org`.
+    pub external: Option<String>,
+    /// The task this one was deferred from.
+    pub origin: Option<Origin>,
+    /// Unix ms of the latest thing that happened to the task.
+    pub last: i64,
+    pub run: Option<RunRef>,
+    /// Where its git work stands, as last checked; `null` before the first
+    /// check or outside a repository.
+    pub git: Option<Git>,
+    /// Whether its git work is checked: it has a worktree, or it is open
+    /// in a project checkout and has been started.
+    #[serde(skip)]
+    pub tracked: bool,
+    /// When its git work was last checked, unix ms.
+    #[serde(skip)]
+    pub git_checked: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Git {
+    /// `clean`, `edited`, `committed`, `pushed`, `pr` or `landed`.
+    pub stage: String,
+    /// What to show, e.g. `committed` or `PR #12 ✓`; empty when clean.
+    pub label: String,
+    /// The PR's checks: `passing`, `failing` or `pending`.
+    pub checks: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Origin {
+    pub task: String,
+    pub short: String,
+    pub title: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+pub struct RunRef {
+    pub id: String,
+    pub native_id: String,
+    pub cwd: Option<String>,
+}
+
+const GROUPS: [(&str, &str); 7] = [
+    ("needs_you", "Needs you"),
+    ("working", "Working"),
+    ("open", "Open"),
+    ("inbox", "Inbox"),
+    ("done", "Done"),
+    ("parked", "Parked"),
+    // Only with `all`.
+    ("dropped", "Dropped"),
+];
+
+/// `now` and `day_start` are unix ms; `day_start` is local midnight.
+/// `all` keeps every task, including old done ones and, in a group of
+/// their own, dropped ones; a done task whose worktree is still there
+/// stays until its work lands. Nothing else ever leaves the board by
+/// itself. `alive` says whether an agent process
+/// varde knows is still running.
+pub fn build(
+    store: &Store,
+    now: i64,
+    day_start: i64,
+    all: bool,
+    alive: &dyn Fn(i64, i64) -> bool,
+) -> Result<Board> {
+    // Old done tasks are most of a store, so they are left out here
+    // rather than read and thrown away.
+    let sql = "SELECT t.id, t.title, t.project, t.state, t.inbox, t.created, t.closed,
+                r.id, r.native_id, r.cwd, r.started, r.pid, r.pid_start, t.external,
+                EXISTS (SELECT 1 FROM worktree w WHERE w.task = t.id AND w.state = 'active'),
+                g.stage, g.label, g.checks, g.checked, o.id, o.title,
+                coalesce(t.changed, t.created), r.tty, r.tty_ctime
+         FROM task t
+         LEFT JOIN task o ON o.id = t.origin
+         LEFT JOIN git_state g ON g.task = t.id
+         LEFT JOIN run r ON r.id = (SELECT id FROM run WHERE task = t.id
+                                    ORDER BY started DESC, rowid DESC LIMIT 1)
+         WHERE (?1 OR t.state != 'dropped')
+           AND (?1 OR t.state != 'done' OR coalesce(t.closed, 0) >= ?2
+                OR EXISTS (SELECT 1 FROM worktree w WHERE w.task = t.id AND w.state = 'active'))";
+    // A task can have more than one live run: a session varde did not
+    // start keeps running beside the fork `start` made of it. The row
+    // shows whichever run is most urgent, not just the newest.
+    let others = urgent_older_runs(store, now, alive)?;
+
+    let mut stmt = store.conn.prepare_cached(sql)?;
+    let mut rows = stmt.query(params![all, day_start])?;
+    let mut groups: Vec<Group> = GROUPS
+        .iter()
+        .map(|&(key, label)| Group {
+            key,
+            label,
+            collapsed: matches!(key, "parked" | "dropped"),
+            rows: Vec::new(),
+        })
+        .collect();
+
+    while let Some(r) = rows.next()? {
+        let state: String = r.get(3)?;
+        let inbox: bool = r.get(4)?;
+        let created: i64 = r.get(5)?;
+        let closed: Option<i64> = r.get(6)?;
+        let run_id: Option<String> = r.get(7)?;
+        let run_started: Option<i64> = r.get(10)?;
+        let view = match &run_id {
+            Some(id) => store::view(&store.conn, id)?,
+            None => store::View::default(),
+        };
+        let last =
+            [Some(created), closed, run_started, view.last].into_iter().flatten().max().unwrap_or(created);
+
+        let task: String = r.get(0)?;
+        let tty: Option<String> = r.get(22)?;
+        let tty_ctime: Option<i64> = r.get(23)?;
+        let tty = tty.as_deref().map(|t| (t, tty_ctime));
+        let mut status = store::effective_status(view.status, r.get(11)?, r.get(12)?, tty, alive);
+        let mut counts = (view.agents, view.shells);
+        let mut unread = view.unread;
+        let mut run = match run_id {
+            Some(id) => Some(RunRef { id, native_id: r.get(8)?, cwd: r.get(9)? }),
+            None => None,
+        };
+        if let Some(other) = others.get(&task) {
+            if urgency(Some(other.status)) < urgency(status) {
+                status = Some(other.status);
+                counts = other.counts;
+                unread = other.unread;
+                run = Some(other.run.clone());
+            }
+        }
+        let worktree: bool = r.get(14)?;
+        let (group, label) = if state == "done" {
+            (4, "done")
+        } else if state == "parked" {
+            (5, "parked")
+        } else if state == "dropped" {
+            (6, "dropped")
+        } else {
+            match status {
+                Some(s) if s.needs_you() => (0, s.name()),
+                Some(s @ (Status::Working | Status::Delegated)) => (1, s.name()),
+                other => {
+                    let label = if other == Some(Status::Exited) { "exited" } else { "open" };
+                    (if inbox { 3 } else { 2 }, label)
+                }
+            }
+        };
+        let (agents, shells) = if group < 2 { counts } else { (0, 0) };
+        let project: Option<String> = r.get(2)?;
+        let tracked = worktree || (state == "open" && project.is_some() && run.is_some());
+        let git = match r.get::<_, Option<String>>(15)? {
+            Some(stage) if tracked => Some(Git { stage, label: r.get(16)?, checks: r.get(17)? }),
+            _ => None,
+        };
+        let origin = match r.get::<_, Option<String>>(19)? {
+            Some(task) => Some(Origin { short: crate::task::short(&task), task, title: r.get(20)? }),
+            None => None,
+        };
+        groups[group].rows.push(Row {
+            short: crate::task::short(&task),
+            task,
+            title: r.get(1)?,
+            project,
+            status: label,
+            changed: r.get(21)?,
+            state,
+            agents,
+            shells,
+            unread: unread && group == 0,
+            inbox,
+            external: r.get(13)?,
+            origin,
+            last,
+            run,
+            git,
+            tracked,
+            git_checked: r.get(18)?,
+        });
+    }
+    if !all {
+        groups.pop();
+    }
+    for g in &mut groups {
+        // Unread first, then newest first, with the task id breaking ties
+        // so order is stable.
+        g.rows.sort_by(|a, b| {
+            b.unread.cmp(&a.unread).then(b.last.cmp(&a.last)).then_with(|| a.task.cmp(&b.task))
+        });
+    }
+    Ok(Board { v: 2, groups })
+}
+
+/// Lower is more urgent: needing you, then working, then anything else.
+fn urgency(status: Option<Status>) -> u8 {
+    match status {
+        Some(s) if s.needs_you() => 0,
+        Some(Status::Working | Status::Delegated) => 1,
+        _ => 2,
+    }
+}
+
+struct Other {
+    status: Status,
+    counts: (u32, u32),
+    unread: bool,
+    run: RunRef,
+}
+
+/// For each open task, its most urgent live run other than the newest,
+/// among runs active in the last week.
+fn urgent_older_runs(
+    store: &Store,
+    now: i64,
+    alive: &dyn Fn(i64, i64) -> bool,
+) -> Result<std::collections::HashMap<String, Other>> {
+    // From the few open tasks to their runs (CROSS JOIN keeps that order),
+    // and a run's newest event straight from the index.
+    let mut stmt = store.conn.prepare_cached(
+        "SELECT r.task, r.id, r.native_id, r.cwd, r.pid, r.pid_start, r.tty, r.tty_ctime
+         FROM task t CROSS JOIN run r ON r.task = t.id
+         WHERE t.state = 'open'
+           AND r.id != (SELECT id FROM run WHERE task = t.id ORDER BY started DESC, rowid DESC LIMIT 1)
+           AND (SELECT ts FROM event WHERE run = r.id ORDER BY ts DESC LIMIT 1) > ?1",
+    )?;
+    let mut rows = stmt.query([now - RECENT_MS])?;
+    let mut out: std::collections::HashMap<String, Other> = Default::default();
+    while let Some(r) = rows.next()? {
+        let id: String = r.get(1)?;
+        let view = store::view(&store.conn, &id)?;
+        if view.last.is_none_or(|t| t <= now - RECENT_MS) {
+            continue;
+        }
+        let tty: Option<String> = r.get(6)?;
+        let tty_ctime: Option<i64> = r.get(7)?;
+        let tty = tty.as_deref().map(|t| (t, tty_ctime));
+        let status = store::effective_status(view.status, r.get(4)?, r.get(5)?, tty, alive);
+        let Some(status) = status.filter(|s| urgency(Some(*s)) < 2) else { continue };
+        let task: String = r.get(0)?;
+        if out.get(&task).is_none_or(|o| urgency(Some(status)) < urgency(Some(o.status))) {
+            let run = RunRef { id, native_id: r.get(2)?, cwd: r.get(3)? };
+            out.insert(task, Other { status, counts: (view.agents, view.shells), unread: view.unread, run });
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::event::{Kind, Norm, Source};
+    use crate::store::temp as store;
+
+    fn ingest(s: &mut Store, id: &str, kind: Kind, prompt: Option<&str>, now: i64) {
+        let n = Norm {
+            native_id: id.into(),
+            kind,
+            cwd: Some("/tmp/p".into()),
+            transcript: None,
+            prompt: prompt.map(Into::into),
+        };
+        s.ingest("claude", &n, "{}", now, None).unwrap();
+    }
+
+    fn keys(b: &Board) -> Vec<(&str, Vec<&str>)> {
+        b.groups.iter().map(|g| (g.key, g.rows.iter().map(|r| r.title.as_str()).collect())).collect()
+    }
+
+    #[test]
+    fn every_group_is_present_even_when_empty() {
+        let (_d, s) = store();
+        let b = build(&s, 0, 0, false, &|_, _| true).unwrap();
+        assert_eq!(
+            b.groups.iter().map(|g| g.key).collect::<Vec<_>>(),
+            ["needs_you", "working", "open", "inbox", "done", "parked"]
+        );
+        assert!(b.groups.iter().all(|g| g.collapsed == (g.key == "parked")));
+    }
+
+    #[test]
+    fn all_shows_dropped_tasks_and_every_row_says_when_its_state_changed() {
+        let (_d, mut s) = store();
+        ingest(&mut s, "a", Kind::Prompt, Some("thrown away"), 10);
+        ingest(&mut s, "b", Kind::Prompt, Some("kept"), 11);
+        let id = |title: &str| -> String {
+            s.conn.query_row("SELECT id FROM task WHERE title = ?1", [title], |r| r.get(0)).unwrap()
+        };
+        let row = |b: &Board, title: &str| -> (String, String, i64) {
+            let r = b.groups.iter().flat_map(|g| &g.rows).find(|r| r.title == title).unwrap();
+            (r.state.clone(), r.status.to_string(), r.changed)
+        };
+        let created = row(&build(&s, 20, 0, false, &|_, _| true).unwrap(), "kept").2;
+        assert_eq!(created, 11);
+        s.conn.execute("UPDATE task SET state = 'dropped' WHERE id = ?1", [id("thrown away")]).unwrap();
+        let b = build(&s, 20, 0, false, &|_, _| true).unwrap();
+        assert!(b.groups.iter().flat_map(|g| &g.rows).all(|r| r.title != "thrown away"));
+        assert_eq!(b.groups.len(), 6);
+        let b = build(&s, 20, 0, true, &|_, _| true).unwrap();
+        assert_eq!(keys(&b)[6], ("dropped", vec!["thrown away"]));
+        assert!(b.groups[6].collapsed);
+        let (state, status, changed) = row(&b, "thrown away");
+        assert_eq!((state.as_str(), status.as_str()), ("dropped", "dropped"));
+        // The real clock: the change happened just now.
+        assert!(changed > 1_700_000_000_000);
+        // Reopening moves it too, though it clears `closed`.
+        s.conn.execute("UPDATE task SET state = 'done', closed = 30 WHERE id = ?1", [id("kept")]).unwrap();
+        let done = row(&build(&s, 40, 0, true, &|_, _| true).unwrap(), "kept").2;
+        std::thread::sleep(std::time::Duration::from_millis(5));
+        s.conn.execute("UPDATE task SET state = 'open', closed = NULL WHERE id = ?1", [id("kept")]).unwrap();
+        assert!(row(&build(&s, 40, 0, true, &|_, _| true).unwrap(), "kept").2 > done);
+    }
+
+    #[test]
+    fn sessions_land_by_status() {
+        let (_d, mut s) = store();
+        ingest(&mut s, "a", Kind::Prompt, Some("alpha"), 10);
+        ingest(&mut s, "b", Kind::Prompt, Some("beta"), 11);
+        ingest(&mut s, "b", Kind::TurnEnd { agents: 0, shells: 0 }, None, 12);
+        ingest(&mut s, "c", Kind::Prompt, Some("gamma"), 13);
+        ingest(&mut s, "c", Kind::Ended, None, 14);
+        ingest(&mut s, "d", Kind::Started(Source::Startup), None, 15);
+        let b = build(&s, 20, 0, false, &|_, _| true).unwrap();
+        assert_eq!(
+            keys(&b),
+            [
+                ("needs_you", vec!["beta"]),
+                ("working", vec!["alpha"]),
+                ("open", vec![]),
+                ("inbox", vec!["gamma"]),
+                ("done", vec![]),
+                ("parked", vec![]),
+            ]
+        );
+    }
+
+    #[test]
+    fn a_session_waiting_on_its_sub_agents_is_working_and_counts_them() {
+        let (_d, mut s) = store();
+        ingest(&mut s, "a", Kind::Prompt, Some("alpha"), 10);
+        ingest(&mut s, "a", Kind::TurnEnd { agents: 2, shells: 1 }, None, 11);
+        ingest(&mut s, "b", Kind::Prompt, Some("beta"), 12);
+        ingest(&mut s, "b", Kind::TurnEnd { agents: 0, shells: 1 }, None, 13);
+        let b = build(&s, 20, 0, false, &|_, _| true).unwrap();
+        let rows = |key| {
+            b.groups
+                .iter()
+                .find(|g| g.key == key)
+                .unwrap()
+                .rows
+                .iter()
+                .map(|r| (r.status, r.agents, r.shells))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(rows("working"), [("delegated", 2, 1)]);
+        assert_eq!(rows("needs_you"), [("waiting", 0, 1)]);
+    }
+
+    #[test]
+    fn what_nobody_has_looked_at_comes_first_until_seen() {
+        let (_d, mut s) = store();
+        ingest(&mut s, "a", Kind::Prompt, Some("alpha"), 10);
+        ingest(&mut s, "a", Kind::TurnEnd { agents: 0, shells: 0 }, None, 11);
+        ingest(&mut s, "b", Kind::Prompt, Some("beta"), 12);
+        ingest(&mut s, "b", Kind::Blocked, None, 13);
+        ingest(&mut s, "c", Kind::Started(Source::Startup), None, 14);
+        let id = |title: &str| -> String {
+            s.conn.query_row("SELECT id FROM task WHERE title = ?1", [title], |r| r.get(0)).unwrap()
+        };
+        let needs_you = |s: &Store| -> Vec<(String, bool, i64)> {
+            build(s, 30, 0, false, &|_, _| true).unwrap().groups[0]
+                .rows
+                .iter()
+                .map(|r| (r.title.clone(), r.unread, r.last))
+                .collect()
+        };
+        assert_eq!(needs_you(&s), [("beta".into(), true, 13), ("alpha".into(), true, 11)]);
+
+        // Looking does not make a task newer.
+        assert_eq!(store::mark_seen(&s.conn, &id("beta"), 20).unwrap(), 1);
+        assert_eq!(store::mark_seen(&s.conn, &id("beta"), 21).unwrap(), 0);
+        assert_eq!(needs_you(&s), [("alpha".into(), true, 11), ("beta".into(), false, 13)]);
+
+        // The next thing it asks is new again.
+        ingest(&mut s, "b", Kind::ToolRan, None, 22);
+        ingest(&mut s, "b", Kind::TurnEnd { agents: 0, shells: 0 }, None, 23);
+        assert_eq!(needs_you(&s)[0], ("beta".into(), true, 23));
+    }
+
+    #[test]
+    fn a_session_you_started_or_interrupted_is_not_unread() {
+        let (_d, mut s) = store();
+        ingest(&mut s, "a", Kind::Prompt, Some("alpha"), 10);
+        ingest(&mut s, "a", Kind::TurnEnd { agents: 0, shells: 0 }, None, 11);
+        ingest(&mut s, "a", Kind::Started(Source::Resume), None, 12);
+        let row = |s: &Store| {
+            let b = build(s, 30, 0, false, &|_, _| true).unwrap();
+            (b.groups[0].rows[0].status, b.groups[0].rows[0].unread)
+        };
+        assert_eq!(row(&s), ("waiting", false));
+        let run: String =
+            s.conn.query_row("SELECT id FROM run ORDER BY started DESC LIMIT 1", [], |r| r.get(0)).unwrap();
+        s.record_interrupt(&run, 13).unwrap();
+        assert_eq!(row(&s), ("waiting", false));
+    }
+
+    #[test]
+    fn a_parked_task_stays_parked_whatever_its_session_does() {
+        let (_d, mut s) = store();
+        ingest(&mut s, "a", Kind::Prompt, Some("someday"), 10);
+        ingest(&mut s, "a", Kind::Blocked, None, 11);
+        s.conn.execute("UPDATE task SET state='parked', closed=12, inbox=0", []).unwrap();
+        // Old as it is, it is not aged off the board the way done tasks are.
+        let now = 12 + RECENT_MS + 1;
+        let b = build(&s, now, now - 1000, false, &|_, _| true).unwrap();
+        let parked = b.groups.iter().find(|g| g.key == "parked").unwrap();
+        assert_eq!(
+            parked.rows.iter().map(|r| (r.title.as_str(), r.status)).collect::<Vec<_>>(),
+            [("someday", "parked")]
+        );
+        assert_eq!(b.groups.iter().map(|g| g.rows.len()).sum::<usize>(), 1);
+    }
+
+    #[test]
+    fn a_live_run_needing_you_is_not_hidden_by_a_newer_one() {
+        let (_d, mut s) = store();
+        ingest(&mut s, "a", Kind::Prompt, Some("alpha"), 10);
+        ingest(&mut s, "a", Kind::Blocked, None, 11);
+        // `start` forks it: a newer run of the same task that never got going.
+        let task: String = s.conn.query_row("SELECT id FROM task", [], |r| r.get(0)).unwrap();
+        s.conn
+            .execute(
+                "INSERT INTO run (id, task, agent, native_id, relation, started, launch)
+                 VALUES ('F', ?1, 'claude', 'f', 'fork', 12, 'managed')",
+                [&task],
+            )
+            .unwrap();
+        let b = build(&s, 20, 0, false, &|_, _| true).unwrap();
+        assert_eq!(keys(&b)[0], ("needs_you", vec!["alpha"]));
+        assert_eq!(b.groups[0].rows[0].status, "blocked");
+    }
+
+    #[test]
+    fn a_done_task_stays_while_its_worktree_does() {
+        let (_d, mut s) = store();
+        ingest(&mut s, "a", Kind::Prompt, Some("landing"), 1);
+        ingest(&mut s, "b", Kind::Prompt, Some("landed"), 2);
+        s.conn.execute("UPDATE task SET state='done', closed=3, inbox=0", []).unwrap();
+        let id = |title: &str| -> String {
+            s.conn.query_row("SELECT id FROM task WHERE title = ?1", [title], |r| r.get(0)).unwrap()
+        };
+        let (landing, landed) = (id("landing"), id("landed"));
+        s.conn
+            .execute(
+                "INSERT INTO worktree (path, task, repo, branch, base, state, created)
+                 VALUES ('/w/a', ?1, '/r', 'varde/a', 'main', 'active', 1),
+                        ('/w/b', ?2, '/r', 'varde/b', 'main', 'merged', 1)",
+                [&landing, &landed],
+            )
+            .unwrap();
+        s.conn
+            .execute(
+                "INSERT INTO git_state (task, stage, label, checks, facts, checked)
+                 VALUES (?1, 'pr', 'PR #7 ✓', 'passing', '{}', 5), (?2, 'landed', 'landed', NULL, '{}', 5)",
+                [&landing, &landed],
+            )
+            .unwrap();
+        let now = 3 + RECENT_MS;
+        let b = build(&s, now, now - 1000, false, &|_, _| true).unwrap();
+        let done = b.groups.iter().find(|g| g.key == "done").unwrap();
+        assert_eq!(done.rows.len(), 1);
+        let row = &done.rows[0];
+        assert_eq!(row.title, "landing");
+        assert!(row.tracked);
+        let git = row.git.as_ref().unwrap();
+        assert_eq!(
+            (git.stage.as_str(), git.label.as_str(), git.checks.as_deref()),
+            ("pr", "PR #7 ✓", Some("passing"))
+        );
+    }
+
+    #[test]
+    fn only_old_done_tasks_leave_the_board() {
+        let (_d, mut s) = store();
+        ingest(&mut s, "a", Kind::Prompt, Some("old"), 1);
+        ingest(&mut s, "a", Kind::Ended, None, 2);
+        ingest(&mut s, "b", Kind::Prompt, Some("finished"), 3);
+        s.conn.execute("UPDATE task SET state='done', closed=4 WHERE title='finished'", []).unwrap();
+        let now = 2 + 365 * 24 * 3600 * 1000;
+        let b = build(&s, now, now - 1000, false, &|_, _| true).unwrap();
+        assert_eq!(keys(&b)[3], ("inbox", vec!["old"]));
+        assert_eq!(b.groups.iter().map(|g| g.rows.len()).sum::<usize>(), 1);
+        let b = build(&s, now, now - 1000, true, &|_, _| true).unwrap();
+        assert_eq!(b.groups.iter().map(|g| g.rows.len()).sum::<usize>(), 2);
+    }
+
+    #[test]
+    fn an_accepted_session_moves_from_the_inbox_to_open() {
+        let (_d, mut s) = store();
+        ingest(&mut s, "a", Kind::Prompt, Some("keeper"), 1);
+        ingest(&mut s, "a", Kind::Ended, None, 2);
+        let id: String = s.conn.query_row("SELECT id FROM task", [], |r| r.get(0)).unwrap();
+        crate::task::accept(&s, &id).unwrap();
+        let b = build(&s, 10, 0, false, &|_, _| true).unwrap();
+        assert_eq!(keys(&b)[2], ("open", vec!["keeper"]));
+        assert!(!b.groups[2].rows[0].inbox);
+    }
+
+    #[test]
+    fn a_deferred_task_is_in_the_inbox_and_names_its_origin() {
+        let (_d, mut s) = store();
+        ingest(&mut s, "a", Kind::Prompt, Some("big job"), 1);
+        let run: String = s.conn.query_row("SELECT id FROM run", [], |r| r.get(0)).unwrap();
+        let origin: String = s.conn.query_row("SELECT id FROM task", [], |r| r.get(0)).unwrap();
+        crate::task::defer(&s, "later bit", None, &run, None, 2).unwrap();
+        let b = build(&s, 3, 0, false, &|_, _| true).unwrap();
+        let row = &b.groups[3].rows.iter().find(|r| r.title == "later bit").unwrap();
+        let o = row.origin.as_ref().unwrap();
+        assert_eq!((o.task.as_str(), o.title.as_str()), (origin.as_str(), "big job"));
+        assert!(row.run.is_none());
+        assert_eq!(row.status, "open");
+    }
+
+    #[test]
+    fn a_task_never_started_does_not_show_its_project_checkout() {
+        let (_d, mut s) = store();
+        ingest(&mut s, "a", Kind::Prompt, Some("started"), 1);
+        let run: String = s.conn.query_row("SELECT id FROM run", [], |r| r.get(0)).unwrap();
+        crate::task::defer(&s, "not started", None, &run, None, 2).unwrap();
+        s.conn.execute("UPDATE task SET project = '/p'", []).unwrap();
+        s.conn
+            .execute(
+                "INSERT INTO git_state (task, stage, label, checks, facts, checked)
+                 SELECT id, 'committed', 'committed', NULL, '{}', 3 FROM task",
+                [],
+            )
+            .unwrap();
+        let b = build(&s, 3, 0, false, &|_, _| true).unwrap();
+        let row = |title: &str| b.groups.iter().flat_map(|g| &g.rows).find(|r| r.title == title).unwrap();
+        assert!(row("started").tracked);
+        assert!(row("started").git.is_some());
+        assert!(!row("not started").tracked);
+        assert!(row("not started").git.is_none());
+    }
+}

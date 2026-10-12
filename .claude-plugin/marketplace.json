@@ -1,0 +1,19 @@
+{
+  "name": "varde",
+  "owner": {
+    "name": "Morten Smebye",
+    "email": "mortensmeb@gmail.com"
+  },
+  "metadata": {
+    "description": "varde: agent sessions as tasks, with memory",
+    "version": "1.0.0"
+  },
+  "plugins": [
+    {
+      "name": "varde",
+      "description": "Records Claude Code sessions as varde tasks (calls the varde binary)",
+      "source": "./cli/plugin",
+      "strict": false
+    }
+  ]
+}

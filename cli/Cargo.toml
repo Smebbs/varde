@@ -1,0 +1,31 @@
+[workspace]
+resolver = "2"
+members = ["crates/*"]
+
+[workspace.package]
+version = "1.0.0"
+edition = "2021"
+license = "MIT"
+# The oldest Rust that builds the locked dependencies (ratatui needs 1.88);
+# varde's own code needs 1.82. Checked with `cargo +1.88 check --all-targets`.
+rust-version = "1.88"
+
+[workspace.dependencies]
+anyhow = "1"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+clap = { version = "4", features = ["derive"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = { version = "0.8", default-features = false, features = ["parse"] }
+ulid = "1"
+uuid = { version = "1", features = ["v4"] }
+libc = "0.2"
+proptest = "1"
+ratatui = "0.29"
+unicode-width = "0.2"
+tempfile = "3"
+
+[profile.release]
+lto = true
+codegen-units = 1

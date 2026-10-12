@@ -1,0 +1,22 @@
+{
+ "session_id": "23af6c13-105c-4831-8f1b-8622e6d045d7",
+ "transcript_path": "/home/user/.claude/projects/-home-user-proj/23af6c13-105c-4831-8f1b-8622e6d045d7.jsonl",
+ "cwd": "/home/user/proj",
+ "prompt_id": "7c9daa82-426b-439a-8b7f-7ec746218b15",
+ "permission_mode": "default",
+ "hook_event_name": "PostToolUse",
+ "tool_name": "Bash",
+ "tool_input": {
+  "command": "ls",
+  "description": "List files in current directory"
+ },
+ "tool_response": {
+  "stdout": "",
+  "stderr": "",
+  "interrupted": false,
+  "isImage": false,
+  "noOutputExpected": false
+ },
+ "tool_use_id": "toolu_01RRHa7kuYbYmmdhBP4Co9C6",
+ "duration_ms": 35
+}

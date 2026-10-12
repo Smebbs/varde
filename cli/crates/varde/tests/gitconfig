@@ -1,0 +1,10 @@
+# The global git config tests run with (tests/common/mod.rs).
+[user]
+	name = t
+	email = t@t
+[commit]
+	gpgsign = false
+[tag]
+	gpgsign = false
+[init]
+	defaultBranch = main
