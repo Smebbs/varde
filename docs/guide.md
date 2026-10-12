@@ -152,7 +152,7 @@ with `← <short>` of the task it came from. `?` lists every key.
 | `d` / `p` / `x` | Done / park / throw away. `x` asks first, and `d` and `p` ask when a session is mid-turn: stop it, or keep it running. |
 | space | Mark rows, so `a`, `d` and `p` act on all of them. Esc unmarks. |
 | `v` | Detail with the cairn. C-d and C-u scroll. |
-| `e` | Edit the cairn. |
+| `e` | Edit the task. Before it has a cairn, its title and context, in the `n` form; C-s saves. After, and on a task linked elsewhere, the cairn with the context above it, in `$VISUAL` or `$EDITOR`. |
 | `V` | Detail with the project cairn of the task's project. |
 | `E` | Edit that project cairn. |
 | `m` | Move the task to another project: asks for a directory, its project filled in. varde's refusal (an active worktree, a live session) shows on the message line. Listed under `?`, not in the footer. |

@@ -104,8 +104,12 @@ impl App<'_> {
     fn bottom_line(&self, width: usize) -> Line<'static> {
         let ask = |s: String| Line::from(s.bold());
         match &self.mode {
-            Mode::New(_) => Line::from(
-                "Tab title/body  Enter newline in body  C-s or Enter on title create  C-g $EDITOR  Esc cancel".dark_gray(),
+            Mode::New(d) => Line::from(
+                format!(
+                    "Tab title/body  Enter newline in body  C-s or Enter on title {}  C-g $EDITOR  Esc cancel",
+                    if d.task.is_some() { "save" } else { "create" }
+                )
+                .dark_gray(),
             ),
             Mode::Help => Line::from("any key closes this".dark_gray()),
             Mode::Recall(q) => Line::from(vec!["Recall: ".bold(), Span::raw(clean(q)), "▏".into()]),
@@ -198,7 +202,7 @@ const HELP: [(&str, &[(&str, &str)]); 4] = [
         "Look",
         &[
             ("v", "detail; C-d/C-u scroll"),
-            ("e", "edit the cairn"),
+            ("e", "edit title and context, or the cairn"),
             ("V", "its project cairn"),
             ("E", "edit the project cairn"),
             ("=", "diff of its work"),

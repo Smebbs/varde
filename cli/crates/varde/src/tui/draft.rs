@@ -11,12 +11,15 @@ use varde_core::title::clean;
 
 use super::draw::left_clip;
 
-/// A new task being written: a short title, and as much context as it needs.
+/// A new task being written: a short title, and as much context as it
+/// needs. Or a task already made, its title and context being changed.
 #[derive(Default)]
 pub(super) struct Draft {
     pub(super) title: String,
     pub(super) body: String,
     pub(super) in_body: bool,
+    /// The task this changes; a new one when `None`.
+    pub(super) task: Option<String>,
 }
 
 pub(super) enum Edit {
@@ -118,7 +121,8 @@ pub(super) fn draw_draft(f: &mut Frame, draft: &Draft, area: Rect) {
     // Six rows where the screen has them; a smaller one gets all it has.
     let height = (rows + 4).max(6).min(area.height as usize) as u16;
     let area = Rect { y: area.bottom() - height, height, ..area };
-    let block = Block::default().title(" New task ").borders(Borders::ALL);
+    let name = if draft.task.is_some() { " Edit task " } else { " New task " };
+    let block = Block::default().title(name).borders(Borders::ALL);
     let [title, rule, body] =
         Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)])
             .areas(block.inner(area));
@@ -209,7 +213,8 @@ mod tests {
 
     #[test]
     fn a_draft_goes_to_the_editor_and_comes_back() {
-        let mut d = Draft { title: "Fix the login".into(), body: "It fails.\n".into(), in_body: false };
+        let mut d =
+            Draft { title: "Fix the login".into(), body: "It fails.\n".into(), in_body: false, task: None };
         let text = d.text();
         assert!(text.starts_with(HINT), "{text}");
         assert!(text.ends_with("Fix the login\n\nIt fails.\n"), "{text}");

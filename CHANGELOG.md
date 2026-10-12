@@ -4,6 +4,14 @@ Notable changes to varde and org-varde. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions
 follow [Semantic Versioning](https://semver.org).
 
+## Unreleased
+
+### Changed
+
+- `e` on the board edits a task without a cairn in the new-task form,
+  its title and context filled in, where it opened `$EDITOR`. C-g in
+  the form still goes to the editor.
+
 ## 1.0.2 - 2026-10-12
 
 ### Added

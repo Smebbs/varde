@@ -391,6 +391,7 @@ impl<'a> App<'a> {
                 Edit::Typing => self.mode = Mode::New(draft),
                 Edit::Editor => return Some(Away::Draft(draft)),
                 Edit::Create if draft.title.trim().is_empty() => self.message = "a task needs a title".into(),
+                Edit::Create if draft.task.is_some() => self.save(&draft),
                 Edit::Create => {
                     let dir = self.current().and_then(|r| r.project.clone());
                     let dir = dir
@@ -506,7 +507,7 @@ impl<'a> App<'a> {
                     KeyCode::Char('s') => start(Want::Continue, false),
                     KeyCode::Char('R') => start(Want::Fresh, true),
                     KeyCode::Char('F') => start(Want::Fork, true),
-                    KeyCode::Char('e') => self.current_id().map(Away::Edit),
+                    KeyCode::Char('e') => self.edit(),
                     KeyCode::Char('E') => match self.current() {
                         Some(r) => match r.project.clone() {
                             Some(p) => Some(Away::EditProject(p)),
@@ -723,6 +724,51 @@ impl<'a> App<'a> {
             Ok(m) => m,
             Err(e) => format!("error: {e:#}"),
         };
+    }
+
+    /// `e`: a task without a cairn has only its title and context to
+    /// change, and the new-task form edits them. One with a cairn, or
+    /// linked elsewhere, which then owns its text, goes to `$EDITOR`.
+    fn edit(&mut self) -> Option<Away> {
+        let row = self.current()?;
+        let id = row.task.clone();
+        if row.external.is_some() {
+            return Some(Away::Edit(id));
+        }
+        let result = (|| -> Result<Option<Draft>> {
+            let store = self.paths.open(BUSY)?;
+            let cairn = varde_core::memory::document(&store.conn, varde_core::memory::Owner::Task(&id))?;
+            if cairn.is_some_and(|(c, _)| !c.is_empty()) {
+                return Ok(None);
+            }
+            let (title, body): (String, Option<String>) =
+                store.conn.query_row("SELECT title, body FROM task WHERE id = ?1", [&id], |r| {
+                    Ok((r.get(0)?, r.get(1)?))
+                })?;
+            Ok(Some(Draft { title, body: body.unwrap_or_default(), in_body: false, task: Some(id.clone()) }))
+        })();
+        match result {
+            Ok(Some(draft)) => {
+                self.mode = Mode::New(draft);
+                None
+            }
+            Ok(None) => Some(Away::Edit(id)),
+            Err(e) => {
+                self.report(Err(e));
+                None
+            }
+        }
+    }
+
+    /// Save the title and context of the task `draft` edits.
+    fn save(&mut self, draft: &Draft) {
+        let Some(id) = &draft.task else { return };
+        let result = (|| {
+            let store = self.paths.open(BUSY)?;
+            task::set(&store, id, Some(draft.title.trim()), Some(&draft.body))?;
+            Ok(format!("saved {}", task::short(id)))
+        })();
+        self.report(result);
     }
 
     /// Create the task in the project `dir` is in.
@@ -1535,6 +1581,49 @@ mod tests {
         key(&mut app, KeyCode::Char('v'));
         assert!(!app.detail, "the same key closes it");
         assert!(matches!(key(&mut app, KeyCode::Char('E')), Some(Away::EditProject(p)) if p == "/p"));
+    }
+
+    #[test]
+    fn e_edits_title_and_context_in_the_form_until_there_is_a_cairn() {
+        let (_dir, paths) = temp_paths();
+        let mut app = board(&paths, &["One"]);
+        let id = app.current_id().unwrap();
+        let store = paths.open(BUSY).unwrap();
+        store.conn.execute("UPDATE task SET body = 'Old context.'", []).unwrap();
+        let text = |col: &str| -> Option<String> {
+            store.conn.query_row(&format!("SELECT {col} FROM task"), [], |r| r.get(0)).unwrap()
+        };
+
+        assert!(key(&mut app, KeyCode::Char('e')).is_none(), "no editor");
+        assert!(matches!(&app.mode, Mode::New(d) if d.title == "One" && d.body == "Old context."));
+        let s = screen(&mut app, 100, 24);
+        assert!(s.contains("Edit task") && s.contains("on title save"), "{s}");
+        app.paste(" more");
+        key(&mut app, KeyCode::Tab);
+        key(&mut app, KeyCode::Enter);
+        app.paste("New line.");
+        app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(app.message.starts_with("saved "), "{}", app.message);
+        assert_eq!(text("title").as_deref(), Some("One more"));
+        assert_eq!(text("body").as_deref(), Some("Old context.\nNew line."));
+        assert_eq!(app.rows().count(), 1, "nothing created");
+
+        // Esc changes nothing.
+        key(&mut app, KeyCode::Char('e'));
+        app.paste("!");
+        key(&mut app, KeyCode::Esc);
+        assert_eq!(text("title").as_deref(), Some("One more"));
+
+        let cairn =
+            varde_core::cairn::Cairn::from_edit("Status: Looked.\nFindings:\n- A.\n", &Default::default());
+        varde_core::memory::put_cairn(&store.conn, &id, &cairn, 0, "user", None, now_ms()).unwrap();
+        assert!(
+            matches!(key(&mut app, KeyCode::Char('e')), Some(Away::Edit(t)) if t == id),
+            "a cairn: $EDITOR"
+        );
+
+        store.conn.execute("UPDATE task SET external = 'org'", []).unwrap();
+        assert!(matches!(key(&mut app, KeyCode::Char('e')), Some(Away::Edit(_))), "linked: $EDITOR");
     }
 
     #[test]

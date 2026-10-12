@@ -121,13 +121,14 @@ fn an_edit_that_changes_nothing_says_so_on_the_board() {
     t.type_in(&pane, &e.typed(&format!("VISUAL=true EDITOR=true {}", env!("CARGO_BIN_EXE_varde"))));
     let shown = || t.tmux(&["capture-pane", "-p", "-t", &pane]).unwrap();
     wait("the board", || shown().contains("Try it"));
-    for key in ["e", "E"] {
-        t.tmux(&["send-keys", "-t", &pane, key]).unwrap();
-        wait("the message", || shown().contains("cairn unchanged"));
-        assert!(!shown().contains("saved"), "{}", shown());
-        t.tmux(&["send-keys", "-t", &pane, "g"]).unwrap();
-        wait("the message to go", || !shown().contains("cairn unchanged"));
-    }
+    // Without a cairn, `e` edits the task in the form, not the editor.
+    t.tmux(&["send-keys", "-t", &pane, "e"]).unwrap();
+    wait("the form", || shown().contains("Edit task"));
+    t.tmux(&["send-keys", "-t", &pane, "Escape"]).unwrap();
+    wait("the form to go", || !shown().contains("Edit task"));
+    t.tmux(&["send-keys", "-t", &pane, "E"]).unwrap();
+    wait("the message", || shown().contains("cairn unchanged"));
+    assert!(!shown().contains("saved"), "{}", shown());
     t.tmux(&["send-keys", "-t", &pane, "q"]).unwrap();
 }
 
