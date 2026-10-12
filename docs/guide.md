@@ -147,7 +147,7 @@ with `← <short>` of the task it came from. `?` lists every key.
 | `RET` | Start the task, or go to it if it is running. |
 | `s` | Inside tmux, start it in the background and stay on the board. |
 | `R` / `F` | Start a fresh conversation / fork the latest one. |
-| `n` | New task. Tab moves to a body for its context; Enter on the title, or C-s, asks for its project, offering the one of the task at point, and RET creates it. |
+| `n` | New task. Tab moves to a body for its context; Enter on the title, or C-s, asks for its project, offering the one of the task at point, and RET creates it. C-g writes it in `$VISUAL` or `$EDITOR` instead, the title on the first line and the context below, and comes back to the form. C-w rubs out a word and C-u the line. |
 | `a` | Accept an Inbox task. |
 | `d` / `p` / `x` | Done / park / throw away. `x` asks first, and `d` and `p` ask when a session is mid-turn: stop it, or keep it running. |
 | space | Mark rows, so `a`, `d` and `p` act on all of them. Esc unmarks. |

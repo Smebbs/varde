@@ -95,6 +95,8 @@ enum Away {
     /// Edit the cairn of this project.
     EditProject(String),
     Diff(Diff),
+    /// Write the new task in `$EDITOR`, and come back to the form.
+    Draft(Draft),
 }
 
 /// What recall found: j/k pick a hit, RET goes to its task on the board,
@@ -387,6 +389,7 @@ impl<'a> App<'a> {
             Mode::Help => {}
             Mode::New(mut draft) => match draft.key(key) {
                 Edit::Typing => self.mode = Mode::New(draft),
+                Edit::Editor => return Some(Away::Draft(draft)),
                 Edit::Create if draft.title.trim().is_empty() => self.message = "a task needs a title".into(),
                 Edit::Create => {
                     let dir = self.current().and_then(|r| r.project.clone());
@@ -698,6 +701,14 @@ impl<'a> App<'a> {
                     .map(|s| saved("project cairn", s))
             }
             Away::Diff(diff) => self.diff(&diff),
+            Away::Draft(mut draft) => {
+                let result = crate::memory_cmd::edit_in_editor("task", &draft.text()).map(|text| {
+                    draft.set_text(&text);
+                    String::new()
+                });
+                self.mode = Mode::New(draft);
+                result
+            }
         };
         *term = enter()?;
         self.redraw = true;

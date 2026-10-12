@@ -344,27 +344,59 @@ Asked for, offering the project of the task at point."
                                 (and project (file-name-as-directory project))))))
   (org-varde-new-session directory))
 
-(defun org-varde-board-create (title body directory)
-  "Create a task titled TITLE, with BODY as its context, and start nothing.
-It is in the project DIRECTORY is in, asked for, offering the project
-of the task at point."
+(defvar-keymap org-varde-new-mode-map
+  "C-c C-c" #'org-varde-new-create
+  "C-c C-k" #'kill-current-buffer)
+
+(define-derived-mode org-varde-new-mode text-mode "varde new"
+  "Write a new task: its title on the first line, and below it the
+context for the agent.  \\[org-varde-new-create] creates it.")
+
+(defvar-local org-varde--new-offer nil
+  "The project offered when the task being written is created.")
+
+(defun org-varde-board-create ()
+  "Write a new task in a buffer of its own, and start nothing.
+Its project is asked for when it is created, offering that of the task
+at point."
+  (interactive)
+  (let ((project (plist-get (get-text-property (point) 'org-varde-row) :project))
+        (buffer (get-buffer-create "*varde new*")))
+    (with-current-buffer buffer
+      ;; A task being written is kept.
+      (unless (buffer-modified-p)
+        (erase-buffer)
+        (org-varde-new-mode)
+        (setq header-line-format
+              "First line: the title.  Below it: context for the agent.  C-c C-c create, C-c C-k cancel"))
+      (setq org-varde--new-offer project))
+    (pop-to-buffer buffer)))
+
+(defun org-varde-new-create (directory)
+  "Create the task written in this buffer in the project DIRECTORY is in."
   (interactive
-   (let ((title (read-string "Title: ")))
+   (let ((title (car (org-varde--new-text))))
      (when (string-blank-p title) (user-error "A task needs a title"))
-     (list title
-           (read-string "Context for the agent (RET for none): ")
-           (let ((project (plist-get (get-text-property (point) 'org-varde-row) :project)))
-             (read-directory-name "Project directory for this task: "
-                                  (and project (file-name-as-directory project)))))))
-  (when (string-blank-p title) (user-error "A task needs a title"))
-  (let* ((project (expand-file-name directory))
-         (body (and (not (string-blank-p body)) body))
-         (new (org-varde--json
-               (org-varde--call body (append (list "new" "--json" "--project" project)
-                                             (and body (list "--body" "-"))
-                                             (list "--" title))))))
+     (list (read-directory-name "Project directory for this task: "
+                                (and org-varde--new-offer
+                                     (file-name-as-directory org-varde--new-offer))))))
+  (pcase-let* ((`(,title . ,body) (org-varde--new-text))
+               (project (expand-file-name directory))
+               (body (and (not (string-blank-p body)) body))
+               (new (org-varde--json
+                     (org-varde--call body (append (list "new" "--json" "--project" project)
+                                                   (and body (list "--body" "-"))
+                                                   (list "--" title))))))
+    (kill-current-buffer)
     (message "Created %s; RET starts it" (plist-get new :short)))
   (org-varde-refresh))
+
+(defun org-varde--new-text ()
+  "The task written in this buffer, as (TITLE . BODY)."
+  (let* ((text (string-trim-left (buffer-string)))
+         (split (string-search "\n" text)))
+    (cons (string-trim (substring text 0 split))
+          (string-trim (if split (substring text split) "")))))
 
 (defun org-varde-board-move (directory)
   "Move the task at point to the project DIRECTORY is in.

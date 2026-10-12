@@ -132,6 +132,38 @@ fn an_edit_that_changes_nothing_says_so_on_the_board() {
 }
 
 #[test]
+fn a_new_task_can_be_written_in_the_editor() {
+    let e = env();
+    let Some(t) = Tmux::start(e.dir.path()) else { return eprintln!("no tmux; skipped") };
+    let pane = t.tmux(&["display", "-p", "-t", "t", "#{pane_id}"]).unwrap();
+    prepared(&e);
+    // An editor that keeps the hint and the title typed, and writes the rest.
+    let editor = e.path("editor");
+    std::fs::write(
+        &editor,
+        "#!/bin/sh\nsed -i 's/^Cache$/Cache by locale/' \"$1\"\nprintf 'Start in cache.rs\\nthen the tests\\n' >> \"$1\"\n",
+    )
+    .unwrap();
+    std::fs::set_permissions(&editor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    t.type_in(&pane, &e.typed(&format!("VISUAL={} {}", editor.display(), env!("CARGO_BIN_EXE_varde"))));
+    let shown = || t.tmux(&["capture-pane", "-p", "-t", &pane]).unwrap();
+    wait("the board", || shown().contains("Try it"));
+    t.tmux(&["send-keys", "-t", &pane, "n"]).unwrap();
+    t.tmux(&["send-keys", "-t", &pane, "-l", "Cache"]).unwrap();
+    t.tmux(&["send-keys", "-t", &pane, "C-g"]).unwrap();
+    wait("the form again", || shown().contains("Title: Cache by locale"));
+    t.tmux(&["send-keys", "-t", &pane, "C-s"]).unwrap();
+    wait("the project", || shown().contains("Project for this task"));
+    t.tmux(&["send-keys", "-t", &pane, "Enter"]).unwrap();
+    wait("the task", || shown().contains("created "));
+    t.tmux(&["send-keys", "-t", &pane, "q"]).unwrap();
+    assert_eq!(
+        e.query("SELECT body FROM task WHERE title = 'Cache by locale'"),
+        "Start in cache.rs\nthen the tests"
+    );
+}
+
+#[test]
 fn a_flood_of_keys_is_not_a_refresh_a_key() {
     let e = env();
     let Some(t) = Tmux::start(e.dir.path()) else { return eprintln!("no tmux; skipped") };

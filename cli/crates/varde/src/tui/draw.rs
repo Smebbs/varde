@@ -105,7 +105,7 @@ impl App<'_> {
         let ask = |s: String| Line::from(s.bold());
         match &self.mode {
             Mode::New(_) => Line::from(
-                "Tab title/body  Enter newline in body  C-s or Enter on title create  Esc cancel".dark_gray(),
+                "Tab title/body  Enter newline in body  C-s or Enter on title create  C-g $EDITOR  Esc cancel".dark_gray(),
             ),
             Mode::Help => Line::from("any key closes this".dark_gray()),
             Mode::Recall(q) => Line::from(vec!["Recall: ".bold(), Span::raw(clean(q)), "▏".into()]),

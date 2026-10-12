@@ -6,6 +6,14 @@ follow [Semantic Versioning](https://semver.org).
 
 ## Unreleased
 
+### Added
+
+- C-g in the board's new-task form writes the task in `$VISUAL` or
+  `$EDITOR`, and C-w and C-u rub out a word and a line.
+- `n` on the org-varde board writes the task in a buffer of its own,
+  the title on the first line and the context below, where it asked
+  for one line of each in the minibuffer. C-c C-c creates it.
+
 ### Fixed
 
 - org-varde starts a task without blocking Emacs, which waited while

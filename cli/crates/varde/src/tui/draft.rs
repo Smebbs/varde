@@ -23,20 +23,32 @@ pub(super) enum Edit {
     Typing,
     Create,
     Cancel,
+    /// Write it in `$EDITOR` instead.
+    Editor,
 }
+
+/// The hint at the top of the file a draft is written in.
+const HINT: &str = "#: ";
 
 impl Draft {
     /// Tab moves between title and body. Enter creates from the title and
-    /// starts a new line in the body; Ctrl-S creates from either.
+    /// starts a new line in the body; Ctrl-S creates from either, and
+    /// Ctrl-G opens the draft in `$EDITOR`. Ctrl-W and Alt-Backspace rub
+    /// out a word, Ctrl-U the line.
     pub(super) fn key(&mut self, key: KeyEvent) -> Edit {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let alt = key.modifiers.contains(KeyModifiers::ALT);
         let field = if self.in_body { &mut self.body } else { &mut self.title };
         match key.code {
             KeyCode::Esc => return Edit::Cancel,
             KeyCode::Char('s') if ctrl => return Edit::Create,
+            KeyCode::Char('g') if ctrl => return Edit::Editor,
             KeyCode::Enter if !self.in_body => return Edit::Create,
             KeyCode::Enter => field.push('\n'),
             KeyCode::Tab | KeyCode::BackTab => self.in_body = !self.in_body,
+            KeyCode::Char('w') if ctrl => rub_word(field),
+            KeyCode::Backspace if alt || ctrl => rub_word(field),
+            KeyCode::Char('u') if ctrl => field.truncate(field.rfind('\n').map_or(0, |i| i + 1)),
             KeyCode::Backspace => {
                 field.pop();
             }
@@ -63,6 +75,38 @@ impl Draft {
             self.body.push_str(rest);
             self.in_body = true;
         }
+    }
+
+    /// The draft as a file to edit: the title on its first line, then a
+    /// blank line and the body.
+    pub(super) fn text(&self) -> String {
+        let hint = [
+            "The first line is the title, and the rest is context for the agent.",
+            "Lines starting with \"#:\" are left out. Save and quit to go back to the form.",
+        ];
+        let hint: String = hint.iter().map(|l| format!("{HINT}{l}\n")).collect();
+        format!("{hint}{}\n\n{}\n", self.title, self.body.trim_end())
+    }
+
+    /// Take back the draft as [`text`](Self::text) wrote it.
+    pub(super) fn set_text(&mut self, text: &str) {
+        let text: String = text.split_inclusive('\n').filter(|l| !l.starts_with(HINT)).collect();
+        let text = text.trim_start();
+        let (title, body) = text.split_once('\n').unwrap_or((text, ""));
+        self.title = title.trim().to_string();
+        self.body = body.trim().to_string();
+        self.in_body = !self.body.is_empty();
+    }
+}
+
+/// Rub out the word before the end of `s`, and the blanks after it; at
+/// the start of a line, the line break.
+fn rub_word(s: &mut String) {
+    let kept = s.trim_end_matches([' ', '\t']).trim_end_matches(|c: char| !c.is_whitespace()).len();
+    if kept < s.len() {
+        s.truncate(kept);
+    } else {
+        s.pop();
     }
 }
 
@@ -139,6 +183,43 @@ mod tests {
         press(&mut d, KeyCode::Tab);
         assert!(matches!(press(&mut d, KeyCode::Enter), Edit::Create), "Tab goes back to the title");
         assert!(matches!(press(&mut d, KeyCode::Esc), Edit::Cancel));
+    }
+
+    #[test]
+    fn ctrl_w_rubs_out_a_word_and_ctrl_u_the_line() {
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+        let mut d = Draft::default();
+        typed(&mut d, "Fix the  login");
+        d.key(ctrl('w'));
+        assert_eq!(d.title, "Fix the  ");
+        d.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
+        assert_eq!(d.title, "Fix ");
+        press(&mut d, KeyCode::Tab);
+        typed(&mut d, "one");
+        press(&mut d, KeyCode::Enter);
+        typed(&mut d, "two words");
+        d.key(ctrl('u'));
+        assert_eq!(d.body, "one\n");
+        d.key(ctrl('w'));
+        assert_eq!(d.body, "one", "at a line's start, the line break goes");
+        d.key(ctrl('u'));
+        assert_eq!(d.body, "");
+        assert!(matches!(d.key(ctrl('g')), Edit::Editor));
+    }
+
+    #[test]
+    fn a_draft_goes_to_the_editor_and_comes_back() {
+        let mut d = Draft { title: "Fix the login".into(), body: "It fails.\n".into(), in_body: false };
+        let text = d.text();
+        assert!(text.starts_with(HINT), "{text}");
+        assert!(text.ends_with("Fix the login\n\nIt fails.\n"), "{text}");
+        d.set_text(&format!("{text}\n    indented()\n\n"));
+        assert_eq!(d.title, "Fix the login");
+        assert_eq!(d.body, "It fails.\n\n    indented()");
+        assert!(d.in_body);
+        // Only a title, and no blank line after it.
+        d.set_text("#: hint\n\nJust a title\n");
+        assert_eq!((d.title.as_str(), d.body.as_str(), d.in_body), ("Just a title", "", false));
     }
 
     #[test]

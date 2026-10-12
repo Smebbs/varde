@@ -253,7 +253,7 @@ fn edit_doc(
         std::io::read_to_string(std::io::stdin())?
     } else {
         let hint = hint(shape, context.as_ref().is_some_and(|c| c.linked.is_none()));
-        edit_in_editor(&format!("{hint}{shown}{editable}{before_text}"))?
+        edit_in_editor("cairn", &format!("{hint}{shown}{editable}{before_text}"))?
     };
     // The hint is not part of what was written.
     let text: String = text.split_inclusive('\n').filter(|l| !l.starts_with(HINT)).collect();
@@ -357,8 +357,9 @@ fn hint(shape: Shape, context: bool) -> String {
     .collect()
 }
 
-fn edit_in_editor(text: &str) -> Result<String> {
-    let mut file = tempfile::Builder::new().prefix("varde-cairn-").suffix(".md").tempfile()?;
+/// Edit `text` in `$VISUAL` or `$EDITOR`, in a file named after `what`.
+pub(crate) fn edit_in_editor(what: &str, text: &str) -> Result<String> {
+    let mut file = tempfile::Builder::new().prefix(&format!("varde-{what}-")).suffix(".md").tempfile()?;
     file.write_all(text.as_bytes())?;
     file.flush()?;
     let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| "vi".into());

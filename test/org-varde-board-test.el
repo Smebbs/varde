@@ -113,37 +113,48 @@
         (should (equal offered "/home/u/proj/"))
         (should (equal (car org-varde-test-terminals) '("/home/u/other/" "*claude other*")))))))
 
-(ert-deftest org-varde-board-create-asks-the-project-offering-the-task-at-point ()
+;; Write NOTE in the *varde new* buffer that `n' opened, and create it
+;; there, answering the project question with DIR.  Return what was offered.
+(defun org-varde-board-test--write (note dir)
+  (let (offered)
+    (with-current-buffer "*varde new*"
+      (should (derived-mode-p 'org-varde-new-mode))
+      (insert note)
+      (cl-letf (((symbol-function 'read-directory-name)
+                 (lambda (_prompt offer &rest _) (setq offered offer) (or dir offer))))
+        (call-interactively #'org-varde-new-create)))
+    offered))
+
+(ert-deftest org-varde-board-create-writes-the-task-in-a-buffer ()
   (org-varde-test-with-varde
     (org-varde-test-reply "new" "{\"v\":1,\"id\":\"T0000000000000000000NEW111\",\"short\":\"new111\"}")
     (org-varde-board-test--with
         (org-varde-board-test--data '(("open" "Open" ("T0000000000000000000AAA111" "Here" "open" nil))))
       (org-varde-board-test--first-row)
       ;; The project is asked for even on a task, offering its project.
-      (let (offered)
-        (cl-letf (((symbol-function 'read-string)
-                   (lambda (prompt &rest _)
-                     (if (string-prefix-p "Title" prompt) "Cache by locale" "Start in cache.rs")))
-                  ((symbol-function 'read-directory-name)
-                   (lambda (_prompt dir &rest _) (setq offered dir) dir)))
-          (call-interactively #'org-varde-board-create))
-        (should (equal offered "/home/u/proj/")))
+      (call-interactively #'org-varde-board-create)
+      (should (equal (org-varde-board-test--write "\nCache by locale\n\nStart in cache.rs\n  then the tests\n" nil)
+                     "/home/u/proj/"))
+      (should-not (get-buffer "*varde new*"))
       (should (member "new --json --project /home/u/proj/ --body - -- Cache by locale" (org-varde-test-calls)))
-      (should (equal (org-varde-test-stdin "new") "Start in cache.rs"))
+      (should (equal (org-varde-test-stdin "new") "Start in cache.rs\n  then the tests"))
       ;; No context, no body.  No task at point: nothing is offered.
-      (goto-char (point-min))
-      (let ((offered 'unset))
-        (cl-letf (((symbol-function 'read-string)
-                   (lambda (prompt &rest _) (if (string-prefix-p "Title" prompt) "Bare" "")))
-                  ((symbol-function 'read-directory-name)
-                   (lambda (_prompt dir &rest _) (setq offered dir) "/home/u/other/")))
-          (call-interactively #'org-varde-board-create))
-        (should-not offered))
+      (with-current-buffer org-varde-board-buffer
+        (goto-char (point-min))
+        (call-interactively #'org-varde-board-create))
+      (should-not (org-varde-board-test--write "Bare" "/home/u/other/"))
       (should (member "new --json --project /home/u/other/ -- Bare" (org-varde-test-calls)))
-      ;; A blank title is refused before the project is asked for.
-      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) " "))
-                ((symbol-function 'read-directory-name) (lambda (&rest _) (error "Asked too soon"))))
-        (should-error (call-interactively #'org-varde-board-create) :type 'user-error))
+      ;; A blank title is refused before the project is asked for, and
+      ;; what was written is kept.
+      (call-interactively #'org-varde-board-create)
+      (with-current-buffer "*varde new*"
+        (insert " \n\n")
+        (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) (error "Asked too soon"))))
+          (should-error (call-interactively #'org-varde-new-create) :type 'user-error)))
+      (call-interactively #'org-varde-board-create)
+      (with-current-buffer "*varde new*"
+        (should (equal (buffer-string) " \n\n"))
+        (kill-buffer))
       (should-not org-varde-test-terminals))))
 
 (ert-deftest org-varde-board-moves-the-task-at-point-to-another-project ()
