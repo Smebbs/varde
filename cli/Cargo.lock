@@ -1140,7 +1140,7 @@ dependencies = [
 
 [[package]]
 name = "varde"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "chrono",
@@ -1160,7 +1160,7 @@ dependencies = [
 
 [[package]]
 name = "varde-agent"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "serde_json",
  "tempfile",
@@ -1170,7 +1170,7 @@ dependencies = [
 
 [[package]]
 name = "varde-core"
-version = "1.0.0"
+version = "1.0.1"
 dependencies = [
  "anyhow",
  "chrono",

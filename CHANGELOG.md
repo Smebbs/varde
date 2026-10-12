@@ -4,6 +4,13 @@ Notable changes to varde and org-varde. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions
 follow [Semantic Versioning](https://semver.org).
 
+## 1.0.1 - 2026-10-12
+
+### Added
+
+- `s` in the board's recall pane starts the picked hit's task, asking
+  first to reopen it if it is closed.
+
 ## 1.0.0 - 2026-10-12
 
 The first public release.
