@@ -12,7 +12,13 @@ way.
 varde needs git, and Claude Code or pi. tmux 3.0 or later is optional:
 inside it, each session gets a window of its own.
 
-Take the binary for your platform from the
+Install it with Homebrew (macOS or Linux):
+
+```sh
+brew install smebbs/tap/varde
+```
+
+Or take the binary for your platform from the
 [latest release](https://github.com/Smebbs/varde/releases/latest) and
 put it on your PATH, or build it with Rust 1.88 or later:
 

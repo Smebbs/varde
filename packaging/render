@@ -1,0 +1,21 @@
+#!/usr/bin/env bash
+# Fills the Homebrew formula for a release.
+#
+#   packaging/render VERSION DIR
+#
+# DIR holds the release's varde-vVERSION-<target>.tar.gz.sha256 files.
+# Writes DIR/varde.rb.
+set -euo pipefail
+
+version=$1 dir=$2
+here=$(dirname "$0")
+
+args=(-e "s/@VERSION@/$version/g")
+for target in x86_64-unknown-linux-musl aarch64-unknown-linux-musl \
+              x86_64-apple-darwin aarch64-apple-darwin; do
+  sum=$(cut -d' ' -f1 "$dir/varde-v$version-$target.tar.gz.sha256")
+  [[ $sum =~ ^[0-9a-f]{64}$ ]] || { echo "no sha256 for $target" >&2; exit 1; }
+  args+=(-e "s/@SHA256_$target@/$sum/g")
+done
+
+sed "${args[@]}" "$here/homebrew/varde.rb" > "$dir/varde.rb"

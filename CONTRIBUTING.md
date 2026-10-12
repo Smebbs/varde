@@ -69,4 +69,9 @@ fake `varde` and records terminals instead of opening them.
 Bump `version` in `cli/Cargo.toml`, `cli/plugin/.claude-plugin/plugin.json`,
 `.claude-plugin/marketplace.json` and `org-varde.el`, move *Unreleased* in the changelog under the new
 version, and push a `vX.Y.Z` tag. The release workflow builds the
-binaries and publishes the release.
+binaries and publishes the release. Then it fills the templates in
+`packaging/` with the version and checksums (`packaging/render`) and
+pushes the formula to
+[Smebbs/homebrew-tap](https://github.com/Smebbs/homebrew-tap). That
+needs the repository secret `HOMEBREW_TAP_TOKEN`, a token that can push
+to the tap, and is skipped without it.

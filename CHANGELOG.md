@@ -8,6 +8,9 @@ follow [Semantic Versioning](https://semver.org).
 
 ### Added
 
+- varde installs with Homebrew (`brew install smebbs/tap/varde`). Each
+  release updates the formula.
+
 - The board keeps to the project it is opened in: the TUI (in tmux or
   not) from its directory, org-varde from the buffer's. Its title or
   header line says how many tasks are in other projects, and how many

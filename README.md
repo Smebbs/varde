@@ -63,7 +63,13 @@ planned.
 
 You need git, and Claude Code or pi. tmux 3.0 or later is optional.
 
-1. **varde.** Take the binary for your platform from the
+1. **varde.** With Homebrew (macOS or Linux):
+
+   ```sh
+   brew install smebbs/tap/varde
+   ```
+
+   Or take the binary for your platform from the
    [latest release](https://github.com/Smebbs/varde/releases/latest)
    and put it on your PATH, or build it with Rust 1.88 or later:
 
