@@ -6,6 +6,12 @@ follow [Semantic Versioning](https://semver.org).
 
 ## Unreleased
 
+### Added
+
+- Tab completes directory names in the board's project prompts (a new
+  task's project and `m`, move), as a shell does: as far as the
+  directories agree, then a list of them.
+
 ### Changed
 
 - `e` on the board edits a task without a cairn in the new-task form,

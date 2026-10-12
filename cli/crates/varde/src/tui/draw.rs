@@ -99,6 +99,24 @@ impl App<'_> {
         f.render_widget(Paragraph::new(line).wrap(Wrap { trim: false }), bottom);
     }
 
+    /// What follows a directory prompt: the directories Tab could
+    /// complete it to, in at most half the `width`, or else its `keys`.
+    fn prompt_keys(&self, keys: &str, width: usize) -> String {
+        if self.matches.is_empty() {
+            return keys.to_string();
+        }
+        let mut out = String::new();
+        for m in &self.matches {
+            let m = format!("  {}", clean(m));
+            if out.width() + m.width() + 3 > width / 2 {
+                out.push_str("  …");
+                break;
+            }
+            out.push_str(&m);
+        }
+        out
+    }
+
     /// The line under the board: a prompt, the message, or the keys.
     /// Two rows where one is too narrow for it.
     fn bottom_line(&self, width: usize) -> Line<'static> {
@@ -114,7 +132,7 @@ impl App<'_> {
             Mode::Help => Line::from("any key closes this".dark_gray()),
             Mode::Recall(q) => Line::from(vec!["Recall: ".bold(), Span::raw(clean(q)), "▏".into()]),
             Mode::Move(_, dir) => {
-                let keys = "  RET move  C-u clear  Esc cancel";
+                let keys = self.prompt_keys("  RET move  Tab complete  C-u clear  Esc cancel", width);
                 let room = width.saturating_sub(17 + 1 + keys.width());
                 Line::from(vec![
                     "Move to project: ".bold(),
@@ -124,7 +142,7 @@ impl App<'_> {
                 ])
             }
             Mode::Where(_, dir) => {
-                let keys = "  RET create  C-u clear  Esc back";
+                let keys = self.prompt_keys("  RET create  Tab complete  C-u clear  Esc back", width);
                 let room = width.saturating_sub(23 + 1 + keys.width());
                 Line::from(vec![
                     "Project for this task: ".bold(),
