@@ -98,7 +98,7 @@ enum Away {
 }
 
 /// What recall found: j/k pick a hit, RET goes to its task on the board,
-/// Tab searches this project or every one.
+/// s starts it, Tab searches this project or every one.
 struct Found {
     query: String,
     /// Every project, rather than the one the board was started in.
@@ -451,6 +451,15 @@ impl<'a> App<'a> {
                 KeyCode::Char('y') if self.current_id().as_deref() == Some(task.as_str()) => {
                     return self.begin(start)
                 }
+                // Asked by `s` on a recall hit, which may be too old for the board.
+                KeyCode::Char('y') if self.picked().as_deref() == Some(task.as_str()) => {
+                    let reopened = self.paths.open(BUSY).and_then(|s| crate::start::reopen(&s.conn, &task));
+                    if let Err(e) = reopened {
+                        self.report(Err(e));
+                        return None;
+                    }
+                    return self.start_on_board(&task, start);
+                }
                 _ => self.message = "cancelled".into(),
             },
             Mode::Stop(how, ids) => match key.code {
@@ -465,6 +474,9 @@ impl<'a> App<'a> {
             },
             Mode::Normal => {
                 self.message.clear();
+                if self.found.is_some() && key.code == KeyCode::Char('s') {
+                    return self.start_hit();
+                }
                 if self.found.is_some() && self.recall_key(key.code) {
                     return None;
                 }
@@ -527,7 +539,7 @@ impl<'a> App<'a> {
     }
 
     /// A key for the recall pane: j/k pick a hit, RET goes to its task,
-    /// Tab widens or narrows the search. Whether it took the key.
+    /// Tab widens or narrows the search; `s` is `start_hit`. Whether it took the key.
     fn recall_key(&mut self, code: KeyCode) -> bool {
         let Some(found) = self.found.as_mut() else { return false };
         let n = found.hits.len();
@@ -547,6 +559,43 @@ impl<'a> App<'a> {
             _ => return false,
         }
         true
+    }
+
+    /// The task of the picked recall hit.
+    fn picked(&self) -> Option<String> {
+        self.found.as_ref().and_then(|f| f.hits.get(f.at)).map(|h| h.task.clone())
+    }
+
+    /// `s` in the recall pane: start the picked hit's task, asking first
+    /// if it is closed, as RET on its row does.
+    fn start_hit(&mut self) -> Option<Away> {
+        let task = self.picked()?;
+        let state: String = self.paths.open(BUSY).ok().and_then(|s| {
+            s.conn.query_row("SELECT state FROM task WHERE id = ?1", [&task], |r| r.get(0)).ok()
+        })?;
+        let start = Start { want: Want::Continue, go: true };
+        if matches!(state.as_str(), "done" | "parked" | "dropped") {
+            self.mode = Mode::Reopen(start, task);
+            return None;
+        }
+        self.start_on_board(&task, start)
+    }
+
+    /// Close the recall pane on `task`, selected on the board now, so
+    /// that starting acts on it, and start it.
+    fn start_on_board(&mut self, task: &str, start: Start) -> Option<Away> {
+        self.found = None;
+        self.selected = Some(task.to_string());
+        self.keep_at = None;
+        if let Err(e) = self.refresh() {
+            self.report(Err(e));
+            return None;
+        }
+        if self.current_id().as_deref() != Some(task) {
+            self.message = format!("{} is not on the board: varde attach {0}", task::short(task));
+            return None;
+        }
+        self.begin(start)
     }
 
     /// Select `task` on the board, opening Parked for it if need be.
@@ -1046,12 +1095,62 @@ mod tests {
         let f = app.found.as_mut().unwrap();
         (f.query, f.all) = ("CacheKey region".into(), false);
         let s = screen(&mut app, 80, 24);
-        assert!(s.lines().any(|l| l.contains("recall: CacheKey region") && l.contains("RET go")), "{s}");
+        assert!(s.lines().any(|l| l.contains("recall: CacheKey region") && l.contains("s start")), "{s}");
         key(&mut app, KeyCode::Char('j'));
         assert_eq!(app.current_id(), before, "j picks a hit, not a board row");
         assert!(key(&mut app, KeyCode::Enter).is_none(), "RET on a hit starts nothing");
         assert!(app.found.is_none());
         assert_eq!(app.current_id(), Some(second));
+    }
+
+    #[test]
+    fn s_on_a_recall_hit_starts_its_task_even_one_gone_from_the_board() {
+        let (_dir, paths) = temp_paths();
+        let mut app = board(&paths, &["Cache by locale", "Something else"]);
+        let ids: Vec<String> = app.rows().map(|r| r.task.clone()).collect();
+        {
+            let store = paths.open(BUSY).unwrap();
+            for id in &ids {
+                let text = "Status: Looked.\nFindings:\n- The locale matters.\nDecisions:\nOpen:\n";
+                let cairn = varde_core::cairn::Cairn::from_edit(text, &Default::default());
+                varde_core::memory::put_cairn(&store.conn, id, &cairn, 0, "user", None, now_ms()).unwrap();
+            }
+        }
+        let old = ids
+            .iter()
+            .find(|id| app.row_of(id).is_some_and(|r| r.title == "Cache by locale"))
+            .unwrap()
+            .clone();
+        // Done long ago: off the board.
+        paths
+            .open(BUSY)
+            .unwrap()
+            .conn
+            .execute("UPDATE task SET state = 'done', closed = 1 WHERE id = ?1", [&old])
+            .unwrap();
+        app.refresh().unwrap();
+        assert!(app.row_of(&old).is_none());
+
+        app.recall("locale", true);
+        let at = app.found.as_ref().unwrap().hits.iter().position(|h| h.task == old).unwrap();
+        app.found.as_mut().unwrap().at = at;
+        assert!(key(&mut app, KeyCode::Char('s')).is_none(), "a closed one asks first");
+        assert!(screen(&mut app, 100, 10).contains("reopen and start it?  [y/N]"));
+        key(&mut app, KeyCode::Char('n'));
+        assert_eq!(state(&paths, &old), "done");
+        assert!(key(&mut app, KeyCode::Char('s')).is_none());
+        assert!(matches!(key(&mut app, KeyCode::Char('y')), Some(Away::Attach(_))), "y starts it");
+        assert_eq!(state(&paths, &old), "open");
+        assert!(app.found.is_none());
+        assert_eq!(app.current_id().as_deref(), Some(old.as_str()), "the start is of the hit");
+
+        // An open one starts straight away.
+        let other = ids.into_iter().find(|id| *id != old).unwrap();
+        app.recall("locale", true);
+        let at = app.found.as_ref().unwrap().hits.iter().position(|h| h.task == other).unwrap();
+        app.found.as_mut().unwrap().at = at;
+        assert!(matches!(key(&mut app, KeyCode::Char('s')), Some(Away::Attach(_))));
+        assert_eq!(app.current_id(), Some(other));
     }
 
     #[test]

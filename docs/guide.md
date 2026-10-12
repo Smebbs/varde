@@ -157,7 +157,7 @@ with `← <short>` of the task it came from. `?` lists every key.
 | `E` | Edit that project cairn. |
 | `m` | Move the task to another project: asks for a directory, its project filled in. varde's refusal (an active worktree, a live session) shows on the message line. Listed under `?`, not in the footer. |
 | `=` | The task's diff, new files included. For a task without a worktree, what is uncommitted in the checkout it shares. |
-| `/` | Recall in this project. In its pane, `j`/`k` pick a hit, RET goes to its task, and Tab switches between this project and every project. |
+| `/` | Recall in this project. In its pane, `j`/`k` pick a hit, RET goes to its task, `s` starts it (reopening it if closed), and Tab switches between this project and every project. |
 | Tab | Open or close the Parked group. |
 | `g` / C-l / `q` | Refresh / redraw / quit. |
 

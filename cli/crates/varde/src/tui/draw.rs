@@ -391,7 +391,7 @@ fn found_lines(found: &Found) -> Vec<Line<'static>> {
     let scope = if found.all { "every project" } else { "this project; Tab: all" };
     let mut lines = vec![Line::from(vec![
         format!("recall: {}", clean(&found.query)).bold(),
-        format!("  ({scope})  j/k pick, RET go").dark_gray(),
+        format!("  ({scope})  j/k pick, RET go, s start").dark_gray(),
     ])];
     if found.hits.is_empty() {
         lines.push(Line::from("nothing found".dark_gray()));
