@@ -98,6 +98,7 @@ The default opens a vterm when vterm is installed, and a term otherwise."
 
 (defvar org-varde-mode)
 (defvar org-varde--watch nil "The watch on varde's state directory.")
+(defvar org-varde--wal-watch nil "The watch on varde's -wal file, while it is there.")
 (defvar org-varde-board-data)
 (defvar org-varde-board--project)
 (defvar org-varde-board--closed)
@@ -2765,10 +2766,31 @@ As varde finds it: a relative XDG_STATE_HOME is ignored."
   "Refresh on EVENT when varde wrote to its store.
 Only writes count: every `varde list' opens the database too, which
 creates and removes its -wal and -shm files, and refreshing on those
-would refresh forever."
-  (when (and (eq (nth 1 event) 'changed)
-             (string-match-p "/varde\\.db\\(?:-wal\\)?\\'" (nth 2 event)))
-    (org-varde-refresh)))
+would refresh forever.  A -wal made anew is watched anew, and counts
+when it was written before it was watched: `varde list' leaves it empty."
+  (let* ((action (nth 1 event))
+         (file (nth 2 event))
+         (wal (string-suffix-p "/varde.db-wal" file)))
+    (when (and wal (eq action 'created))
+      (org-varde--watch-wal))
+    (when (pcase action
+            ('changed (or wal (string-suffix-p "/varde.db" file)))
+            ('created (and wal (< 0 (or (file-attribute-size (file-attributes file)) 0)))))
+      (org-varde-refresh))))
+
+(defun org-varde--watch-wal ()
+  "Watch varde's -wal file, if it is there.
+Under kqueue (macOS) the directory's watch sees files come and go but
+nothing written to one: not the commits a hook adds to the -wal that
+every running session keeps open.  A watch on the file sees them.
+SQLite removes the file with its last connection, which ends the
+watch, and makes it anew with the next."
+  (when org-varde--wal-watch
+    (file-notify-rm-watch org-varde--wal-watch))
+  (setq org-varde--wal-watch
+        (ignore-errors
+          (file-notify-add-watch (expand-file-name "varde.db-wal" (org-varde--home))
+                                 '(change) #'org-varde--on-store-change))))
 
 (defvar org-varde--due nil
   "When the refresh asked for must run by, however often it is asked again.")
@@ -2832,9 +2854,9 @@ A newer one is said once, and noted for the board to show."
 marked done offer to close the tasks it links."
   :global t
   :group 'org-varde
-  (when org-varde--watch
-    (file-notify-rm-watch org-varde--watch)
-    (setq org-varde--watch nil))
+  (dolist (w (list org-varde--watch org-varde--wal-watch))
+    (when w (file-notify-rm-watch w)))
+  (setq org-varde--watch nil org-varde--wal-watch nil)
   (remove-hook 'org-after-todo-state-change-hook #'org-varde--on-done)
   (remove-hook 'window-selection-change-functions #'org-varde--mark-seen)
   (remove-hook 'window-buffer-change-functions #'org-varde--mark-seen)
@@ -2852,7 +2874,8 @@ marked done offer to close the tasks it links."
                 (file-notify-add-watch home '(change) #'org-varde--on-store-change)
               (error (message "org-varde: cannot watch %s (%s); the board refreshes when opened"
                               home (error-message-string err))
-                     nil))))
+                     nil)))
+      (org-varde--watch-wal))
     (org-varde-refresh)))
 
 ;; Heading per task, which org-varde 1.1 dropped: tasks live on the board,

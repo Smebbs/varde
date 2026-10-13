@@ -4,6 +4,16 @@ Notable changes to varde and org-varde. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions
 follow [Semantic Versioning](https://semver.org).
 
+## Unreleased
+
+### Fixed
+
+- On macOS the Emacs board no longer misses what hooks write while a
+  session runs, which left a finished task showing Working. kqueue
+  tells a watch on a directory only of files coming and going, not of
+  commits to the store's `-wal` that a running session keeps open;
+  org-varde now watches that file too.
+
 ## 1.1.1 - 2026-10-13
 
 ### Fixed

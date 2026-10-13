@@ -590,6 +590,30 @@ fetches them again."
       (org-varde--on-store-change '(1 changed "/h/varde.db-wal"))
       (should refreshed))))
 
+(ert-deftest org-varde-watches-the-wal-itself ()
+  "Under kqueue a directory's watch sees nothing written to a file in it:
+not a hook's commit to the -wal a running session keeps open."
+  (org-varde-test-with-varde
+    (let ((wal (expand-file-name "varde.db-wal" org-varde-test-dir))
+          watched refreshed)
+      (cl-letf (((symbol-function 'file-notify-add-watch)
+                 (lambda (file &rest _) (push (directory-file-name file) watched) file))
+                ((symbol-function 'file-notify-rm-watch) #'ignore)
+                ((symbol-function 'org-varde-refresh) (lambda () (setq refreshed t))))
+        (write-region "" nil wal)
+        (org-varde-mode 1)
+        (should (member wal watched))
+        (setq watched nil refreshed nil)
+        ;; Made anew, by `varde list': watched anew, and nothing to show.
+        (org-varde--on-store-change (list 1 'created wal))
+        (should (equal watched (list wal)))
+        (should-not refreshed)
+        ;; Made anew and written before it was watched.
+        (write-region "commit" nil wal)
+        (org-varde--on-store-change (list 1 'created wal))
+        (should refreshed)
+        (org-varde-mode -1)))))
+
 (ert-deftest org-varde-steady-store-writes-still-refresh ()
   "Refreshes asked for every 0.1 s fetch the board at least once a second."
   (org-varde-test-with-varde
