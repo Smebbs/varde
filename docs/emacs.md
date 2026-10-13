@@ -118,14 +118,15 @@ every buffer showing one. A doc with 200 links to a board of 1 000
 tasks draws in about a millisecond more than without them.
 
 **A task from a note.** `org-varde-new-here` (`C-c v t` above) on a
-heading opens the board's new-task buffer with the heading's title on
-its first line and, below it, the heading's text (without its drawers,
+heading opens the board's new-task form with the heading's title as its
+Title and, as its context, the heading's text (without its drawers,
 planning, clocks and logged state changes), then a line saying where
 it came from:
 
 ```
-Fix the SSO redirect
-
+Title:   Fix the SSO redirect
+Project: ~/src/app
+── context ──────────────────────────────
 It loops after the session expires.
 
 From: [[file:/home/me/notes/auth.org::*Fix the SSO redirect][auth.org › Auth › Fix the SSO redirect]]
@@ -141,12 +142,12 @@ first: `This heading links "Fix the SSO redirect": go to it? (n makes a
 new task)`; `y` goes to its session, as `RET` on the board does. Edit it as you like; `C-c C-c`
 (`:w` under evil) creates the task, and `C-c C-k` puts it away as `n`
 on the board does; left as it was filled in, it is dropped, and a draft
-you changed comes back with `n` as the board's own, linked nowhere. The
-task goes to the project the heading's
+you changed comes back with `n` as the board's own, linked nowhere. Its
+Project starts as the project the heading's
 `VARDE_PROJECT` names, its own or inherited (`#+PROPERTY:
 VARDE_PROJECT ~/src/app` high up in the file sets it for all), else
-to the repository the file is in, once that has tasks; otherwise it
-asks. Once made, a link to it goes into the heading's text, as its
+as the repository the file is in, once that has tasks; otherwise it is
+empty, and asked for on create. Once made, a link to it goes into the heading's text, as its
 first line below the drawers, or on the line below the region: below a
 table, block, drawer or list the region ends in, never inside one, and
 in the heading's text when the region ends on a heading or its
@@ -223,8 +224,8 @@ board is in sight its ages move on each minute.
 | `v` | View the task: its cairn first, and its project's cairn on the view's other tab (below). The view opens below the board, most of the frame's height; `display-buffer-alist` can put it elsewhere. |
 | `=` | The task's changes, as Emacs shows them: `magit-status` where magit is installed, else `vc-dir`, in its worktree while it has one, else in its project. |
 | `E` | Edit the task's whole cairn as text (below). |
-| `n` | New task, in a buffer of its own: the title on the first line, the context below. Leave the first line empty and varde cuts a title from the context, and a model names the task in the background; an older varde that wants a title says so, and the draft stays. `C-c C-c` (or `C-x C-s`) creates it in the project the board keeps to; showing every project, or with `C-u`, it asks for the project, offering that of the task at point. `C-c C-k` (`later`, the header says) puts it away, and the next `n` brings it back, however often; to drop it, clear it first. Either way the windows are as they were, and once created the board is on the new task. Nothing starts until you press `RET` on it. |
-| `e` | Edit the task's title and context the same way (`C-c C-c` saves). |
+| `n` | New task, in a form of its own, as a mail is written in `message-mode`: `Title:`, `Project:` and, below the line, the context. `RET` goes from a field to the next, and `TAB` on the Project picks its directory; the names and the line cannot be changed, and evil's `cc`, `dd` and `^` keep to a field. Leave the Title empty, as it says in grey, and varde cuts a title from the context, and a model names the task in the background; an older varde that wants a title says so, and the draft stays. The Project starts as the project the board keeps to; left empty, `C-c C-c` asks for it, offering that of the task at point. `C-c C-c` (or `C-x C-s`, `:w` under evil) creates it. `C-c C-k` (`later`, the header says) puts it away, and the next `n` brings it back, however often; to drop it, clear it first. Either way the windows are as they were, and once created the board is on the new task. Nothing starts until you press `RET` on it. |
+| `e` | Edit the task's title and context in the same form, without its Project (`m` moves a task; `C-c C-c` saves). |
 | `d`, `P`, `x` | Done, park, drop, each said once it is (`Done "…"; u reopens`, `Parked "…"; u reopens`). `x` asks first ("Drop …?", or once for a region: "Drop 3 tasks?"), any work in its worktree kept under `refs/varde/discarded/`; `d` and `P` ask only about a busy session, as above, and `P` on a done or dropped task asks first, as `RET` does. Point stays on the line, which then holds the next task, as on the terminal board. |
 | `u` | Reopen the task last closed here with `d`, `P` or `x` (all of them, for a region), back in Open, and put point on it; nothing starts. In a view, `u` first undoes a line removed or a Status handed back there. |
 | `a` | Accept an Inbox task (`Accepted "…"`). On a task not in the Inbox it says so; on a region it accepts the Inbox tasks in it and says how many it left. |

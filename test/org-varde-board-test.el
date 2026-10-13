@@ -116,13 +116,23 @@
         (should (equal offered "/home/u/proj/"))
         (should (equal (car org-varde-test-terminals) '("/home/u/other/" "*claude other*")))))))
 
+;; Type TEXT into the form in this buffer: its first line at the end of
+;; the title, and the rest at the end of the context.
+(defun org-varde-board-test--type (text)
+  (let ((nl (string-search "\n" text)))
+    (org-varde--form-goto 'title)
+    (insert (substring text 0 nl))
+    (when nl
+      (goto-char (point-max))
+      (insert (substring text (1+ nl))))))
+
 ;; Write NOTE in the *varde new* buffer that `n' opened, and create it
 ;; there, answering the project question with DIR.  Return what was offered.
 (defun org-varde-board-test--write (note dir)
   (let (offered)
     (with-current-buffer "*varde new*"
       (should (derived-mode-p 'org-varde-new-mode))
-      (insert note)
+      (org-varde-board-test--type note)
       (cl-letf (((symbol-function 'read-directory-name)
                  (lambda (_prompt offer &rest _) (setq offered offer) (or dir offer))))
         (call-interactively #'org-varde-new-create)))
@@ -151,25 +161,26 @@
       ;; what was written is kept.
       (call-interactively #'org-varde-board-create)
       (with-current-buffer "*varde new*"
-        (insert " \n\n")
+        (org-varde-board-test--type " \n\n")
         (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) (error "Asked too soon"))))
           (should-error (call-interactively #'org-varde-new-create) :type 'user-error)))
       (call-interactively #'org-varde-board-create)
       (with-current-buffer "*varde new*"
-        (should (equal (buffer-string) " \n\n"))
+        (should (buffer-modified-p))
+        (should (org-varde--form-blank-p))
         ;; Put away, it comes back with n, however often; cleared, it is
         ;; dropped.
-        (insert "Half a title")
+        (org-varde-board-test--type "Half a title")
         (org-varde-new-cancel)
         (should (get-buffer "*varde new*")))
       (call-interactively #'org-varde-board-create)
       (with-current-buffer "*varde new*"
-        (should (equal (buffer-string) " \n\nHalf a title"))
+        (should (equal (org-varde--new-text) '("Half a title" . "")))
         (org-varde-new-cancel))
       (call-interactively #'org-varde-board-create)
       (with-current-buffer "*varde new*"
-        (should (equal (buffer-string) " \n\nHalf a title"))
-        (erase-buffer)
+        (should (equal (org-varde--new-text) '("Half a title" . "")))
+        (let ((b (org-varde--form-bounds 'title))) (delete-region (car b) (cdr b)))
         (org-varde-new-cancel))
       (should-not (get-buffer "*varde new*"))
       (should-not org-varde-test-terminals))))
@@ -187,10 +198,12 @@
         (re-search-forward "fails")
         (save-window-excursion (org-varde-new-here))
         (with-current-buffer "*varde new*"
-          (should (string-prefix-p "Fix the login\n\nIt fails on CI only.\n\nFrom: [[file:" (buffer-string)))
+          (should (string-prefix-p "Fix the login\n\nIt fails on CI only.\n\nFrom: [[file:" (org-varde--form-text)))
           (should (string-match-p (concat "::\\*Fix the .*\\]\\[" (regexp-quote (file-name-nondirectory file))
                                           " › Auth › Fix the login.*\\]\\]\\'")
-                                  (buffer-string)))
+                                  (org-varde--form-text)))
+          ;; Its project is in the form.
+          (should (equal (org-varde--form-value 'project) (abbreviate-file-name proj)))
           ;; Its project is the heading's: nothing is asked.
           (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) (error "Asked"))))
             (call-interactively #'org-varde-new-create)))
@@ -220,8 +233,9 @@
               (forward-line 2)
               (save-window-excursion (org-varde-new-here))
               (with-current-buffer "*varde new*"
-                (should (equal (buffer-string)
-                               (format "Retry the token refresh\nafter a 401.\n\nFrom: [[file:%s::2][notes.md:2]]" file)))
+                (should (equal (org-varde--new-text)
+                               (cons "Retry the token refresh"
+                                     (format "after a 401.\n\nFrom: [[file:%s::2][notes.md:2]]" file))))
                 ;; Its repository has tasks: it goes there.
                 (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) (error "Asked"))))
                   (call-interactively #'org-varde-new-create)))
@@ -264,7 +278,10 @@
         (cl-letf (((symbol-function 'org-varde-board--project-of) #'ignore))
           (save-window-excursion (org-varde-new-here)))
         (with-current-buffer "*varde new*"
-          (should (string-prefix-p (concat (cadr case) "\n\nFrom: ") (buffer-string)))
+          (should (string-prefix-p (concat (car (split-string (cadr case) "\n")) "\n\n")
+                                   (org-varde--form-text)))
+          (should (string-suffix-p (concat (cadr (split-string (cadr case) "\n *")) "\n\nFrom: ")
+                                   (car (split-string (org-varde--form-text) "\\[\\[file"))))
           (set-buffer-modified-p nil)
           (kill-buffer))))))
 
@@ -278,7 +295,7 @@
         (save-window-excursion (org-varde-new-here)))
       (should (equal (current-kill 0) "Half a thought"))
       (with-current-buffer "*varde new*"
-        (should (string-prefix-p "Fix it\n\nFrom: " (buffer-string)))))
+        (should (string-prefix-p "Fix it\n\nFrom: " (org-varde--form-text)))))
     ;; A heading an earlier org-varde linked says how to convert it.
     (org-varde-test-with-org "* Fix it\n:PROPERTIES:\n:VARDE_TASK: 01K5ZZZZZZZZZZZZZZZZXYZ123\n:END:\n"
       (should (string-match-p "linked to xyz123 already.*org-varde-convert-links"
@@ -354,7 +371,7 @@ searches FROM and TO, and return the text with its link."
             (with-current-buffer "*varde new*" (set-buffer-modified-p nil))
             (save-window-excursion (with-suppressed-warnings ((obsolete org-varde-start)) (org-varde-start)))
             (should-not asked)
-            (with-current-buffer "*varde new*" (should (string-prefix-p "Other\n" (buffer-string))))))))
+            (with-current-buffer "*varde new*" (should (equal (org-varde--form-value 'title) "Other")))))))
     (should (eq (indirect-function 'org-varde-link) (indirect-function 'org-varde-insert-link)))))
 
 (ert-deftest org-varde-new-here-drops-an-untouched-form-and-links-no-draft ()
@@ -372,7 +389,7 @@ searches FROM and TO, and return the text with its link."
         (with-current-buffer "*varde new*" (insert " soon") (org-varde-new-cancel))
         (save-window-excursion (org-varde-board-create))
         (with-current-buffer "*varde new*"
-          (should (string-prefix-p "Fix it soon\n" (buffer-string)))
+          (should (equal (org-varde--form-value 'title) "Fix it soon"))
           (should-not org-varde--new-then))
         (org-varde-board-test--write "" "/tmp/elsewhere/")
         (should (equal (buffer-string) "* Fix it\n"))))))
@@ -388,22 +405,85 @@ searches FROM and TO, and return the text with its link."
         (save-window-excursion (org-varde-new-here))
         (with-current-buffer "*varde new*"
           ;; No From line: there is nowhere to go back to.
-          (should (equal (buffer-string) "Retry the token refresh\nafter a 401.")))
+          (should (equal (org-varde--new-text) '("Retry the token refresh" . "after a 401."))))
         (org-varde-board-test--write "" "/tmp/elsewhere/")
         (should (equal (current-kill 0) "varde:new111"))))))
+
+;; The form, as a mail is written: names that cannot be changed, RET
+;; from field to field, and the Project's directory picked with TAB.
+(ert-deftest org-varde-new-is-a-form-of-fields ()
+  (org-varde-test-with-varde
+    (org-varde-test-reply "new" "{\"v\":1,\"id\":\"T0000000000000000000NEW111\",\"short\":\"new111\"}")
+    (save-window-excursion
+      (org-varde--new "/tmp/offered" nil)
+      (with-current-buffer "*varde new*"
+        (should (looking-back "^Title: +" (line-beginning-position)))
+        (should-error (delete-char -1) :type 'text-read-only)
+        (should-error (progn (forward-line 1) (delete-char 1)) :type 'text-read-only)
+        (org-varde--form-goto 'title)
+        (insert "Fix it")
+        (org-varde-new-return)
+        (should (eq (org-varde--form-at) 'project))
+        ;; Empty, it is asked for on create; TAB picks it now, offering
+        ;; the project offered.
+        (should (alist-get 'project org-varde--form-hints))
+        (cl-letf (((symbol-function 'read-directory-name)
+                   (lambda (_prompt dir &rest _) (should (equal dir "/tmp/offered/")) "/tmp/other/")))
+          (org-varde-new-tab))
+        (should (equal (org-varde--form-value 'project) "/tmp/other"))
+        (should-not (alist-get 'project org-varde--form-hints))
+        (org-varde-new-return)
+        (should (eq (org-varde--form-at) 'body))
+        (insert "Line one")
+        (org-varde-new-return)
+        (insert "two")
+        (should (equal (org-varde--new-text) '("Fix it" . "Line one\ntwo")))
+        (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) (error "Asked"))))
+          (call-interactively #'org-varde-new-create))))
+    (should (member "new --json --project /tmp/other --context - -- Fix it" (org-varde-test-calls)))
+    (should (equal (org-varde-test-stdin "new") "Line one\ntwo"))))
+
+(ert-deftest org-varde-new-form-under-evil ()
+  "Run with evil on the load path to check this; skipped otherwise.
+Evil's line edits keep to a field."
+  (skip-unless (require 'evil nil t))
+  (evil-mode 1)
+  (unwind-protect
+      (org-varde-test-with-varde
+        (save-window-excursion
+          (org-varde--new nil nil "Old title\nSome context")
+          (with-current-buffer "*varde new*"
+            ;; Keys go to the selected window's buffer.
+            (set-window-dedicated-p nil nil)
+            (switch-to-buffer (current-buffer) nil t)
+            (evil-normal-state)
+            ;; cc changes the title, o opens a line that stays in it,
+            ;; and dd takes the context's last line.
+            (execute-kbd-macro (kbd "cc New <escape> o title <escape>"))
+            (execute-kbd-macro (kbd "G dd"))
+            (should (equal (org-varde--new-text) '("New title" . "")))
+            ;; Its line is still there to write below.
+            (execute-kbd-macro (kbd "G o More <escape>"))
+            (should (equal (org-varde--new-text) '("New title" . "More")))
+            (set-buffer-modified-p nil))))
+    (evil-mode -1)))
 
 (ert-deftest org-varde-board-create-with-only-context-lets-varde-make-the-title ()
   (org-varde-test-with-varde
     (org-varde-test-reply "new" "{\"v\":1,\"id\":\"T0000000000000000000NEW111\",\"short\":\"new111\"}")
     (org-varde-board-test--with
         (org-varde-board-test--data '(("open" "Open" ("T0000000000000000000AAA111" "Here" "open" nil))))
-      (should (string-match-p "\\` C-c C-c create  C-c C-k later   line 1: title, then context\\'"
-                              (progn (call-interactively #'org-varde-board-create)
-                                     (with-current-buffer "*varde new*" (eval (cadr header-line-format) t)))))
+      (call-interactively #'org-varde-board-create)
+      (with-current-buffer "*varde new*"
+        (should (equal header-line-format " C-c C-c create  C-c C-k later"))
+        ;; An empty title says what becomes of it.
+        (should (string-match-p "names it from the context"
+                                (overlay-get (alist-get 'title org-varde--form-hints) 'after-string))))
       ;; A varde that wants a title says so, and the draft stays.
       (org-varde-test-fail-once "new" "varde: the following required arguments were not provided: <TITLE>...")
       (with-current-buffer "*varde new*"
-        (insert "\nThe cache misses on every locale switch.")
+        (org-varde-board-test--type "\nThe cache misses on every locale switch.")
+        (should (alist-get 'title org-varde--form-hints))
         (let ((err (should-error (org-varde-new-create "/home/u/proj/") :type 'user-error)))
           (should (string-match-p "needs a title" (cadr err)))))
       (should (get-buffer "*varde new*"))
@@ -739,9 +819,11 @@ where a new task goes unasked."
       (org-varde-board-test--first-row)
       (save-window-excursion (org-varde-board-edit))
       (with-current-buffer "*varde edit aaa111*"
-        (should (equal (buffer-string) "Old title\n\nOld context"))
-        (erase-buffer)
-        (insert "New title\n\nNew context\n")
+        (should (equal (org-varde--new-text) '("Old title" . "Old context")))
+        ;; A task's project is not changed here.
+        (should-not (org-varde--form-bounds 'project))
+        (org-varde--form-fill "" :none "")
+        (org-varde-board-test--type "New title\nNew context\n")
         (call-interactively #'org-varde-new-create))
       (should-not (get-buffer "*varde edit aaa111*"))
       (should (member "set T0000000000000000000AAA111 --title=New title --body -" (org-varde-test-calls)))

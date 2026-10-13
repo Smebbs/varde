@@ -678,6 +678,8 @@ Asked for, offering the project of the task at point."
   "C-c C-c" #'org-varde-new-create
   "<remap> <save-buffer>" #'org-varde-new-create
   "C-c C-k" #'org-varde-new-cancel
+  "RET" #'org-varde-new-return
+  "TAB" #'org-varde-new-tab
   ;; evil's :w, :wq, :x and ZZ create; :q and ZQ put it away.
   "<remap> <evil-write>" #'org-varde-new-create
   "<remap> <evil-save-and-close>" #'org-varde-new-create
@@ -685,19 +687,26 @@ Asked for, offering the project of the task at point."
   "<remap> <evil-quit>" #'org-varde-new-cancel)
 
 (define-derived-mode org-varde-new-mode text-mode "varde new"
-  "Write a new task: its title on the first line, and below it the
-context for the agent; left empty, varde makes the title from the
-context.  \\[org-varde-new-create] creates it, and
+  "Write a new task, or change one, in a form, as `message-mode' writes
+a mail: its Title, which varde makes from the context when left empty;
+its Project, which \\[org-varde-new-tab] picks; and below the line, the
+context for the agent.  \\[org-varde-new-return] goes from a field to
+the next.  \\[org-varde-new-create] creates it, and
 \\[org-varde-new-cancel] puts it away, for `n' on the board to bring
 back; cleared first, it is dropped."
+  (add-hook 'after-change-functions #'org-varde--form-hints nil t)
   (add-hook 'kill-buffer-query-functions #'org-varde--keep-edit-p nil t))
+
+(defface org-varde-form-label '((t :inherit bold))
+  "A field's name in the form that writes a task."
+  :group 'org-varde)
+
+(defface org-varde-form-hint '((t :inherit org-varde-quiet :slant italic))
+  "What an empty field of the form is for, said in its place."
+  :group 'org-varde)
 
 (defvar-local org-varde--new-offer nil
   "The project offered when the task being written is created.")
-
-(defvar-local org-varde--new-project nil
-  "The project the task being written goes to without asking: the one
-the board keeps to.")
 
 (defvar-local org-varde--new-task nil
   "The task whose title and context this buffer edits, or nil for a new one.")
@@ -705,6 +714,123 @@ the board keeps to.")
 (defvar-local org-varde--new-then nil
   "What to do once the task being written is made, or nil: a function of
 its short id and title that returns what to add to the message.")
+
+(defvar-local org-varde--form-hints nil
+  "The overlays that say what an empty field is for: (FIELD . OVERLAY).")
+
+(defun org-varde--form-label (field text &optional first)
+  "TEXT, the name of FIELD, as the form shows it: it cannot be changed,
+and what is typed after it is the field's.  FIRST: nothing goes before it."
+  ;; As the minibuffer's prompt: a field of its own, so C-a, and evil's
+  ;; ^ and cc, stop at the value.
+  (propertize text 'field field 'read-only t 'rear-nonsticky t
+              'front-sticky (and first '(read-only))
+              'font-lock-face (if (eq field 'body) 'org-varde-quiet 'org-varde-form-label)))
+
+(defun org-varde--form-fill (title project body)
+  "Fill this buffer with the form: its TITLE, its PROJECT unless that is
+:none, and its context BODY.  Point is at the end of the title."
+  (let ((inhibit-read-only t)
+        (inhibit-modification-hooks t))
+    ;; The mode forgot them, so they are found by their mark.
+    (remove-overlays (point-min) (point-max) 'org-varde-hint t)
+    (setq org-varde--form-hints nil)
+    (erase-buffer)
+    (insert (org-varde--form-label 'title "Title:   " t) title)
+    (unless (eq project :none)
+      (insert (org-varde--form-label 'project "\nProject: ")
+              (if project (abbreviate-file-name (directory-file-name project)) "")))
+    ;; The line's newline is not its own, so evil's dd can take the
+    ;; context's last line; `org-varde--form-hints' puts it back.
+    (insert (org-varde--form-label 'body (concat "\n── context " (make-string 30 ?─))) "\n" body))
+  (org-varde--form-hints)
+  (set-buffer-modified-p nil)
+  (org-varde--form-goto 'title))
+
+(defun org-varde--form-bounds (field)
+  "Where the value of FIELD is in this form, as (BEG . END), or nil."
+  (when-let* ((m (save-excursion
+                   (goto-char (point-min))
+                   (text-property-search-forward 'field field t))))
+    (let ((beg (prop-match-end m)))
+      (cons beg (or (text-property-not-all beg (point-max) 'field nil) (point-max))))))
+
+(defun org-varde--form-value (field)
+  "The value of FIELD in this form, trimmed, or nil when it has none."
+  (when-let* ((b (org-varde--form-bounds field)))
+    (string-trim (buffer-substring-no-properties (car b) (cdr b)))))
+
+(defun org-varde--form-fields ()
+  "The fields of this form, in order."
+  (seq-filter #'org-varde--form-bounds '(title project body)))
+
+(defun org-varde--form-at ()
+  "The field point is in: on a name, the field before it."
+  (or (seq-find (lambda (f) (<= (car (org-varde--form-bounds f)) (point)))
+                (reverse (org-varde--form-fields)))
+      'title))
+
+(defun org-varde--form-goto (field)
+  "Go to FIELD: to the start of the context, or the end of another."
+  (let ((b (org-varde--form-bounds field)))
+    (goto-char (if (eq field 'body) (1+ (car b)) (cdr b)))))
+
+(defun org-varde--form-hints (&rest _)
+  "Say in its place what an empty field is for, and keep the context
+below its line."
+  (when-let* ((b (org-varde--form-bounds 'body)))
+    (unless (eq (char-after (car b)) ?\n)
+      (save-excursion (goto-char (car b)) (insert "\n"))))
+  (pcase-dolist (`(,field . ,hint)
+                 `((title . ,(unless org-varde--new-task "left empty, varde names it from the context"))
+                   (project . "asked for on create, or TAB picks it")))
+    (let ((b (org-varde--form-bounds field))
+          (o (alist-get field org-varde--form-hints)))
+      (if (and hint b (string-blank-p (buffer-substring-no-properties (car b) (cdr b))))
+          (progn
+            (unless o
+              (setq o (make-overlay 1 1))
+              (overlay-put o 'org-varde-hint t)
+              (setf (alist-get field org-varde--form-hints) o))
+            (move-overlay o (car b) (car b))
+            ;; The cursor before it, not after.
+            (overlay-put o 'after-string (propertize hint 'face 'org-varde-form-hint 'cursor t)))
+        (when o (delete-overlay o))
+        (setf (alist-get field org-varde--form-hints nil t) nil)))))
+
+(defun org-varde--form-blank-p ()
+  "Whether nothing is written in this form: no title, and no context."
+  (and (string-empty-p (org-varde--form-value 'title))
+       (string-empty-p (org-varde--form-value 'body))))
+
+(defun org-varde-new-return ()
+  "In a field above the line, go to the next; in the context, a new line."
+  (interactive)
+  (let ((field (org-varde--form-at)))
+    (if (eq field 'body)
+        (call-interactively #'newline)
+      (org-varde--form-goto (cadr (memq field (org-varde--form-fields)))))))
+
+(defun org-varde-new-tab ()
+  "On the Project, pick its directory; on the Title, go to the next
+field; in the context, indent."
+  (interactive)
+  (pcase (org-varde--form-at)
+    ('project (org-varde-new-pick-project))
+    ('body (call-interactively #'indent-for-tab-command))
+    (_ (org-varde-new-return))))
+
+(defun org-varde-new-pick-project ()
+  "Pick the directory of the task's project, for its Project field.
+It offers the one there, or else the one offered for the task."
+  (interactive)
+  (let* ((b (or (org-varde--form-bounds 'project) (user-error "This task's project is not changed here")))
+         (now (org-varde--form-value 'project))
+         (dir (read-directory-name "Project directory for this task: "
+                                   (file-name-as-directory (if (string-empty-p now) (or org-varde--new-offer default-directory) now)))))
+    (goto-char (car b))
+    (delete-region (car b) (cdr b))
+    (insert (abbreviate-file-name (directory-file-name (expand-file-name dir))))))
 
 (defun org-varde-board-edit ()
   "Edit the title and context of the task at point, in a buffer of its own."
@@ -715,14 +841,11 @@ its short id and title that returns what to add to the message.")
     (with-current-buffer buffer
       ;; An edit in progress is kept.
       (unless (buffer-modified-p)
-        (erase-buffer)
         (org-varde-new-mode)
-        (insert (or (plist-get d :title) "") "\n\n" (or (plist-get d :body) ""))
-        (set-buffer-modified-p nil)
-        (goto-char (point-min)))
+        (setq org-varde--new-task (plist-get row :task))
+        (org-varde--form-fill (or (plist-get d :title) "") :none (or (plist-get d :body) "")))
       (setq org-varde--new-task (plist-get row :task)
-            header-line-format
-            (concat " First line: the title.  Below it: context.  " (org-varde--edit-keys "save" "cancel"))))
+            header-line-format (concat " " (org-varde--edit-keys "save" "cancel"))))
     (pop-to-buffer buffer)))
 
 (defun org-varde-board-create ()
@@ -834,38 +957,26 @@ text when it ends on the heading or among its planning and drawers."
 
 (defun org-varde--new (offer here &optional text then)
   "Open the buffer that writes a new task.  OFFER is the project offered
-when it is asked for, and HERE the one it goes to without asking.  TEXT,
-when given, is what it starts with: a draft there goes to the kill ring.
-THEN is as `org-varde--new-then'."
+when it is asked for, and HERE the one its Project starts as, which it
+goes to without asking.  TEXT, when given, is what it starts with: its
+first line the title, and the rest the context; a draft there goes to
+the kill ring.  THEN is as `org-varde--new-then'."
   (let ((buffer (get-buffer-create "*varde new*")))
     (with-current-buffer buffer
       (cond ((and (buffer-modified-p) (not text))
              (message "Your draft, as you left it"))
-            (t (when (and (buffer-modified-p) (not (string-blank-p (buffer-string))))
-                 (kill-new (buffer-string))
+            (t (when (and (buffer-modified-p) (not (org-varde--form-blank-p)))
+                 (kill-new (org-varde--form-text))
                  (message "Your draft is in the kill ring"))
-               (erase-buffer)
                (org-varde-new-mode)
-               (when text
-                 (insert (substring-no-properties text))
+               (let* ((text (substring-no-properties (or text "")))
+                      (nl (string-search "\n" text)))
                  ;; Unchanged, C-c C-k drops it.
-                 (set-buffer-modified-p nil)
-                 (goto-char (point-min))
-                 (end-of-line))
+                 (org-varde--form-fill (string-trim (substring text 0 nl)) here
+                                       (if nl (string-trim (substring text nl)) "")))
                (setq org-varde--new-then then)))
       (setq org-varde--new-offer offer
-            org-varde--new-project here
-            header-line-format
-            (let ((keys (concat " " (org-varde--edit-keys
-                                     (if here
-                                         (format "create in %s%s" (file-name-nondirectory (directory-file-name here))
-                                                 (if (org-varde--evil-p) "" " (C-u: elsewhere)"))
-                                       "create")
-                                     "later"))))
-              ;; The keys first, and what the lines are where it fits.
-              `(:eval (concat ,keys (or (seq-find (lambda (s) (<= (+ ,(string-width keys) (length s)) (window-width)))
-                                                  '("   line 1: title, then context" "   line 1: title"))
-                                        ""))))))
+            header-line-format (concat " " (org-varde--edit-keys "create" "later"))))
     (pop-to-buffer buffer)))
 
 (defun org-varde-new-cancel ()
@@ -874,8 +985,8 @@ Nothing written, all of it cleared, or left as it was filled in, it is
 dropped: so a draft is dropped by clearing it first."
   (interactive)
   (cond (org-varde--new-task (org-varde--close-edit))
-        ((or (not (buffer-modified-p)) (string-blank-p (buffer-string)))
-         (let ((said (if (string-blank-p (buffer-string)) "Nothing written" "Left as it was filled in")))
+        ((or (not (buffer-modified-p)) (org-varde--form-blank-p))
+         (let ((said (if (org-varde--form-blank-p) "Nothing written" "Left as it was filled in")))
            (set-buffer-modified-p nil)
            (org-varde--close-edit)
            (message "%s, nothing kept" said)))
@@ -887,18 +998,19 @@ dropped: so a draft is dropped by clearing it first."
 
 (defun org-varde-new-create (directory)
   "Create the task written in this buffer in the project DIRECTORY is in.
-On a board kept to a project, that one, unless a prefix asks.  A
+That of its Project field; when it has none, it is asked for.  A
 buffer that edits a task saves its title and context instead."
   (interactive
    (pcase-let ((`(,title . ,body) (org-varde--new-text)))
      (when (and (string-blank-p title) (or org-varde--new-task (string-blank-p body)))
        (user-error (if org-varde--new-task "A task needs a title"
                      "A task needs a title, or context to make one from")))
-     (list (cond (org-varde--new-task nil)
-                 ((and org-varde--new-project (not current-prefix-arg)) org-varde--new-project)
-                 (t (read-directory-name "Project directory for this task: "
-                                         (and org-varde--new-offer
-                                              (file-name-as-directory org-varde--new-offer))))))))
+     (let ((project (org-varde--form-value 'project)))
+       (list (cond (org-varde--new-task nil)
+                   ((not (string-empty-p project)) project)
+                   (t (read-directory-name "Project directory for this task: "
+                                           (and org-varde--new-offer
+                                                (file-name-as-directory org-varde--new-offer)))))))))
   (if org-varde--new-task
       (org-varde--save-task)
     (org-varde--create-task directory)))
@@ -927,7 +1039,7 @@ buffer that edits a task saves its title and context instead."
                        (org-varde-varde-error
                         ;; One older than titles made from the context.
                         (if (and (string-empty-p title) (string-search "<TITLE>" (cadr e)))
-                            (user-error "This varde needs a title: write one on the first line, or update varde")
+                            (user-error "This varde needs a title: write one, or update varde")
                           (signal (car e) (cdr e))))))))
     (set-buffer-modified-p nil)
     (org-varde--close-edit)
@@ -953,12 +1065,16 @@ a task just made or moved there is in view."
         (org-varde-board--render)))))
 
 (defun org-varde--new-text ()
-  "The task written in this buffer, as (TITLE . BODY).
-TITLE is its first line, and may be empty."
-  (let* ((text (buffer-string))
-         (split (string-search "\n" text)))
-    (cons (string-trim (substring text 0 split))
-          (string-trim (if split (substring text split) "")))))
+  "The task written in this buffer, as (TITLE . BODY).  TITLE may be
+empty, and is one line: lines opened in it are joined."
+  (cons (replace-regexp-in-string "[ \t]*\n[ \t\n]*" " " (org-varde--form-value 'title))
+        (org-varde--form-value 'body)))
+
+(defun org-varde--form-text ()
+  "The task written in this buffer as one text: its title, a blank line
+and its context."
+  (pcase-let ((`(,title . ,body) (org-varde--new-text)))
+    (string-trim (concat title "\n\n" body))))
 
 (defun org-varde-board-move (directory)
   "Move the task at point to the project DIRECTORY is in.

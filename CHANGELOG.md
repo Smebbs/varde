@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org).
 
 ## Unreleased
 
+### Changed
+
+- org-varde writes a task in a form, as a mail is written in
+  `message-mode`: a `Title:` and a `Project:` field above a line, the
+  context below it, where the first line used to be the title. An
+  empty Title says varde names the task from the context; `RET` goes to
+  the next field, `TAB` on the Project picks its directory, and evil's
+  line edits keep to a field. `C-u C-c C-c` no longer asks for another
+  project: change the Project field instead.
+
 ### Fixed
 
 - On macOS the Emacs board no longer misses what hooks write while a

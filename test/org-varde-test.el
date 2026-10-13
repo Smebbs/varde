@@ -1740,7 +1740,10 @@ the question, or nil."
      (org-varde-test-reply "done" "{\"v\":1,\"worktree\":null}")
      (org-varde-test-with-org ,text
        (add-hook 'org-after-todo-state-change-hook #'org-varde--on-done nil t)
-       (let (asked)
+       ;; No note logged: org would wait for it on the global
+       ;; post-command-hook, and the next test's first command would
+       ;; take it.
+       (let (asked org-log-done org-log-repeat)
          (cl-letf (((symbol-function 'y-or-n-p) (lambda (prompt) (setq asked prompt) (eq ,answer ?y))))
            (org-todo "DONE")
            (org-varde-test-wait))
