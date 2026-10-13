@@ -33,6 +33,7 @@
 (require 'filenotify)
 (require 'json)
 (require 'org)
+(require 'org-element)
 (require 'seq)
 (require 'subr-x)
 (require 'text-property-search)

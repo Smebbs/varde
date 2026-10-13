@@ -2415,7 +2415,7 @@ mod tests {
         // Needs you is what varde says: rows put there by hand stand in.
         let needs = app.groups.iter().position(|g| g.key == "needs_you").unwrap();
         let open = app.groups.iter().position(|g| g.key == "open").unwrap();
-        let moved: Vec<Row> = app.groups[open].rows.drain(..).collect();
+        let moved = std::mem::take(&mut app.groups[open].rows);
         app.groups[needs].rows = moved;
         app.layout();
         // Where the board opened, on the first that needs you, the first
@@ -2603,7 +2603,7 @@ mod tests {
         let mut app = board(&paths, &["Waiting", "Asking"]);
         let needs = app.groups.iter().position(|g| g.key == "needs_you").unwrap();
         let open = app.groups.iter().position(|g| g.key == "open").unwrap();
-        let mut moved: Vec<Row> = app.groups[open].rows.drain(..).collect();
+        let mut moved = std::mem::take(&mut app.groups[open].rows);
         moved[0].status = "waiting";
         moved[1].status = "blocked";
         app.groups[needs].rows = moved;
