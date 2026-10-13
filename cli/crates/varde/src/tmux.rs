@@ -533,6 +533,9 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let Some(t) = server(dir.path()) else { return eprintln!("no tmux; skipped") };
         let paths = crate::Paths { home: dir.path().join("store") };
+        // There before it is marked, as a board's store is: its tag is the
+        // canonical path, which on macOS goes through /private.
+        std::fs::create_dir_all(&paths.home).unwrap();
         let board = t.tmux(&["new-window", "-d", "-P", "-F", "#{pane_id}", "exec sleep 300"]).unwrap();
         // A board runs there once its shell has exec'd; until then it looks idle.
         for _ in 0..500 {
