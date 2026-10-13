@@ -590,6 +590,74 @@ fn the_index_knows_how_many_rows_it_has() {
 }
 
 #[test]
+fn a_fragmented_index_is_merged_a_step_at_a_time_and_finds_the_same() {
+    let (_d, s) = store();
+    // A commit each, as reindexing one task at a time leaves it.
+    for n in 0..40 {
+        s.conn
+            .execute(
+                "INSERT INTO memory_fts (task, kind, ref, findings) VALUES (?1, 'findings', '', ?2)",
+                params![format!("T{n}"), format!("the cache {} misses on shard{}", n % 3, n % 7)],
+            )
+            .unwrap();
+    }
+    let segments = || -> i64 {
+        s.conn.query_row("SELECT count(DISTINCT segid) FROM memory_fts_idx", [], |r| r.get(0)).unwrap()
+    };
+    let matches = |q: &str| -> Vec<i64> {
+        s.conn
+            .prepare("SELECT rowid FROM memory_fts WHERE memory_fts MATCH ?1")
+            .unwrap()
+            .query_map([q], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    let queries = ["cache", "\"misses on shard3\"", "shard5 AND cache"];
+    let before: Vec<Vec<i64>> = queries.iter().map(|q| matches(q)).collect();
+    assert!(segments() > 4, "{}", segments());
+    let mut steps = 0;
+    while merge_index(&s.conn).unwrap() {
+        steps += 1;
+        assert!(steps < 20);
+    }
+    assert!(steps > 0 && segments() <= 4, "{}", segments());
+    assert_eq!(queries.iter().map(|q| matches(q)).collect::<Vec<_>>(), before);
+    assert_eq!(indexed_rows(&s.conn).unwrap(), 40);
+    // An index that needs no merge is left alone.
+    assert!(!merge_index(&s.conn).unwrap());
+}
+
+#[test]
+fn the_count_of_indexed_rows_holds_past_one_byte() {
+    let (_d, s) = store();
+    assert_eq!(indexed_rows(&s.conn).unwrap(), 0);
+    // Up to one short of a varint's next byte at once, then one more.
+    let mut n = 0;
+    for upto in [127, 16_383] {
+        s.conn
+            .execute(
+                "INSERT INTO memory_fts (task, kind, ref, notes)
+                 WITH RECURSIVE i(k) AS (SELECT ?1 UNION ALL SELECT k + 1 FROM i WHERE k + 1 < ?2)
+                 SELECT 'T', 'notes', '', 'note ' || k FROM i",
+                [n, upto],
+            )
+            .unwrap();
+        assert_eq!(indexed_rows(&s.conn).unwrap(), upto);
+        s.conn
+            .execute(
+                "INSERT INTO memory_fts (task, kind, ref, notes) VALUES ('T', 'notes', '', 'one more')",
+                [],
+            )
+            .unwrap();
+        assert_eq!(indexed_rows(&s.conn).unwrap(), upto + 1);
+        n = upto + 1;
+    }
+    s.conn.execute("DELETE FROM memory_fts WHERE rowid > 100", []).unwrap();
+    assert_eq!(indexed_rows(&s.conn).unwrap(), 100);
+}
+
+#[test]
 fn holdout_is_decided_by_the_run_id_alone() {
     let ids: Vec<String> = (0..2000).map(|_| ulid::Ulid::new().to_string()).collect();
     assert!(ids.iter().all(|r| !held_out(r, 0.0) && held_out(r, 1.0)));
@@ -621,4 +689,165 @@ fn what_a_run_was_shown_is_recorded() {
         .unwrap();
     assert_eq!(rows[0], ("cairn".into(), Some(3), "[\"4\",\"5\"]".into()));
     assert_eq!(rows[1].0, "related");
+}
+
+#[test]
+fn a_line_is_changed_one_at_a_time_as_yours_within_the_caps() {
+    let (_d, mut s) = store();
+    task_with_run(&s, "T1", "Fix login", "/p");
+    let t = Owner::Task("T1");
+    let added =
+        change(&mut s, t, Change::Add(Section::Findings, " The `session_refresh`\n races logout "), 1);
+    let added = added.unwrap();
+    let id = added.id.unwrap();
+    let first = &added.cairn.findings[0];
+    assert_eq!((added.version, first.text.as_str()), (1, "The `session_refresh` races logout"));
+    assert!(first.mine && first.anchor.is_some());
+    let status = change(&mut s, t, Change::Status("Cause found"), 2).unwrap();
+    assert!(status.cairn.status_mine && status.id.is_none());
+    // Handed back, its words stay and the next update may change them.
+    let back = change(&mut s, t, Change::HandBack, 2).unwrap();
+    assert!(!back.cairn.status_mine && back.cairn.status == "Cause found" && back.changed);
+    let again = change(&mut s, t, Change::HandBack, 2).unwrap_err().to_string();
+    assert_eq!(again, "the Status is already the updates'");
+    change(&mut s, t, Change::Status("Cause found"), 2).unwrap();
+
+    // What the caps and the shape refuse is said, and nothing is written.
+    let refused = |s: &mut Store, c: Change| change(s, t, c, 3).unwrap_err().to_string();
+    assert!(refused(&mut s, Change::Add(Section::Gotchas, "x")).contains("no section gotchas"));
+    assert!(refused(&mut s, Change::Add(Section::Open, &"word ".repeat(41))).contains("at most 40 words"));
+    assert!(
+        refused(&mut s, Change::Add(Section::Open, "the session_refresh races LOGOUT.")).contains("already")
+    );
+    assert!(refused(&mut s, Change::Set(999, "x")).contains("no line #999"));
+    assert!(refused(&mut s, Change::Status(" ")).contains("needs words"));
+    for n in 0..5 {
+        change(&mut s, t, Change::Add(Section::Open, &format!("open item {n}")), 4).unwrap();
+    }
+    assert!(refused(&mut s, Change::Add(Section::Open, "one too many")).contains("Open is full (5 of 5)"));
+    // 22 words so far; four decisions of 40 make 182, and a fifth is over.
+    let long = "word ".repeat(39);
+    for n in 0..4 {
+        change(&mut s, t, Change::Add(Section::Decisions, &format!("{n} {long}")), 5).unwrap();
+    }
+    assert!(
+        refused(&mut s, Change::Add(Section::Decisions, &format!("4 {long}"))).contains("holds at most 200")
+    );
+    let version = cairn(&s.conn, "T1").unwrap().unwrap().1;
+
+    // Changed, it keeps its id and its old words are history; the same
+    // words change nothing.
+    let set = change(&mut s, t, Change::Set(id, "`session_refresh` races logout on expiry"), 6).unwrap();
+    assert_eq!((set.id, set.version), (Some(id), version + 1));
+    assert!(
+        !change(&mut s, t, Change::Set(id, "`session_refresh`  races logout on expiry"), 7).unwrap().changed
+    );
+
+    // Removed, it is history, recall finds it, and it comes back as it was.
+    let removed = change(&mut s, t, Change::Remove(id), 8).unwrap();
+    assert!(removed.cairn.findings.is_empty());
+    let gone = &former(&s.conn, "T1").unwrap()[0];
+    assert_eq!((gone.id, gone.reason.as_deref()), (id, Some(REMOVED)));
+    assert_eq!(recall(&s, "expiry", Some("/p"), None, 5, ME, 9).unwrap().hits[0].kind, "history");
+    assert_eq!(
+        refused(&mut s, Change::Remove(id)),
+        format!("line #{id} is already removed; --restore {id} brings it back")
+    );
+    let back = change(&mut s, t, Change::Restore(id), 10).unwrap();
+    assert_eq!((back.cairn.findings[0].id, back.cairn.findings[0].mine), (id, true));
+    assert_eq!(recall(&s, "expiry", Some("/p"), None, 5, ME, 11).unwrap().hits[0].kind, "findings");
+    assert!(refused(&mut s, Change::Restore(id)).contains("no line"));
+    let why = history(&s.conn, "T1").unwrap().pop().unwrap().reason;
+    assert_eq!(why, Some(format!("restore {id}")));
+
+    // A project's cairn has its own sections and no Status.
+    let p = Owner::Project("/p");
+    assert!(change(&mut s, p, Change::Status("x"), 12).unwrap_err().to_string().contains("no Status"));
+    assert!(change(&mut s, p, Change::HandBack, 12).unwrap_err().to_string().contains("no Status"));
+    let g = change(&mut s, p, Change::Add(Section::Gotchas, "`launch.rs` tests fail on macOS"), 12).unwrap();
+    assert_eq!((g.cairn.shape, g.cairn.gotchas.len(), g.version), (Shape::Project, 1, 1));
+    assert!(change(&mut s, p, Change::Remove(id), 13).unwrap_err().to_string().contains("no line"));
+}
+
+#[test]
+fn a_line_a_whole_document_edit_changed_is_named_by_what_it_became() {
+    let (_d, mut s) = store();
+    task_with_run(&s, "T1", "Fix login", "/p");
+    let t = Owner::Task("T1");
+    let a = change(&mut s, t, Change::Add(Section::Findings, "The cache key omits the locale"), 1).unwrap();
+    let b = change(&mut s, t, Change::Add(Section::Findings, "Logout races the refresh"), 1).unwrap();
+    let (a, old) = (a.id.unwrap(), b.id.unwrap());
+    // As `varde edit` in $EDITOR saves: the changed line is a new one.
+    let edit = |s: &Store, from: &str, to: &str, now: i64| {
+        let (before, version) = cairn(&s.conn, "T1").unwrap().unwrap();
+        // An empty `to` takes `from`'s line out.
+        let text = before.render();
+        let text: Vec<&str> = text.lines().filter(|l| !to.is_empty() || !l.contains(from)).collect();
+        let edited = Cairn::from_edit(&text.join("\n").replace(from, to), &before);
+        let w = Write {
+            author: "user",
+            run: None,
+            reason: Some("varde edit"),
+            gone: &[],
+            default_gone: "removed in varde edit",
+            capped: &[],
+            now,
+        };
+        assert!(save_doc(&s.conn, t, version, &edited, &w).unwrap());
+        let c = cairn(&s.conn, "T1").unwrap().unwrap().0;
+        c.findings.iter().find(|i| !to.is_empty() && i.text == to).map_or(0, |i| i.id)
+    };
+    let new = edit(&s, "Logout races the refresh", "Logout races the token refresh", 2);
+    assert_ne!(new, old);
+    let refused = |s: &mut Store, c: Change| change(s, t, c, 3).unwrap_err().to_string();
+    let said = format!("line #{old} was changed since: it is #{new} now");
+    assert_eq!(refused(&mut s, Change::Set(old, "x")), said);
+    assert_eq!(refused(&mut s, Change::Remove(old)), said);
+    assert_eq!(refused(&mut s, Change::Restore(old)), said);
+    // Changed again, it is followed to the line it is now.
+    let newer = edit(&s, "Logout races the token refresh", "Logout races the session refresh", 4);
+    assert_eq!(
+        refused(&mut s, Change::Remove(old)),
+        format!("line #{old} was changed since: it is #{newer} now")
+    );
+    // A line taken out, not changed, did not become anything.
+    edit(&s, "The cache key omits the locale", "", 5);
+    assert_eq!(
+        refused(&mut s, Change::Set(a, "x")),
+        format!("no line #{a} in this cairn: varde show lists the current ids")
+    );
+    assert_eq!(refused(&mut s, Change::Restore(a)), format!("no line #{a} removed by you to bring back"));
+}
+
+#[test]
+fn related_work_is_shown_by_the_users_line_first_then_a_cairn_line_then_a_note() {
+    let (_d, s) = store();
+    task_with_run(&s, "T1", "Login", "/p");
+    let c = Cairn {
+        status: "Done".into(),
+        findings: vec![Item::new("The session refresh races logout in the login flow")],
+        ..Default::default()
+    };
+    put_cairn(&s.conn, "T1", &c, 0, "job", None, 1).unwrap();
+    let shown = || related(&s.conn, "session refresh races", Some("/p"), None, 3, ME, 9).unwrap().hits;
+    assert_eq!(shown()[0].kind, "findings");
+    // A note saying as much is newer, and still second to the cairn.
+    s.conn
+        .execute(
+            "INSERT INTO note (id, run, text, ts) VALUES ('N1', 'R-T1', 'session refresh races again', 2)",
+            [],
+        )
+        .unwrap();
+    reindex(&s.conn, "T1").unwrap();
+    assert_eq!(shown()[0].kind, "findings");
+    // A line of the user's, older than the job's, comes first.
+    let mut c = cairn(&s.conn, "T1").unwrap().unwrap().0;
+    c.decisions.push(Item { mine: true, ..Item::new("Refresh the session before logout: it races") });
+    put_cairn(&s.conn, "T1", &c, 1, "user", None, 3).unwrap();
+    let mut c = cairn(&s.conn, "T1").unwrap().unwrap().0;
+    c.findings.push(Item::new("Logout races the session refresh on slow links"));
+    put_cairn(&s.conn, "T1", &c, 2, "job", None, 4).unwrap();
+    let hits = shown();
+    assert_eq!((hits.len(), hits[0].kind.as_str()), (1, "decisions"));
+    assert!(hits[0].snippet.starts_with("Refresh the session"), "{:?}", hits[0]);
 }

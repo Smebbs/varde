@@ -17,6 +17,15 @@ use serde_json::Value;
 pub const AGENT: &str = r#"#!/bin/sh
 # Headless: answer as the model would, keeping the prompt for inspection.
 if [ "$1" = "-p" ]; then
+  # Naming a task: kept apart from the cairn updates. It answers
+  # $FAKE_TITLE, and without one it fails.
+  case "$*" in *"You name tasks"*)
+    printf '%s\n' "$*" >> "$FAKE_HOME/name-argv"
+    cat > "$FAKE_HOME/name-prompt.$$"
+    [ -n "$FAKE_TITLE" ] || exit 1
+    printf '{"type":"result","subtype":"success","is_error":false,"result":"%s"}' "$FAKE_TITLE"
+    exit 0 ;;
+  esac
   printf '%s\n' "$*" >> "$FAKE_HOME/model-argv"
   env | grep -E '^(CLAUDE_EFFORT|MAX_THINKING_TOKENS)=' >> "$FAKE_HOME/model-env"
   cat > "$FAKE_HOME/model-prompt.$$"

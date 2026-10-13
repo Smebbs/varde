@@ -23,6 +23,8 @@ pub struct Config {
     pub memory: Memory,
     pub worktree: Worktree,
     pub board: BoardConfig,
+    /// The board's keys, by action: `park = "P"`.
+    pub keys: BTreeMap<String, String>,
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -57,6 +59,9 @@ pub struct Memory {
     pub enabled: bool,
     /// The model a cairn update uses; the agent's default when unset.
     pub model: Option<String>,
+    /// `false` keeps the title varde cuts from a first prompt or a
+    /// context, rather than have the model name the task (§6.2).
+    pub titles: bool,
     /// The share of fresh sessions, 0 to 1, given no memory, so that
     /// `varde eval` can compare them with the rest. Off (0) by default.
     pub holdout: f64,
@@ -64,7 +69,7 @@ pub struct Memory {
 
 impl Default for Memory {
     fn default() -> Self {
-        Memory { enabled: true, model: None, holdout: 0.0 }
+        Memory { enabled: true, model: None, titles: true, holdout: 0.0 }
     }
 }
 
@@ -131,6 +136,9 @@ pub fn load(path: &Path) -> Result<Config> {
                     path.display()
                 );
             }
+            if let Err(e) = crate::tui::check_keys(&c.keys) {
+                anyhow::bail!("reading {}: {e}", path.display());
+            }
             if !(0.0..=1.0).contains(&c.memory.holdout) {
                 anyhow::bail!(
                     "reading {}: memory.holdout is a share of sessions, from 0 to 1, not {}",
@@ -170,13 +178,65 @@ fn loaded() -> &'static (Config, Option<String>) {
     CONFIG.get_or_init(|| match load(&path()) {
         Ok(c) => (c, None),
         Err(e) => {
-            let warning = format!("ignoring the config: {e:#}");
+            let warning = format!("ignoring what varde cannot use in the config: {e:#}");
             if !QUIET.load(std::sync::atomic::Ordering::Relaxed) {
                 eprintln!("varde: {warning}");
             }
-            (Config::default(), Some(warning))
+            let text = std::fs::read_to_string(path()).unwrap_or_default();
+            (lenient(&text), Some(warning))
         }
     })
+}
+
+/// What of a config file with something wrong in it can be used: every
+/// setting it gets right, each key tried on its own, so one typo costs
+/// only itself. A file that is not TOML at all still keeps memory
+/// updates off when it says so, since that is what one would not want
+/// to lose.
+fn lenient(text: &str) -> Config {
+    use serde::de::IntoDeserializer;
+    let ok = |t: &toml::Table| -> bool {
+        Config::deserialize(toml::Value::Table(t.clone()).into_deserializer()).is_ok_and(|c| valid(&c))
+    };
+    let Ok(file) = text.parse::<toml::Table>() else {
+        let off = text.lines().any(|l| l.split('#').next().unwrap_or("").replace(' ', "") == "enabled=false");
+        let mut c = Config::default();
+        c.memory.enabled = !off;
+        return c;
+    };
+    let mut good = toml::Table::new();
+    for (key, value) in file {
+        let mut one = toml::Table::new();
+        match value {
+            // A table keeps the keys it gets right.
+            toml::Value::Table(inner) => {
+                let mut kept = toml::Table::new();
+                for (k, v) in inner {
+                    let mut probe = kept.clone();
+                    probe.insert(k.clone(), v.clone());
+                    one.insert(key.clone(), toml::Value::Table(probe.clone()));
+                    if ok(&one) {
+                        kept = probe;
+                    }
+                }
+                good.insert(key, toml::Value::Table(kept));
+            }
+            value => {
+                one.insert(key.clone(), value.clone());
+                if ok(&one) {
+                    good.insert(key, value);
+                }
+            }
+        }
+    }
+    Config::deserialize(toml::Value::Table(good).into_deserializer()).unwrap_or_default()
+}
+
+/// Whether `c` holds only values varde can use, as `load` checks them.
+fn valid(c: &Config) -> bool {
+    !c.agents.values().any(|a| a.command.as_ref().is_some_and(Vec::is_empty))
+        && (0.0..=1.0).contains(&c.memory.holdout)
+        && crate::tui::check_keys(&c.keys).is_ok()
 }
 
 impl Config {
@@ -288,6 +348,19 @@ mod tests {
         assert_eq!(c.board.scope, Scope::All);
         assert_eq!(c.worktree_dir(Path::new("/src/app")), Path::new("/src/app.worktrees"));
         assert!(toml::from_str::<Config>("[worktree]\ndefualt = \"always\"").is_err());
+    }
+
+    #[test]
+    fn a_typo_costs_only_its_own_setting() {
+        let c = lenient(
+            "agnet = \"pi\"\n[memory]\nenabled = false\nmodle = \"x\"\n[keys]\npark = \"z\"\nparc = \"y\"\n",
+        );
+        assert!(!c.memory.enabled, "memory stays off");
+        assert_eq!(c.keys.get("park").map(String::as_str), Some("z"));
+        assert!(!c.keys.contains_key("parc"));
+        // Not TOML at all: memory still off when the file says so.
+        assert!(!lenient("[memory\nenabled = false\n").memory.enabled);
+        assert!(lenient("[memory\nenabled = true\n").memory.enabled);
     }
 
     #[test]

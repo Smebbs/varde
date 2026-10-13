@@ -22,6 +22,22 @@ fn need_title(title: &str) -> Result<String> {
     Ok(title)
 }
 
+/// The title of a task made with `title` and context `body`: the one
+/// typed, else one cut from the context, as an ad-hoc session's is from
+/// its first prompt. The second is the cut one, which a model may name
+/// the task after (§6.2).
+fn titled(title: &str, body: Option<&str>) -> Result<(String, Option<String>)> {
+    if !crate::title::clean(title).trim().is_empty() {
+        return Ok((need_title(title)?, None));
+    }
+    let Some(cut) = body.and_then(crate::title::from_prompt) else {
+        bail!("a task needs a title or a context");
+    };
+    Ok((cut.clone(), Some(cut)))
+}
+
+/// Make a task. One given only its context is titled from it, and a
+/// model names it (§6.2).
 pub fn create(
     store: &Store,
     title: &str,
@@ -30,19 +46,20 @@ pub fn create(
     external: Option<&str>,
     now: i64,
 ) -> Result<String> {
-    let title = need_title(title)?;
+    let (title, prompt_title) = titled(title, body)?;
     let id = ulid::Ulid::new().to_string();
     store.conn.execute(
-        "INSERT INTO task (id, title, body, project, external, created)
-         VALUES (?1,?2,?3,?4,?5,?6)",
-        params![id, title, body, project, external, now],
+        "INSERT INTO task (id, title, prompt_title, body, project, external, created)
+         VALUES (?1,?2,?3,?4,?5,?6,?7)",
+        params![id, title, prompt_title, body, project, external, now],
     )?;
     Ok(id)
 }
 
 /// Split work off the task of run `from` into a task of its own, in
 /// `project`, else in the same project. It waits in the Inbox until
-/// someone picks it up or drops it.
+/// someone picks it up or drops it. Its title is the agent's, or cut
+/// from its context, never yours: a model names it (§6.2).
 pub fn defer(
     store: &Store,
     title: &str,
@@ -51,7 +68,7 @@ pub fn defer(
     project: Option<&str>,
     now: i64,
 ) -> Result<String> {
-    let title = need_title(title)?;
+    let (title, _) = titled(title, body)?;
     let origin: Option<(String, Option<String>)> = store
         .conn
         .query_row(
@@ -64,8 +81,8 @@ pub fn defer(
     let project = project.map(String::from).or(theirs);
     let id = ulid::Ulid::new().to_string();
     store.conn.execute(
-        "INSERT INTO task (id, title, body, project, inbox, origin, created)
-         VALUES (?1,?2,?3,?4,1,?5,?6)",
+        "INSERT INTO task (id, title, prompt_title, body, project, inbox, origin, created)
+         VALUES (?1,?2,?2,?3,?4,1,?5,?6)",
         params![id, title, body, project, origin, now],
     )?;
     Ok(id)
@@ -73,20 +90,139 @@ pub fn defer(
 
 /// Refresh a task's title and body from where it is written, e.g. an org
 /// heading. The task's identity never depends on them.
-pub fn set(store: &Store, id: &str, title: Option<&str>, body: Option<&str>) -> Result<()> {
-    if let Some(t) = title {
-        let t = need_title(t)?;
-        store.conn.execute("UPDATE task SET title = ?2 WHERE id = ?1", params![id, t])?;
-        // Recall finds a task by its title too.
-        crate::memory::reindex(&store.conn, id)?;
-    }
+pub fn set(store: &Store, id: &str, title: Option<&str>, body: Option<&str>) -> Result<Set> {
+    let mut set = Set::default();
     if let Some(b) = body {
         let b = b.trim();
+        let b = (!b.is_empty()).then_some(b);
+        set.body = store
+            .conn
+            .execute("UPDATE task SET body = ?2 WHERE id = ?1 AND body IS NOT ?2", params![id, b])?
+            > 0;
+    }
+    if let Some(t) = title {
+        set.title = if crate::title::clean(t).trim().is_empty() {
+            // No title: cut from the context, as `create` does, and a
+            // model names the task after it, once more.
+            let context: Option<String> =
+                store.conn.query_row("SELECT body FROM task WHERE id = ?1", [id], |r| r.get(0))?;
+            let Some(cut) = context.as_deref().and_then(crate::title::from_prompt) else {
+                bail!("a task needs a title or a context");
+            };
+            store.conn.execute(
+                "UPDATE task SET title = ?2, prompt_title = ?2, named = NULL
+                 WHERE id = ?1 AND (title IS NOT ?2 OR prompt_title IS NOT ?2 OR named IS NOT NULL)",
+                params![id, cut],
+            )? > 0
+        } else {
+            let t = need_title(t)?;
+            // A title changed here is yours: no model names the task after it.
+            store.conn.execute(
+                "UPDATE task SET title = ?2, prompt_title = NULL WHERE id = ?1 AND title IS NOT ?2",
+                params![id, t],
+            )? > 0
+        };
+        if set.title {
+            // Recall finds a task by its title too.
+            crate::memory::reindex(&store.conn, id)?;
+        }
+    }
+    Ok(set)
+}
+
+/// What `set` changed.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct Set {
+    pub title: bool,
+    /// The context.
+    pub body: bool,
+}
+
+/// What a model reads to name a task (§6.2).
+#[derive(Debug, PartialEq, Eq)]
+pub struct ToName {
+    /// Its title so far.
+    pub title: String,
+    /// What it was made from: its context, else its first prompt. `None`
+    /// when it has neither, and there is nothing to name it from.
+    pub text: Option<String>,
+    /// The agent of its last run, if it has run.
+    pub agent: Option<String>,
+}
+
+/// A task varde titled itself and has not yet asked a model to name:
+/// its title is still the one it cut or the agent wrote, and the task is
+/// not linked to where it is written.
+const UNNAMED: &str = "named IS NULL AND title = prompt_title AND external IS NULL";
+
+/// Tasks waiting to be named, newest first, at most `limit`.
+pub fn unnamed(store: &Store, limit: usize) -> Result<Vec<String>> {
+    let mut q =
+        store.conn.prepare(&format!("SELECT id FROM task WHERE {UNNAMED} ORDER BY created DESC LIMIT ?1"))?;
+    let ids = q.query_map([limit as i64], |r| r.get(0))?.collect::<rusqlite::Result<_>>()?;
+    Ok(ids)
+}
+
+/// Whether task `id` waits to be named.
+pub fn waits_for_name(store: &Store, id: &str) -> Result<bool> {
+    let q = format!("SELECT count(*) FROM task WHERE id = ?1 AND {UNNAMED}");
+    Ok(store.conn.query_row(&q, [id], |r| r.get::<_, i64>(0))? > 0)
+}
+
+/// Take task `id`'s one attempt at being named, as of `now`: what to
+/// name it from, or `None` when it is not waiting (already tried, named,
+/// titled by you, or linked). Taken before the model is asked, so two
+/// callers never both ask, and a failure is not tried again.
+pub fn claim_naming(store: &Store, id: &str, now: i64) -> Result<Option<ToName>> {
+    let n = store
+        .conn
+        .execute(&format!("UPDATE task SET named = ?2 WHERE id = ?1 AND {UNNAMED}"), params![id, now])?;
+    if n == 0 {
+        return Ok(None);
+    }
+    let (title, body): (String, Option<String>) =
         store
             .conn
-            .execute("UPDATE task SET body = ?2 WHERE id = ?1", params![id, (!b.is_empty()).then_some(b)])?;
+            .query_row("SELECT title, body FROM task WHERE id = ?1", [id], |r| Ok((r.get(0)?, r.get(1)?)))?;
+    let first_prompt = || -> rusqlite::Result<Option<String>> {
+        store
+            .conn
+            .query_row(
+                "SELECT json_extract(e.raw, '$.prompt') FROM run r JOIN event e ON e.run = r.id
+                 WHERE r.task = ?1 AND e.kind = 'prompt' AND json_valid(e.raw)
+                   AND json_type(e.raw, '$.prompt') = 'text'
+                 ORDER BY e.ts, e.seq LIMIT 1",
+                [id],
+                |r| r.get(0),
+            )
+            .optional()
+            .map(Option::flatten)
+    };
+    let text = match body.filter(|b| !b.trim().is_empty()) {
+        Some(b) => Some(b),
+        None => first_prompt()?.filter(|p| !p.trim().is_empty()),
+    };
+    let agent = store
+        .conn
+        .query_row("SELECT agent FROM run WHERE task = ?1 ORDER BY started DESC LIMIT 1", [id], |r| r.get(0))
+        .optional()?;
+    Ok(Some(ToName { title, text, agent }))
+}
+
+/// Name a task as a model read it (§6.2): only while its title is still
+/// the one varde cut or the agent wrote, and it is not linked to where it
+/// is written, so a title you set meanwhile wins. Returns whether it was
+/// renamed. `title` must already be one `title::from_model` gave.
+pub fn name(store: &Store, id: &str, title: &str) -> Result<bool> {
+    let n = store.conn.execute(
+        "UPDATE task SET title = ?2
+         WHERE id = ?1 AND title = prompt_title AND external IS NULL AND title IS NOT ?2",
+        params![id, title],
+    )?;
+    if n > 0 {
+        crate::memory::reindex(&store.conn, id)?;
     }
-    Ok(())
+    Ok(n > 0)
 }
 
 /// Move a task to another project. Its runs keep the directories they
@@ -161,6 +297,10 @@ pub struct Detail {
     /// one, and not yet acted on.
     pub inbox: bool,
     pub external: Option<String>,
+    /// The title varde cut (from its first prompt or its context) or the
+    /// agent wrote, when a model has since named the task.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub prompt_title: Option<String>,
     /// The task this one was deferred from.
     pub origin: Option<String>,
     pub created: i64,
@@ -203,7 +343,7 @@ pub struct WorktreeDetail {
 pub fn detail(store: &Store, id: &str, alive: &dyn Fn(i64, i64) -> bool) -> Result<Detail> {
     let mut d = store.conn.query_row(
         "SELECT id, title, body, project, state, inbox, external, created, closed, origin,
-                coalesce(changed, created)
+                coalesce(changed, created), CASE WHEN title IS NOT prompt_title THEN prompt_title END
          FROM task WHERE id = ?1",
         [id],
         |r| {
@@ -222,6 +362,7 @@ pub fn detail(store: &Store, id: &str, alive: &dyn Fn(i64, i64) -> bool) -> Resu
                 closed: r.get(8)?,
                 origin: r.get(9)?,
                 changed: r.get(10)?,
+                prompt_title: r.get(11)?,
                 runs: Vec::new(),
                 worktree: None,
             })
@@ -365,6 +506,37 @@ mod tests {
     }
 
     #[test]
+    fn only_a_title_cut_from_a_prompt_is_named_and_only_once() {
+        let (_d, s) = store();
+        s.conn
+            .execute(
+                "INSERT INTO task (id, title, prompt_title, created)
+                 VALUES ('T1XXXXXX','fix the','fix the',1), ('T2XXXXXX','b','b',1), ('T3XXXXXX','c','c',1)",
+                [],
+            )
+            .unwrap();
+        let get = |id| detail(&s, id, &|_, _| true).unwrap();
+        let mine = create(&s, "Typed by you", None, None, None, 1).unwrap();
+        assert!(!name(&s, &mine, "Renamed").unwrap());
+        assert_eq!(get(&mine).title, "Typed by you");
+        // Named once, and the first prompt's words are kept.
+        assert!(name(&s, "T1XXXXXX", "Fix the login").unwrap());
+        assert!(!name(&s, "T1XXXXXX", "Again").unwrap());
+        let d = get("T1XXXXXX");
+        assert_eq!((d.title.as_str(), d.prompt_title.as_deref()), ("Fix the login", Some("fix the")));
+        // A title you set, or a link, wins.
+        set(&s, "T2XXXXXX", Some("Yours"), None).unwrap();
+        assert!(!name(&s, "T2XXXXXX", "Renamed").unwrap());
+        assert_eq!(get("T2XXXXXX").prompt_title, None);
+        link(&s, "T3XXXXXX", "org").unwrap();
+        assert!(!name(&s, "T3XXXXXX", "Renamed").unwrap());
+        // Saving the same words is not setting a title.
+        set(&s, "T1XXXXXX", Some("Fix the login"), None).unwrap();
+        assert_eq!(get("T1XXXXXX").prompt_title.as_deref(), Some("fix the"));
+        assert_eq!(get("T3XXXXXX").prompt_title, None, "shown only once named");
+    }
+
+    #[test]
     fn a_task_made_on_purpose_is_never_in_the_inbox() {
         let (_d, s) = store();
         let id = create(&s, "Fix it", None, None, None, 1).unwrap();
@@ -408,6 +580,80 @@ mod tests {
         let (_d, s) = store();
         assert!(create(&s, "  ", None, None, None, 1).is_err());
         assert!(create(&s, "\x1b\x07", None, None, None, 1).is_err());
+        assert!(create(&s, " ", Some("?!"), None, None, 1).is_err(), "nothing in the context to title");
+    }
+
+    #[test]
+    fn a_task_given_only_its_context_is_titled_from_it_and_named_once() {
+        let (_d, s) = store();
+        let body = "\nhey so the login page is in english for everyone\nmore";
+        let id = create(&s, " ", Some(body), None, None, 1).unwrap();
+        let d = detail(&s, &id, &|_, _| true).unwrap();
+        assert_eq!(
+            (d.title.as_str(), d.body.as_deref()),
+            ("hey so the login page is in english…", Some(body))
+        );
+        assert!(name(&s, &id, "Login page shown in English").unwrap());
+        assert_eq!(detail(&s, &id, &|_, _| true).unwrap().prompt_title.as_deref(), Some(d.title.as_str()));
+        assert!(!name(&s, &id, "Again").unwrap());
+        // A title typed, even beside a context, is yours.
+        let typed = create(&s, "Fix it", Some("the login page"), None, None, 1).unwrap();
+        assert!(!name(&s, &typed, "Renamed").unwrap());
+    }
+
+    #[test]
+    fn a_task_varde_titled_is_claimed_for_naming_once() {
+        let (_d, s) = store();
+        let ctx = create(&s, "", Some("why is the cart total off by a cent"), None, None, 1).unwrap();
+        let typed = create(&s, "Typed", Some("context"), None, None, 2).unwrap();
+        let linked = create(&s, "", Some("from org"), None, Some("org"), 3).unwrap();
+        s.conn
+            .execute_batch(
+                "INSERT INTO task (id, title, prompt_title, created) VALUES ('ADHOC', 'hey so the', 'hey so the', 4);
+                 INSERT INTO run (id, task, agent, native_id, relation, started) VALUES ('R1', 'ADHOC', 'pi', 'n', 'fresh', 5);
+                 INSERT INTO event (run, kind, ts, raw) VALUES
+                   ('R1', 'started', 5, '{}'),
+                   ('R1', 'prompt', 6, '{\"prompt\": \"hey so the cart rounds wrong\"}'),
+                   ('R1', 'prompt', 7, '{\"prompt\": \"later\"}');",
+            )
+            .unwrap();
+        let deferred = defer(&s, "Agent's words", None, "R1", None, 8).unwrap();
+        assert_eq!(unnamed(&s, 10).unwrap(), [deferred.as_str(), "ADHOC", ctx.as_str()]);
+        assert_eq!(unnamed(&s, 1).unwrap(), [deferred.as_str()]);
+        let got = claim_naming(&s, "ADHOC", 9).unwrap().unwrap();
+        assert_eq!(
+            got,
+            ToName {
+                title: "hey so the".into(),
+                text: Some("hey so the cart rounds wrong".into()),
+                agent: Some("pi".into())
+            }
+        );
+        assert_eq!(claim_naming(&s, "ADHOC", 10).unwrap(), None, "once");
+        let got = claim_naming(&s, &ctx, 11).unwrap().unwrap();
+        assert_eq!((got.text.as_deref(), got.agent), (Some("why is the cart total off by a cent"), None));
+        assert_eq!(claim_naming(&s, &typed, 12).unwrap(), None);
+        assert_eq!(claim_naming(&s, &linked, 12).unwrap(), None);
+        assert_eq!(claim_naming(&s, &deferred, 12).unwrap().unwrap().text, None, "nothing to name it from");
+        assert!(unnamed(&s, 10).unwrap().is_empty());
+        // Tried, a cleared title asks once more.
+        set(&s, &ctx, Some(" "), None).unwrap();
+        assert!(claim_naming(&s, &ctx, 13).unwrap().is_some());
+    }
+
+    #[test]
+    fn an_edit_without_a_title_takes_one_from_the_context_and_can_be_named() {
+        let (_d, s) = store();
+        let id = create(&s, "Typed by hand", None, None, None, 1).unwrap();
+        let changed = set(&s, &id, Some(" "), Some("the cart total rounds the wrong way")).unwrap();
+        assert!(changed.title && changed.body);
+        let d = detail(&s, &id, &|_, _| true).unwrap();
+        assert_eq!(d.title, "the cart total rounds the wrong way");
+        assert!(name(&s, &id, "Cart total rounding").unwrap(), "nameable again");
+        // With neither, nothing is saved.
+        let bare = create(&s, "Bare", None, None, None, 1).unwrap();
+        assert!(set(&s, &bare, Some(""), Some(" ")).is_err());
+        assert_eq!(detail(&s, &bare, &|_, _| true).unwrap().title, "Bare");
     }
 
     #[test]

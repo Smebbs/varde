@@ -28,6 +28,12 @@ impl Status {
     pub fn needs_you(self) -> bool {
         matches!(self, Status::Waiting | Status::Blocked)
     }
+
+    /// The session is in a turn: closing its task stops it mid-work, or
+    /// while it waits for an answer.
+    pub fn mid_turn(self) -> bool {
+        matches!(self, Status::Working | Status::Delegated | Status::Blocked)
+    }
 }
 
 /// Event kinds, by their stored names, that bear on status.

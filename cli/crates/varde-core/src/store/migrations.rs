@@ -3,7 +3,8 @@
 /// Numbered migrations; `user_version` records how many have run.
 /// Append only — never edit one that has shipped. The first is the
 /// schema varde 1.0.0 shipped with.
-pub(super) const MIGRATIONS: &[&str] = &[r#"
+pub(super) const MIGRATIONS: &[&str] = &[
+    r#"
 CREATE TABLE task (
   id       TEXT PRIMARY KEY,
   title    TEXT NOT NULL,
@@ -210,4 +211,18 @@ CREATE TABLE recall_log (
   everywhere INTEGER,
   results    TEXT
 );
-"#];
+"#,
+    // 2: a title varde cut from an ad-hoc session's first prompt is kept
+    // here, so the task may be named once (§6.2) and the first prompt's
+    // words stay to be told apart. A title set any other way clears it.
+    r#"
+ALTER TABLE task ADD COLUMN prompt_title TEXT;
+"#,
+    // 3: when varde asked a model to name the task (§6.2), so it asks
+    // once. A task already closed has no use for a better title: it is
+    // taken as asked.
+    r#"
+ALTER TABLE task ADD COLUMN named INTEGER;
+UPDATE task SET named = 0 WHERE prompt_title IS NOT NULL AND state != 'open';
+"#,
+];

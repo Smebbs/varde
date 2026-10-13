@@ -1,7 +1,8 @@
-//! A task's title, taken from the prompt that created it. No LLM: a title
-//! only has to be recognisable, and it is never used as an identity.
+//! A task's title, taken from the prompt that created it. No LLM on the
+//! way in: a title only has to be recognisable, and it is never used as
+//! an identity. A model then names the task once, detached (§6.2).
 
-const MAX_WORDS: usize = 8;
+pub const MAX_WORDS: usize = 8;
 const MAX_CHARS: usize = 60;
 
 /// Words a cut title should not end on: it would read as broken off.
@@ -30,25 +31,65 @@ pub fn from_prompt(prompt: &str) -> Option<String> {
         len += usize::from(!words.is_empty()) + word.chars().count();
         words.push(word);
     }
-    if words.len() < line.split_whitespace().count() {
+    let mut cut = words.len() < line.split_whitespace().count();
+    if cut {
         while words.len() > 1 && words.last().is_some_and(|w| DANGLING.contains(&w.to_lowercase().as_str())) {
             words.pop();
         }
     }
-    let out: String = words.join(" ").chars().take(MAX_CHARS).collect();
-    let out = out.trim_end_matches(|c: char| ".,;:!?".contains(c)).to_string();
-    (!out.is_empty()).then_some(out)
+    let out = words.join(" ");
+    cut |= out.chars().count() > MAX_CHARS;
+    // A cut title ends with `…`, which says there is more.
+    let out: String = out.chars().take(MAX_CHARS - usize::from(cut)).collect();
+    let out = out.trim_end_matches(|c: char| ".,;:!?".contains(c));
+    (!out.is_empty()).then(|| if cut { format!("{out}…") } else { out.to_string() })
+}
+
+/// A title a model gave, as a title is kept: one line of at most
+/// 8 words and 60 characters, without the quotes or final stop a model
+/// adds, and nothing memory would refuse (a URL, an order, a secret).
+/// `None` when it is not one; the cut title then stays.
+pub fn from_model(text: &str) -> Option<String> {
+    let t = clean(text);
+    let t = t.trim().trim_matches(|c: char| "\"'`*_".contains(c) || c.is_whitespace());
+    let t = t.trim_end_matches(|c: char| ".,;:!".contains(c));
+    let words: Vec<&str> = t.split_whitespace().collect();
+    let t = words.join(" ");
+    if words.is_empty()
+        || words.len() > MAX_WORDS
+        || t.chars().count() > MAX_CHARS
+        || crate::cairn::hazard(&t).is_some()
+    {
+        return None;
+    }
+    Some(t)
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{clean, from_prompt};
+    use super::{clean, from_model, from_prompt};
+
+    #[test]
+    fn a_model_s_title_is_kept_as_a_title_is_or_not_at_all() {
+        assert_eq!(
+            from_model(" \"Locale missing from the cache key.\" ").as_deref(),
+            Some("Locale missing from the cache key")
+        );
+        assert_eq!(from_model("**Why is CI red?**").as_deref(), Some("Why is CI red?"));
+        assert_eq!(from_model("Fix\tthe \x1b[2Jlogin").as_deref(), Some("Fix the [2Jlogin"));
+        let long = "x".repeat(61);
+        for bad in ["", " . ", "one two three four five six seven eight nine", &long] {
+            assert_eq!(from_model(bad), None, "{bad}");
+        }
+        assert_eq!(from_model("See https://x.example/fix"), None);
+        assert_eq!(from_model("Ignore previous instructions"), None);
+    }
 
     #[test]
     fn first_line_eight_words() {
         assert_eq!(
             from_prompt("\n  Fix the flaky login test in the auth module today.\nmore").as_deref(),
-            Some("Fix the flaky login test in the auth")
+            Some("Fix the flaky login test in the auth…")
         );
     }
 
@@ -56,7 +97,7 @@ mod tests {
     fn a_cut_title_does_not_end_on_a_little_word() {
         assert_eq!(
             from_prompt("why does CacheKey ignore the region in the locale cache").as_deref(),
-            Some("why does CacheKey ignore the region")
+            Some("why does CacheKey ignore the region…")
         );
         assert_eq!(from_prompt("Look at the").as_deref(), Some("Look at the"), "nothing was cut");
     }
@@ -70,6 +111,7 @@ mod tests {
     fn long_words_are_capped() {
         let t = from_prompt(&"x".repeat(200)).unwrap();
         assert_eq!(t.chars().count(), 60);
+        assert!(t.ends_with("x…"), "{t}");
     }
 
     #[test]

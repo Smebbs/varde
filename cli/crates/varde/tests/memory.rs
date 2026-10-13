@@ -94,8 +94,16 @@ fn every_start_is_given_the_memory_it_calls_for() {
     // A fresh run of the task: guidance, project cairn, cairn.
     let given =
         hook(&e, "SessionStart", &payload(&e, "session-start-startup.json", &session), Some(&run)).unwrap();
-    assert!(given.starts_with(&format!("varde tracks this session as run {run} of task ")), "{given}");
-    assert!(given.contains("varde note --run") && given.contains("varde new --from"), "{given}");
+    // The run by its six characters, which `note` and `new --from` read.
+    let run6 = run[run.len() - 6..].to_lowercase();
+    assert!(given.starts_with(&format!("varde tracks this session as run {run6} of task ")), "{given}");
+    assert!(given.contains(&format!("varde note --run {run6} ")), "{given}");
+    assert!(given.contains(&format!("varde new --from {run6} ")) && !given.contains(&run), "{given}");
+    e.ok(&["note", "--run", &run6, "The locale comes from the cookie."]);
+    e.ok(&["new", "--from", &run6, "Later work"]);
+    // After the cairns, how one of their lines is corrected.
+    let correct = given.find("If a line above is wrong or done, note the correction.").unwrap();
+    assert!(correct > given.find(CAIRN).unwrap(), "{given}");
     let short = t[t.len() - 6..].to_lowercase();
     assert!(given.contains(&format!("close it: varde done {short}.")), "{given}");
     let project = given.find(PROJECT).unwrap();
@@ -174,7 +182,7 @@ fn a_held_out_session_is_given_only_your_own_lines_and_so_is_its_conversation() 
     let holdout: i64 =
         e.db().query_row("SELECT holdout FROM run WHERE id = ?1", [&run], |r| r.get(0)).unwrap();
     assert_eq!(holdout, 1);
-    assert!(e.ok(&["show", &t, "--no-git"]).contains("(held out of memory)"));
+    assert!(e.ok(&["show", &t, "--no-git"]).contains("held out of memory"));
     assert_eq!(e.show(&t)["runs"][0]["held_out"], true);
     let given =
         hook(&e, "SessionStart", &payload(&e, "session-start-startup.json", &session), Some(&run)).unwrap();
@@ -217,10 +225,13 @@ fn project_cairn_is_shown_edited_and_found_by_recall() {
     let e = env();
     let proj = proj(&e).to_string_lossy().to_string();
     let none = e.ok(&["show", "--project", &proj]);
-    assert!(none.contains("none yet"), "{none}");
+    assert!(none.contains("No project cairn yet: tasks closed as done add to it"), "{none}");
     task_with_memory(&e);
     let shown = e.ok(&["show", "--project", &proj]);
-    assert!(shown.contains("Gotchas:\n  - [mine] `cargo test -p varde-agent`"), "{shown}");
+    assert!(shown.starts_with("Project cairn · what proj's tasks learned"), "{shown}");
+    assert!(shown.contains(" ago by you · not handed to a session yet"), "{shown}");
+    assert!(shown.contains("  Gotchas 1/7\n    - `cargo test -p varde-agent`"), "{shown}");
+    assert!(shown.contains("binary. (yours)  #3\n  How-to 1/5"), "{shown}");
     let json: Value = serde_json::from_str(&e.ok(&["show", "--project", &proj, "--json"])).unwrap();
     assert_eq!(json["version"], 1);
     assert_eq!(json["cairn"]["howto"][0]["anchor"], "cli/crates/varde");
@@ -233,7 +244,7 @@ fn project_cairn_is_shown_edited_and_found_by_recall() {
     // Recall finds it, named by its project.
     let found = e.run(&["recall", "reinstall", "--all"]);
     let found = String::from_utf8_lossy(&found.stdout);
-    assert!(found.contains("project cairn") && found.contains("how-to: Reinstall"), "{found}");
+    assert!(found.contains("proj · project cairn\n    how-to: Reinstall"), "{found}");
 }
 
 /// A transcript of tool calls, each `(minutes after t0, tool, input)`.
@@ -479,10 +490,15 @@ fn recall_shows_the_bullet_that_matched_before_the_title() {
     let t = e.ok(&["new", "Fix the locale cache key bug", "--project", &p]);
     e.ok_in(
         &["edit", &t, "--stdin"],
-        "Status: s\nFindings:\n- It keys entries by locale only\nDecisions:\nOpen:\n",
+        "Status: s\nFindings:\n- It keys entries by locale only\nDecisions:\nOpen:\n- Check the locale fallback\n",
     );
     let found = e.ok(&["recall", "locale", "cache"]);
     assert!(found.contains("finding: It keys entries by locale only"), "{found}");
+    // One hit a task: its other matching lines are counted.
+    let found = e.ok(&["recall", "locale"]);
+    assert!(found.contains("  (+1 more in this task)"), "{found}");
+    let hits: Value = serde_json::from_str(&e.ok(&["recall", "locale", "--json"])).unwrap();
+    assert_eq!(hits["hits"][0]["more"], 1);
 }
 
 #[test]
@@ -546,10 +562,41 @@ fn the_editor_is_opened_with_the_format_said_and_it_is_not_saved() {
         "editor",
         "#!/bin/sh\ngrep -q '^#: One line per bullet' \"$1\" || exit 1\nprintf -- '- `x` is new\\n' >> \"$1\"\n",
     );
-    let out = e.cmd(&["edit", &t]).env("VISUAL", &editor).output().unwrap();
+    // An empty $VISUAL is unset, so $EDITOR opens it.
+    let out = e.cmd(&["edit", &t]).env("VISUAL", "").env("EDITOR", &editor).output().unwrap();
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let printed = e.ok(&["edit", &t, "--print"]);
-    assert!(printed.ends_with("Open:\n- [mine] `x` is new") && !printed.contains("#:"), "{printed}");
+    assert!(
+        printed.ends_with("Open:\n- [mine] `x` is new") && !printed.contains("One line per bullet"),
+        "{printed}"
+    );
+}
+
+#[test]
+fn a_missing_editor_is_named_and_leaves_no_file() {
+    let e = env();
+    let p = proj(&e).to_string_lossy().to_string();
+    let t = e.ok(&["new", "Fix it", "--project", &p]);
+    let tmp = e.path("tmp");
+    std::fs::create_dir(&tmp).unwrap();
+    let out = e
+        .cmd(&["edit", &t])
+        .env("VISUAL", "")
+        .env("EDITOR", "no-such-editor --wait")
+        .env("TMPDIR", &tmp)
+        .output()
+        .unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        !out.status.success() && err.contains("no-such-editor not found: set $VISUAL or $EDITOR"),
+        "{err}"
+    );
+    assert_eq!(std::fs::read_dir(&tmp).unwrap().count(), 0, "a temp file was left");
+    // A real editor that fails keeps what it had.
+    let out = e.cmd(&["edit", &t]).env("VISUAL", "false").env("TMPDIR", &tmp).output().unwrap();
+    let err = String::from_utf8_lossy(&out.stderr);
+    assert!(!out.status.success() && err.contains("false exited with") && err.contains("kept in"), "{err}");
+    assert_eq!(std::fs::read_dir(&tmp).unwrap().count(), 1);
 }
 
 #[test]
@@ -559,21 +606,23 @@ fn a_task_s_context_is_edited_above_its_cairn() {
     let t = e.ok(&["new", "Fix it", "--project", &p, "--body", "Why it matters."]);
     let cairn = "Status: \nFindings:\nDecisions:\nOpen:";
     let printed = e.ok(&["edit", &t, "--print"]) + "\n";
-    assert_eq!(printed, format!("Context:\nWhy it matters.\n\n{cairn}\n"));
+    assert_eq!(printed, format!("#: version 0\nContext:\nWhy it matters.\n\n{cairn}\n"));
     let edit = |input: &str| e.ok_in(&["edit", &t, "--stdin"], input);
     assert_eq!(edit(&printed), "unchanged");
 
     let longer = "Why it matters.\n\n- and where to start\nFindings: none yet";
     assert_eq!(edit(&printed.replace("Why it matters.", longer)), "saved");
     assert_eq!(e.show(&t)["body"], longer);
+    // `context` is its name now; `body` stays for v2 clients.
+    assert_eq!(e.show(&t)["context"], longer);
     // Only the context changed: the cairn was not written.
     assert!(e.show(&t)["cairn"].is_null());
     // An edit without a Context: line leaves the context alone.
     assert_eq!(edit(&format!("{cairn}\n- [mine] `x` is new\n")), "saved");
     assert_eq!(e.show(&t)["body"], longer);
     assert_eq!(edit(&format!("Context:\n\n{cairn}\n- [mine] `x` is new\n")), "saved");
-    assert!(e.show(&t)["body"].is_null());
-    assert!(e.ok(&["edit", &t, "--print"]).starts_with("Context:\n\nStatus: "));
+    assert!(e.show(&t)["body"].is_null() && e.show(&t)["context"].is_null());
+    assert!(e.ok(&["edit", &t, "--print"]).contains("\nContext:\n\nStatus: "));
 }
 
 #[test]
@@ -586,7 +635,9 @@ fn a_linked_task_s_context_is_shown_but_not_edited() {
     let printed = e.ok(&["edit", &t, "--print"]) + "\n";
     assert_eq!(
         printed,
-        format!("#: Context, from org: edit it there.\n#: Why it matters.\n#: And more.\n{cairn}\n")
+        format!(
+            "#: version 0\n#: Context, from org: edit it there.\n#: Why it matters.\n#: And more.\n{cairn}\n"
+        )
     );
     assert_eq!(e.ok_in(&["edit", &t, "--stdin"], &printed), "unchanged");
     assert_eq!(e.ok_in(&["edit", &t, "--stdin"], &format!("{printed}- [mine] `x` is new\n")), "saved");
@@ -609,4 +660,128 @@ fn a_note_says_when_no_update_will_fold_it_in() {
     assert!(e.ok(&["note", "--run", &run, "b"]).contains("the task is parked"));
     std::fs::write(e.path("config.toml"), "[memory]\nenabled = false\n").unwrap();
     assert!(e.ok(&["note", "--run", &run, "c"]).contains("memory updates are off"));
+}
+
+#[test]
+fn a_line_is_added_changed_removed_and_brought_back_one_at_a_time() {
+    let e = env();
+    let p = proj(&e).to_string_lossy().to_string();
+    let t = e.ok(&["new", "Fix it", "--project", &p, "--body", "Why it matters."]);
+    let json = |args: &[&str]| -> Value {
+        let mut all = vec!["edit", t.as_str()];
+        all.extend_from_slice(args);
+        all.push("--json");
+        serde_json::from_str(&e.ok(&all)).unwrap()
+    };
+    let refused = |args: &[&str]| -> String {
+        let mut all = vec!["edit", t.as_str()];
+        all.extend_from_slice(args);
+        let out = e.run(&all);
+        assert!(!out.status.success(), "{args:?}");
+        String::from_utf8_lossy(&out.stderr).to_string()
+    };
+    let added = json(&["--add", "findings", "The", "cache key omits", "the locale in `cache_key_for`."]);
+    let id = added["id"].as_i64().unwrap();
+    assert_eq!(
+        (added["v"].as_i64(), added["version"].as_i64(), added["changed"].as_bool()),
+        (Some(1), Some(1), Some(true))
+    );
+    let line = &added["cairn"]["findings"][0];
+    assert_eq!(line["text"], "The cache key omits the locale in `cache_key_for`.");
+    assert_eq!(
+        (line["id"].as_i64(), line["mine"].as_bool(), line["anchor"].as_str()),
+        (Some(id), Some(true), Some("cache_key_for"))
+    );
+    let set = e.ok(&["edit", &t, "--add", "status", "Cause found."]);
+    assert_eq!(set, "Status set, yours now: updates won't change it; --rm status hands it back");
+    assert_eq!(e.show(&t)["cairn"]["status_mine"], true);
+    // Handed back, it keeps its words for the next update to change.
+    let back = e.ok(&["edit", &t, "--rm", "status"]);
+    assert_eq!(back, "Status handed back: the next update may change it");
+    assert_eq!(e.show(&t)["cairn"]["status"], "Cause found.");
+    assert_eq!(e.show(&t)["cairn"]["status_mine"], Value::Null);
+    assert!(refused(&["--rm", "status"]).contains("the Status is already the updates'"));
+    e.ok(&["edit", &t, "--add", "status", "Cause found."]);
+    // A client is told the caps the core holds it to.
+    assert_eq!(
+        e.show(&t)["limits"],
+        serde_json::json!({"status": 30, "line": 40, "words": 200,
+                           "sections": {"findings": 7, "decisions": 5, "open": 5}})
+    );
+    let project: Value = serde_json::from_str(&e.ok(&["show", "--project", &p, "--json"])).unwrap();
+    assert_eq!(
+        project["limits"],
+        serde_json::json!({"line": 40, "words": 200, "sections": {"conventions": 5, "gotchas": 7, "howto": 5}})
+    );
+    let open = e.ok_in(&["edit", &t, "--add", "open", "-"], "-x is read from stdin\n");
+    assert!(open.starts_with("added line #"), "{open}");
+
+    // What is refused says why, and nothing is written.
+    assert!(refused(&["--add", "gotchas", "x"])
+        .contains("no section \"gotchas\": a task's cairn has status, findings"));
+    assert!(refused(&["--set", "999", "x"]).contains("not saved: no line #999 in this cairn"));
+    assert!(refused(&["--set", "one", "x"]).contains("--set takes a line's id, the #12 varde show prints"));
+    assert!(refused(&["--add", "open", &"word ".repeat(41)]).contains("at most 40 words"));
+    for n in 1..5 {
+        e.ok(&["edit", &t, "--add", "open", &format!("open item {n}")]);
+    }
+    assert!(refused(&["--add", "open", "one more"]).contains("not saved: Open is full (5 of 5)"));
+    assert!(refused(&["--json"]).contains("--add"));
+    assert!(refused(&["--add", "open", "x", "--print"]).contains("cannot be used with"));
+    assert_eq!(e.show(&t)["usage"]["author"], "user");
+
+    // Changed in place, it keeps its id; the same words change nothing.
+    let set = json(&["--set", &id.to_string(), "The cache key omits the locale."]);
+    assert_eq!(
+        (set["id"].as_i64(), set["cairn"]["findings"][0]["text"].as_str()),
+        (Some(id), Some("The cache key omits the locale."))
+    );
+    assert_eq!(e.ok(&["edit", &t, "--set", &id.to_string(), "The cache key omits the locale."]), "unchanged");
+
+    // Removed, it leaves for history, which recall finds, and comes back.
+    let rm = e.ok(&["edit", &t, "--rm", &format!("#{id}")]);
+    assert_eq!(rm, format!("removed line #{id}; recall still finds it, and --restore {id} brings it back"));
+    assert!(e.show(&t)["cairn"]["findings"].as_array().unwrap().is_empty());
+    assert!(refused(&["--rm", &id.to_string()])
+        .contains(&format!("not saved: line #{id} is already removed; --restore {id} brings it back")));
+    let found = e.ok(&["recall", "locale"]);
+    assert!(found.contains("earlier: The cache key omits the locale."), "{found}");
+    let back = json(&["--restore", &id.to_string()]);
+    assert_eq!(back["cairn"]["findings"][0]["id"].as_i64(), Some(id));
+    assert!(refused(&["--restore", &id.to_string()]).contains("no line"));
+    let shown: Value = serde_json::from_str(&e.ok(&["show", &t, "--json", "--no-git", "--history"])).unwrap();
+    let reasons: Vec<&str> =
+        shown["history"].as_array().unwrap().iter().filter_map(|v| v["reason"].as_str()).collect();
+    assert!(
+        reasons.contains(&format!("remove {id}").as_str())
+            && reasons.last() == Some(&format!("restore {id}").as_str()),
+        "{reasons:?}"
+    );
+
+    // `varde show` has the cairn first, then the context, as the board does.
+    let shown = e.ok(&["show", &t, "--no-git"]);
+    let at = |s: &str| shown.find(s).unwrap_or_else(|| panic!("{s} in {shown}"));
+    assert!(
+        at("Cairn · what its sessions learned, handed to the next one")
+            < at("  Status  Cause found. (yours)")
+    );
+    assert!(
+        at(&format!(
+            "  Findings 1/7\n    - The cache key omits the locale. (yours)  #{id}\n  Decisions 0/5\n  Open 5/5"
+        ))
+            < at("\nContext\n  Why it matters.")
+    );
+
+    // A project's cairn takes its own sections.
+    let out = e.ok(&[
+        "edit",
+        "--project",
+        &p,
+        "--add",
+        "howto",
+        "Reinstall with `cargo install --path cli/crates/varde`.",
+    ]);
+    assert!(out.starts_with("added line #"), "{out}");
+    let out = e.run(&["edit", "--project", &p, "--add", "status", "x"]);
+    assert!(String::from_utf8_lossy(&out.stderr).contains("a project cairn has no Status"));
 }

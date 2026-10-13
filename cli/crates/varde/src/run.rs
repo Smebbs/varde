@@ -20,6 +20,9 @@ use crate::{git, now_ms, process, tmux, Paths};
 
 pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
     let mut store = paths.open(Duration::from_secs(2))?;
+    // The board types the six characters `varde show` prints.
+    let run_id = &crate::memory_cmd::resolve_run(&store.conn, run_id)
+        .map_err(|e| anyhow!("{e}; runs come from `varde start`"))?;
     let row = store.conn.query_row(
         "SELECT r.agent, r.native_id, r.relation, r.cwd, r.prompt, r.pid, r.launch, t.title, p.native_id, r.task
          FROM run r JOIN task t ON t.id = r.task LEFT JOIN run p ON p.id = r.parent_run

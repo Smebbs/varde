@@ -147,7 +147,10 @@ fn close_task(store: &Store, id: &str, opts: Options) -> Result<Value> {
                         what.push("uncommitted changes".to_string());
                     }
                     if unmerged > 0 {
-                        what.push(format!("{unmerged} unmerged commit(s)"));
+                        what.push(format!(
+                            "{unmerged} unmerged {}",
+                            if unmerged == 1 { "commit" } else { "commits" }
+                        ));
                     }
                     if !l.included.is_empty() {
                         what.push(format!("changed {} (from .worktreeinclude)", l.included.join(", ")));
@@ -302,7 +305,7 @@ pub fn reject(store: &Store, id: &str) -> Result<Value> {
 }
 
 pub fn describe_drop(report: &Value) -> String {
-    describe(report).replacen("done", "dropped", 1)
+    describe_as(report, "dropped")
 }
 
 /// `varde reopen`: back to Open from done, parked or dropped, as starting does.
@@ -318,11 +321,7 @@ pub fn reopen(paths: &Paths, reference: &str) -> Result<()> {
 }
 
 pub fn describe_park(report: &Value) -> String {
-    let parked = match report["stopped"].as_array().map_or(0, Vec::len) {
-        0 => "parked".to_string(),
-        n => format!("parked; stopped {n} session(s)"),
-    };
-    format!("{parked}{}", left_running(report))
+    format!("{}{}", closed_as(report, "parked"), left_running(report))
 }
 
 /// What a report says of the session the command ran in, which is never
@@ -430,10 +429,27 @@ pub fn reap(paths: &Paths, reference: &str, spare: &[String]) -> Result<()> {
 }
 
 pub fn describe(report: &Value) -> String {
-    let done = match report["stopped"].as_array().map_or(0, Vec::len) {
-        0 => "done".to_string(),
-        n => format!("done; stopped {n} session(s)"),
-    };
+    describe_as(report, "done")
+}
+
+/// `abc123 is <verb>`, and what stopping its sessions did.
+fn closed_as(report: &Value, verb: &str) -> String {
+    let short = report["task"].as_str().map(task::short).unwrap_or_default();
+    let what = if short.is_empty() { verb.to_string() } else { format!("{short} is {verb}") };
+    match report["stopped"].as_array().map_or(0, Vec::len) {
+        0 => what,
+        1 => format!("{what}; its session was stopped"),
+        n => format!("{what}; its {n} sessions were stopped"),
+    }
+}
+
+/// `1 commit`, `2 commits`.
+fn commits(n: u64) -> String {
+    format!("{n} commit{}", if n == 1 { "" } else { "s" })
+}
+
+fn describe_as(report: &Value, verb: &str) -> String {
+    let done = closed_as(report, verb);
     if let Some(w) = report["worktree"].as_object() {
         let s = |k: &str| w[k].as_str().unwrap_or("");
         let included: Vec<&str> = w["included"]
@@ -473,7 +489,7 @@ pub fn describe(report: &Value) -> String {
                 let mut also = vec![];
                 match w["ahead"].as_u64() {
                     Some(0) | None => {}
-                    Some(n) => also.push(format!("{n} commit(s) ahead of {}", s("base"))),
+                    Some(n) => also.push(format!("{} ahead of {}", commits(n), s("base"))),
                 }
                 if w["dirty"] == true {
                     also.push("uncommitted changes".to_string());
@@ -497,16 +513,21 @@ pub fn describe(report: &Value) -> String {
             ),
             // Its work has landed: only the session keeps it.
             _ if w["session"] == true && w["ahead"] == 0 && w["dirty"] == false => format!(
-                "worktree kept at {} while a session runs in it; it goes once that ends",
+                "worktree kept at {} until the session in it has ended; its work has landed, so it goes then",
                 s("path")
             ),
             _ => match w["ahead"].as_u64() {
-                Some(ahead) => format!(
-                    "worktree kept at {} until its work lands ({ahead} commit(s) ahead of {}{})",
-                    s("path"),
-                    s("base"),
-                    if w["dirty"] == true { ", uncommitted changes" } else { "" }
-                ),
+                Some(ahead) => {
+                    let mut why = vec![];
+                    if ahead > 0 {
+                        why.push(format!("{} ahead of {}", commits(ahead), s("base")));
+                    }
+                    if w["dirty"] == true {
+                        why.push("uncommitted changes".to_string());
+                    }
+                    let why = if why.is_empty() { String::new() } else { format!(" ({})", why.join(", ")) };
+                    format!("worktree kept at {} until its work lands{why}", s("path"))
+                }
                 None => format!(
                     "worktree kept at {} (its git state could not be read)",
                     s("path")
@@ -544,11 +565,12 @@ mod tests {
         };
         let said = report(true, 0, json!([]));
         assert!(
-            said.contains("while a session runs in it") && !said.contains("until its work lands"),
+            said.contains("until the session in it has ended; its work has landed")
+                && !said.contains("until its work lands"),
             "{said}"
         );
         let said = report(true, 2, json!([]));
-        assert!(said.contains("until its work lands (2 commit(s) ahead of main)"), "{said}");
+        assert!(said.contains("until its work lands (2 commits ahead of main)"), "{said}");
         let said = report(false, 0, json!([".env"]));
         assert!(
             said.contains("its .env differs from the main checkout's;") && !said.contains("ahead"),

@@ -6,7 +6,6 @@ use std::path::PathBuf;
 
 use anyhow::Result;
 use varde_core::board::{Board, Row};
-use varde_core::plan::Want;
 use varde_core::store::Store;
 use varde_core::task;
 
@@ -55,18 +54,34 @@ impl App<'_> {
     }
 
     /// Start the selected task. In tmux a session starts in a window of
-    /// its own, and the board keeps the screen.
+    /// its own, and the board keeps the screen; else it gets this
+    /// terminal, once the board has asked what a first start needs.
     pub(super) fn begin(&mut self, start: Start) -> Option<Away> {
+        let id = self.current_id()?;
+        self.launch(&id, start, None, None)
+    }
+
+    fn launch(
+        &mut self,
+        id: &str,
+        start: Start,
+        worktree: Option<bool>,
+        project: Option<PathBuf>,
+    ) -> Option<Away> {
         if self.tmux.is_some() {
-            if let Some(id) = self.current_id() {
-                self.attach_tmux(&id, start, None, None);
-            }
+            self.attach_tmux(id, start, worktree, project);
             None
         } else if !start.go {
             self.message = "starting in the background needs tmux; RET starts it here".into();
             None
         } else {
-            Some(Away::Attach(start))
+            match self.prepare_here(id, start, worktree, project) {
+                Ok(away) => away,
+                Err(e) => {
+                    self.report(Err(e));
+                    None
+                }
+            }
         }
     }
 
@@ -78,14 +93,76 @@ impl App<'_> {
         start: Start,
         worktree: Option<bool>,
         project: Option<PathBuf>,
-    ) {
+    ) -> Option<Away> {
         let now = self.paths.open(BUSY).ok().and_then(|s| state_of(&s, &asked.task));
         if now.as_ref() != Some(&asked.state) {
             let now = now.as_deref().unwrap_or("gone");
             self.message = format!("{} is {now} now; not started", task::short(&asked.task));
-            return;
+            return None;
         }
-        self.attach_tmux(&asked.task, start, worktree, project);
+        self.launch(&asked.task, start, worktree, project)
+    }
+
+    /// Prepare starting `id`, or ask on the board what a first start
+    /// needs to know, whose answer starts it again: `None` then.
+    fn prepare(
+        &mut self,
+        store: &mut Store,
+        id: &str,
+        start: Start,
+        worktree: Option<bool>,
+        project: Option<PathBuf>,
+    ) -> Result<Option<start::Outcome>> {
+        let asked = Asked { task: id.to_string(), state: state_of(store, id).unwrap_or_default() };
+        let opts = start::Options {
+            want: start.want,
+            worktree,
+            context: None,
+            agent: None,
+            project: project.clone(),
+        };
+        match start::prepare(store, id, opts, false)? {
+            start::Outcome::Ask(start::Ask::Project { choices }) => {
+                if choices.is_empty() {
+                    anyhow::bail!("no project to offer: varde attach {} --project <dir>", task::short(id));
+                }
+                self.mode = Mode::Project(start, asked, choices, 0);
+                Ok(None)
+            }
+            start::Outcome::Ask(start::Ask::Worktree) => {
+                self.mode = Mode::Worktree(start, asked, project);
+                Ok(None)
+            }
+            outcome => Ok(Some(outcome)),
+        }
+    }
+
+    /// Outside tmux: a run ready leaves the board for it; a question, or
+    /// a session already running elsewhere, keeps the board.
+    fn prepare_here(
+        &mut self,
+        id: &str,
+        start: Start,
+        worktree: Option<bool>,
+        project: Option<PathBuf>,
+    ) -> Result<Option<Away>> {
+        let mut store = self.paths.open(BUSY)?;
+        Ok(match self.prepare(&mut store, id, start, worktree, project)? {
+            None | Some(start::Outcome::Ask(_)) => None,
+            Some(start::Outcome::Focus { run, .. }) => {
+                let tty = start::tty_of(&store, &run)?;
+                self.message = format!(
+                    "{} is already running {}; {} forks it",
+                    task::short(id),
+                    where_runs(id, tty.as_deref()),
+                    self.keys.label(super::keys::Act::Fork)
+                );
+                None
+            }
+            Some(start::Outcome::Ready { run, notices, .. }) => {
+                Some(Away::Attach { task: id.to_string(), run, notices })
+            }
+        })
     }
 
     /// Run the session in a tmux window of its own and go to it, or start
@@ -106,47 +183,35 @@ impl App<'_> {
         project: Option<PathBuf>,
     ) -> Result<String> {
         let mut store = self.paths.open(BUSY)?;
-        let (title, state): (String, String) =
-            store.conn.query_row("SELECT title, state FROM task WHERE id = ?1", [id], |r| {
-                Ok((r.get(0)?, r.get(1)?))
-            })?;
-        let asked = Asked { task: id.to_string(), state };
-        let opts = start::Options {
-            want: start.want,
-            worktree,
-            context: None,
-            agent: None,
-            project: project.clone(),
-        };
-        match start::prepare(&mut store, id, opts, false)? {
-            start::Outcome::Ask(start::Ask::Project { choices }) => {
-                if choices.is_empty() {
-                    anyhow::bail!("no project to offer: varde attach {} --project <dir>", task::short(id));
-                }
-                self.mode = Mode::Project(start, asked, choices, 0);
-                Ok(String::new())
-            }
-            start::Outcome::Ask(start::Ask::Worktree) => {
-                self.mode = Mode::Worktree(start, asked, project);
-                Ok(String::new())
-            }
-            start::Outcome::Focus { run, .. } => {
+        let title: String =
+            store.conn.query_row("SELECT title FROM task WHERE id = ?1", [id], |r| r.get(0))?;
+        match self.prepare(&mut store, id, start, worktree, project)? {
+            None | Some(start::Outcome::Ask(_)) => Ok(String::new()),
+            Some(start::Outcome::Focus { run, .. }) => {
                 let tty = start::tty_of(&store, &run)?;
                 Ok(if !start.go {
                     format!("{} is already running; RET goes to it", task::short(id))
                 } else if tmux.focus(id, tty.as_deref())? {
                     varde_core::store::mark_seen(&store.conn, id, now_ms())?;
+                    self.quit |= self.popup;
                     String::new()
                 } else {
-                    format!("already running outside tmux (run {}); F forks it", task::short(&run))
+                    format!(
+                        "{} is already running {}; {} forks it",
+                        task::short(id),
+                        where_runs(id, tty.as_deref()),
+                        self.keys.label(super::keys::Act::Fork)
+                    )
                 })
             }
-            start::Outcome::Ready { run, cwd, mut notices } => {
+            Some(start::Outcome::Ready { run, cwd, mut notices }) => {
                 let title = varde_core::title::clean(&title);
+                let run = crate::memory_cmd::short_run(&store.conn, &run);
                 tmux.open(id, &title, &cwd, &self.home(), &format!("{} run {run}", typed_exe()), start.go)?;
                 if !start.go {
                     notices.push(format!("started {} in a window of its own", task::short(id)));
                 }
+                self.quit |= self.popup && start.go;
                 Ok(notices.join("; "))
             }
         }
@@ -154,31 +219,58 @@ impl App<'_> {
 
     /// The store, as the windows the board opens are tagged with it.
     pub(super) fn home(&self) -> String {
-        let home = &self.paths.home;
-        home.canonicalize().unwrap_or_else(|_| home.clone()).to_string_lossy().into_owned()
+        self.paths.tag()
     }
 
-    /// Run the session in this terminal, which the board has left.
-    pub(super) fn attach_here(&mut self, want: Want) -> Result<String> {
-        let Some((id, title)) = self.current().map(|r| (r.task.clone(), varde_core::title::clean(&r.title)))
-        else {
-            return Ok(String::new());
-        };
-        println!("── varde: {} {title}", task::short(&id));
-        let mut store = self.paths.open(BUSY)?;
-        let opts = start::Options { want, worktree: None, context: None, agent: None, project: None };
-        match start::prepare(&mut store, &id, opts, true)? {
-            start::Outcome::Focus { run, .. } => {
-                Ok(format!("already running in another terminal (run {}); F forks it", task::short(&run)))
-            }
-            start::Outcome::Ask(_) => unreachable!("an interactive start asks on the terminal"),
-            start::Outcome::Ready { run, mut notices, .. } => {
-                drop(store);
-                let code = run::run(self.paths, &run)?;
-                notices.push(format!("session ended (exit {code})"));
-                Ok(notices.join("; "))
-            }
+    /// Run the session prepared as `run` in this terminal, which the
+    /// board has left: a banner says which task it is and how to come
+    /// back, and the first time, that tmux runs sessions side by side. A
+    /// session that fails leaves its last words on screen until a key.
+    pub(super) fn attach_here(&mut self, id: &str, run: &str, mut notices: Vec<String>) -> Result<String> {
+        let title = self.paths.open(BUSY).ok().and_then(|s| {
+            s.conn.query_row("SELECT title FROM task WHERE id = ?1", [id], |r| r.get::<_, String>(0)).ok()
+        });
+        let title = varde_core::title::clean(&title.unwrap_or_default());
+        let short = task::short(id);
+        let width = ratatui::crossterm::terminal::size().map_or(80, |(w, _)| w as usize);
+        let head = crate::list::clip(&format!("── {short}  {title} "), width);
+        let rule = "─".repeat(width.saturating_sub(unicode_width::UnicodeWidthStr::width(head.as_str())));
+        println!("\n\x1b[1m{head}{rule}\x1b[0m");
+        println!("\x1b[2mThe session has this terminal now. When it ends, you are back on the board.\x1b[0m");
+        let tip = self.paths.home.join("tmux-tip");
+        if !tip.exists() {
+            println!(
+                "\x1b[2mTip: in tmux, sessions run side by side and the board stays: tmux new varde\x1b[0m"
+            );
+            let _ = std::fs::write(&tip, "");
         }
+        // Said before the session takes the terminal, as attach says them.
+        for n in &notices {
+            println!("\x1b[2mvarde: {n}\x1b[0m");
+        }
+        println!();
+        let code = run::run(self.paths, run)?;
+        if code != 0 {
+            println!(
+                "\n\x1b[1mvarde:\x1b[0m the session exited with code {code}. Any key returns to the board."
+            );
+            super::term::any_key();
+        }
+        let ended = if code == 0 { "ended".into() } else { format!("exited with code {code}") };
+        notices.insert(0, format!("back from {short}: its session {ended}"));
+        Ok(notices.join("; "))
+    }
+}
+
+/// Where `task`'s live session runs, as a person would say it: `in tmux
+/// window main:2`, else `in another terminal (pts/7)`.
+fn where_runs(task: &str, tty: Option<&str>) -> String {
+    let t = tmux::here().unwrap_or_else(tmux::server);
+    let panes = t.panes().unwrap_or_default();
+    match (tmux::find(&panes, task, tty), tty) {
+        (Some(p), _) => format!("in tmux window {}", p.window.split_whitespace().next().unwrap_or_default()),
+        (None, Some(tty)) => format!("in another terminal ({})", tty.trim_start_matches("/dev/")),
+        (None, None) => "in another terminal".into(),
     }
 }
 

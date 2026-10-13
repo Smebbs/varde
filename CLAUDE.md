@@ -50,13 +50,13 @@ emacs --batch -Q -L . -l test/test-helper.el -f batch-byte-compile org-varde.el 
 | `cli/crates/varde` | the CLI, hook, `run` supervisor, `git/`, `job.rs` (memory updates), `deliver.rs` (memory into sessions), `stale.rs`, `eval.rs`, `tui/` |
 | `cli/crates/varde/tests` | integration tests; `common/` has the temp store and the fake `claude`, `pi`, `gh` and tmux |
 | `cli/plugin` | Claude plugin: only `hooks.json`, every entry calls `varde hook` |
-| `org-varde.el` | heading ↔ task link, start/terminals/workspaces, DONE, cairn view and edit |
+| `org-varde.el` | start/terminals/workspaces, the view (cairn view and edit), `varde:` links, new task from a doc |
 | `org-varde-board.el` | renders `varde list --json`; decides nothing |
 
 Rules that keep it reliable:
 
-1. **varde owns every durable fact.** Org holds only the `VARDE_TASK`
-   link.
+1. **varde owns every durable fact.** Org holds only `varde:`
+   links, which varde never syncs.
 2. **Status is derived and never stored.**
 3. **Hooks never call Emacs.** Nothing in a render path spawns a
    process.

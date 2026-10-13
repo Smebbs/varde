@@ -195,7 +195,7 @@ fn a_new_task_can_be_written_in_the_editor() {
     wait("the board", || shown().contains("Try it"));
     t.tmux(&["send-keys", "-t", &pane, "n"]).unwrap();
     t.tmux(&["send-keys", "-t", &pane, "-l", "Cache"]).unwrap();
-    t.tmux(&["send-keys", "-t", &pane, "C-g"]).unwrap();
+    t.tmux(&["send-keys", "-t", &pane, "C-x", "C-e"]).unwrap();
     wait("the form again", || shown().contains("Title: Cache by locale"));
     t.tmux(&["send-keys", "-t", &pane, "C-s"]).unwrap();
     wait("the project", || shown().contains("Project for this task"));
@@ -227,7 +227,7 @@ fn a_flood_of_keys_is_not_a_refresh_a_key() {
         t.tmux(&["send-keys", "-t", &pane, "-l", &js]).unwrap();
     }
     t.tmux(&["send-keys", "-t", &pane, "?"]).unwrap();
-    wait("the keys", || shown().contains("varde keys"));
+    wait("the keys", || shown().contains("cycle what needs you"));
     t.tmux(&["send-keys", "-t", &pane, "Escape", "q"]).unwrap();
 }
 
@@ -268,4 +268,15 @@ fn attach_on_a_live_task_names_its_tmux_window() {
     assert!(said.contains("already running in tmux window t:0"), "{said}");
     std::fs::write(e.path("go"), "").unwrap();
     wait("the untag", || t.tag(&pane).is_empty());
+}
+
+#[test]
+fn next_outside_tmux_says_what_it_is_for_and_leaves_tmux_alone() {
+    let e = env();
+    let tmux = e.script("tmux", "#!/bin/sh\ntouch \"$FAKE_HOME/tmux-called\"\n");
+    let out = e.cmd(&["next"]).env("VARDE_TMUX", &tmux).output().unwrap();
+    assert!(!out.status.success());
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(said.contains("`varde next` is for a key in tmux (see the guide)"), "{said}");
+    assert!(!e.path("tmux-called").exists(), "the default tmux server was asked");
 }

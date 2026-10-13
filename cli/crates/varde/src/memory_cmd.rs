@@ -1,7 +1,7 @@
 //! `varde note`, `varde recall` and `varde edit`.
 
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use anyhow::{bail, Context, Result};
@@ -52,9 +52,20 @@ pub fn note(paths: &Paths, run: Option<String>, text: &[String]) -> Result<()> {
     Ok(())
 }
 
+/// How to name `run` to be typed back: the six characters `varde show`
+/// prints, or the full id in the rare store where they name two runs.
+pub fn short_run(conn: &rusqlite::Connection, run: &str) -> String {
+    let short = task::short(run);
+    if resolve_run(conn, &short).is_ok_and(|r| r == run) {
+        short
+    } else {
+        run.to_string()
+    }
+}
+
 /// A run by its full id, or by a unique ending of at least four
 /// characters, such as the six `varde show` prints.
-fn resolve_run(conn: &rusqlite::Connection, reference: &str) -> Result<String> {
+pub fn resolve_run(conn: &rusqlite::Connection, reference: &str) -> Result<String> {
     let r = reference.trim().to_ascii_uppercase();
     if r.len() < 4 || !r.chars().all(|c| c.is_ascii_alphanumeric()) {
         bail!("no run {reference}: use its id, or the six characters varde show prints");
@@ -73,9 +84,14 @@ fn resolve_run(conn: &rusqlite::Connection, reference: &str) -> Result<String> {
     }
 }
 
-pub fn recall(paths: &Paths, words: &[String], all: bool, as_json: bool) -> Result<()> {
+pub fn recall(paths: &Paths, words: &[String], all: bool, dir: Option<PathBuf>, as_json: bool) -> Result<()> {
     let store = paths.open(BUSY)?;
-    let scope = crate::scope(&store, all)?;
+    let scope = match dir {
+        Some(dir) => Some(
+            varde_core::project::of(&store.conn, &dir.canonicalize().unwrap_or(dir)).display().to_string(),
+        ),
+        None => crate::scope(&store, all)?,
+    };
     // A session varde launched or tracks carries its run.
     let run = crate::run_env();
     let asker = memory::Asker { source: if run.is_some() { "agent" } else { "user" }, run: run.as_deref() };
@@ -91,24 +107,39 @@ pub fn recall(paths: &Paths, words: &[String], all: bool, as_json: bool) -> Resu
     };
     if found.hits.is_empty() {
         println!(
-            "nothing found{}",
+            "nothing found{}\n{SEARCHES}",
             if all { String::new() } else { format!(" in {here} or any other project") }
         );
     } else if found.everywhere {
         println!("nothing in {here}; the best from every project:");
     }
     for h in &found.hits {
-        // A project's cairn is named by its project.
-        let place = if found.everywhere || h.task.is_empty() {
-            h.project.as_deref().map(|p| format!("  ({p})"))
+        // From every project, where each hit is from.
+        let place = h
+            .project
+            .as_deref()
+            .filter(|_| found.everywhere)
+            .map(|p| format!("  ({})", crate::tasks::tilde(p)));
+        let place = place.unwrap_or_default();
+        if h.task.is_empty() {
+            // A project's cairn is named by its project.
+            println!("{} · project cairn{place}", crate::list::project_name(h.project.as_deref()));
         } else {
-            None
+            println!("{}  {}{}{place}", h.short, h.title, closed(&h.state));
+        }
+        let more = match (h.more, h.task.is_empty()) {
+            (0, _) => String::new(),
+            (n, false) => format!("  (+{n} more in this task)"),
+            (n, true) => format!("  (+{n} more in this project cairn)"),
         };
-        println!("{}  {}{}{}", h.short, h.title, closed(&h.state), place.unwrap_or_default());
-        println!("    {}: {}{}", what_matched(&h.kind), clip(&h.snippet, 300), stale(h.stale));
+        println!("    {}: {}{}{more}", what_matched(&h.kind), clip(&h.snippet, 300), stale(h.stale));
     }
     Ok(())
 }
+
+/// What recall searches, said when it finds nothing: memory, not tasks.
+pub const SEARCHES: &str =
+    "recall searches what sessions learned (cairn lines, notes, project cairns), not a task's title or context";
 
 /// How a hit's task is said to be over, if it is: ` (done)`.
 pub fn closed(state: &str) -> String {
@@ -169,6 +200,126 @@ pub fn edit(paths: &Paths, reference: &str, stdin: bool, print: bool) -> Result<
     edit_doc(&store, memory::Owner::Task(&id), Some(context), stdin, print)
 }
 
+/// One line of a cairn to change, as `varde edit` takes it.
+pub enum Line {
+    /// A section's name, or `status`, and the text.
+    Add(String, String),
+    Set(i64, String),
+    Rm(i64),
+    /// `--rm status`: hand a Status the user set back to the updates.
+    HandBack,
+    Restore(i64),
+}
+
+/// What `--rm` takes: a line's id, or `status`.
+#[derive(Clone, Copy, Debug)]
+pub enum Rm {
+    Line(i64),
+    Status,
+}
+
+/// `--rm`'s word: `status`, or a line's id as [`line_id`] reads it.
+pub fn rm_target(word: &str) -> std::result::Result<Rm, String> {
+    if word.trim().eq_ignore_ascii_case("status") {
+        return Ok(Rm::Status);
+    }
+    line_id(word).map(Rm::Line).map_err(|e| format!("{e}, or status"))
+}
+
+impl Line {
+    /// From `--add SECTION TEXT…`, `--set ID TEXT…`, `--rm ID` or
+    /// `--restore ID`, of which clap lets one through. TEXT `-` is stdin.
+    pub fn of(
+        add: Option<Vec<String>>,
+        set: Option<Vec<String>>,
+        rm: Option<Rm>,
+        restore: Option<i64>,
+    ) -> Result<Line> {
+        let text = |words: &[String]| -> Result<String> {
+            Ok(crate::arg_or_stdin(Some(words.join(" ")))?.unwrap_or_default())
+        };
+        Ok(match (add, set, rm, restore) {
+            (Some(a), ..) => Line::Add(a[0].clone(), text(&a[1..])?),
+            (_, Some(s), ..) => {
+                let id = line_id(&s[0]).map_err(|e| anyhow::anyhow!("--set takes {e}"))?;
+                Line::Set(id, text(&s[1..])?)
+            }
+            (_, _, Some(Rm::Line(id)), _) => Line::Rm(id),
+            (_, _, Some(Rm::Status), _) => Line::HandBack,
+            (_, _, _, Some(id)) => Line::Restore(id),
+            _ => bail!("say which line: --add, --set or --rm"),
+        })
+    }
+}
+
+/// A line's id, as `varde show` prints it after the line (`#12`) or
+/// without the `#`.
+pub fn line_id(word: &str) -> std::result::Result<i64, String> {
+    let w = word.trim();
+    w.strip_prefix('#')
+        .unwrap_or(w)
+        .parse()
+        .map_err(|_| format!("a line's id, the #12 varde show prints after it, not {word:?}"))
+}
+
+/// `varde edit --add`, `--set`, `--rm` or `--restore`: change one line of
+/// a task's cairn, or with `project` of the cairn of the project that
+/// directory is in.
+pub fn edit_line(
+    paths: &Paths,
+    task: Option<&str>,
+    project: Option<&Path>,
+    line: Line,
+    as_json: bool,
+) -> Result<()> {
+    let mut store = paths.open(BUSY)?;
+    let key = match project {
+        Some(dir) => crate::start::project_of(&store, dir)?.display().to_string(),
+        None => task::resolve(&store, task.unwrap_or_default())?,
+    };
+    let owner = if project.is_some() { memory::Owner::Project(&key) } else { memory::Owner::Task(&key) };
+    let change = match &line {
+        Line::Add(s, text) if s.eq_ignore_ascii_case("status") => memory::Change::Status(text),
+        Line::Add(s, text) => match cairn::Section::parse(s).filter(|s| owner.shape().sections().contains(s))
+        {
+            Some(s) => memory::Change::Add(s, text),
+            None => bail!(
+                "no section {s:?}: {}",
+                match owner.shape() {
+                    Shape::Task => "a task's cairn has status, findings, decisions and open",
+                    Shape::Project => "a project cairn has conventions, gotchas and howto",
+                }
+            ),
+        },
+        Line::Set(id, text) => memory::Change::Set(*id, text),
+        Line::Rm(id) => memory::Change::Remove(*id),
+        Line::HandBack => memory::Change::HandBack,
+        Line::Restore(id) => memory::Change::Restore(*id),
+    };
+    let done =
+        memory::change(&mut store, owner, change, now_ms()).map_err(|e| anyhow::anyhow!("not saved: {e}"))?;
+    if as_json {
+        let out = json!({"v": 1, "version": done.version, "id": done.id, "changed": done.changed, "cairn": done.cairn});
+        println!("{out}");
+        return Ok(());
+    }
+    let id = done.id.unwrap_or_default();
+    match line {
+        _ if !done.changed => println!("unchanged"),
+        Line::Add(..) if done.id.is_none() => {
+            println!("Status set, yours now: updates won't change it; --rm status hands it back")
+        }
+        Line::HandBack => println!("Status handed back: the next update may change it"),
+        Line::Add(..) => println!("added line #{id}"),
+        Line::Set(..) => println!("changed line #{id}"),
+        Line::Rm(_) => {
+            println!("removed line #{id}; recall still finds it, and --restore {id} brings it back")
+        }
+        Line::Restore(_) => println!("brought back line #{id}"),
+    }
+    Ok(())
+}
+
 /// A task's own text, edited above its cairn.
 struct TaskText<'a> {
     task: &'a str,
@@ -183,33 +334,25 @@ pub fn show_project(paths: &Paths, dir: &Path, history: bool, as_json: bool) -> 
     let store = paths.open(BUSY)?;
     let project = crate::start::project_of(&store, dir)?.display().to_string();
     let doc = memory::project_cairn(&store.conn, &project)?;
+    let usage = memory::usage(&store.conn, memory::Owner::Project(&project))?;
     let versions =
         if history { memory::history_of(&store.conn, memory::Owner::Project(&project))? } else { Vec::new() };
     if as_json {
         let (cairn, version) = doc.map_or((None, 0), |(c, v)| (Some(c), v));
-        let mut out = json!({"v": 1, "project": project, "version": version, "cairn": cairn});
+        let mut out = json!({"v": 1, "project": project, "version": version, "cairn": cairn, "usage": usage,
+                             "limits": Shape::Project.limits()});
         if history {
             out["history"] = json!(versions);
         }
         println!("{out}");
         return Ok(());
     }
-    println!("project cairn  {project}");
-    match &doc {
-        Some((c, _)) if !c.is_empty() => {
-            println!();
-            // An empty section says nothing here.
-            let text = c.display();
-            let lines: Vec<&str> = text.lines().collect();
-            for (n, line) in lines.iter().enumerate() {
-                let heading = !line.starts_with("- ");
-                if heading && lines.get(n + 1).is_none_or(|next| !next.starts_with("- ")) {
-                    continue;
-                }
-                println!("  {line}");
-            }
-        }
-        _ => println!("\n  none yet: tasks closed as done add to it, and varde edit --project writes to it"),
+    let whose = crate::cairn_view::Whose::Project(&project);
+    let add = "varde edit --project --add gotchas TEXT adds a line now";
+    let lines =
+        crate::cairn_view::lines(whose, doc.as_ref().map(|(c, _)| c), &usage, &[], add, false, now_ms());
+    for (_, line) in crate::cairn_view::text(&lines) {
+        println!("{line}");
     }
     crate::print_history(&versions);
     Ok(())
@@ -245,16 +388,24 @@ fn edit_doc(
         Some(TaskText { body, linked: None, .. }) => (String::new(), format!("Context:\n{body}\n\n")),
         _ => (String::new(), String::new()),
     };
+    // The version edited travels with the text, so a save after an
+    // update that landed meanwhile is refused, not saved over it.
+    let stamp = format!("{HINT}{VERSION}{version}\n");
     if print {
-        print!("{shown}{editable}{before_text}");
+        print!("{stamp}{shown}{editable}{before_text}");
         return Ok(false);
     }
     let text = if stdin {
         std::io::read_to_string(std::io::stdin())?
     } else {
         let hint = hint(shape, context.as_ref().is_some_and(|c| c.linked.is_none()));
-        edit_in_editor("cairn", &format!("{hint}{shown}{editable}{before_text}"))?
+        edit_in_editor("cairn", &format!("{hint}{stamp}{shown}{editable}{before_text}"))?
     };
+    // Text from before versions were stamped is checked against now.
+    let edited_version = text
+        .lines()
+        .find_map(|l| l.strip_prefix(HINT)?.strip_prefix(VERSION)?.trim().parse::<i64>().ok())
+        .unwrap_or(version);
     // The hint is not part of what was written.
     let text: String = text.split_inclusive('\n').filter(|l| !l.starts_with(HINT)).collect();
     let (new_body, cairn_text) = match &context {
@@ -283,6 +434,11 @@ fn edit_doc(
             .unwrap_or_default();
         anyhow::anyhow!("not saved: {why}{kept}")
     };
+    if edited_version != version {
+        return Err(refuse(
+            "it was updated while you were editing: edit it again, and copy your changes in".into(),
+        ));
+    }
     if let (Some(link), Some(_)) = (linked, &new_body) {
         return Err(refuse(format!("this task's context is from {link}: edit it there")));
     }
@@ -309,7 +465,9 @@ fn edit_doc(
             now: now_ms(),
         };
         if !memory::save_doc(&store.conn, owner, version, &edited, &w)? {
-            bail!("it was updated while you were editing; run varde edit again");
+            return Err(refuse(
+                "it was updated while you were editing: edit it again, and copy your changes in".into(),
+            ));
         }
     }
     if let (Some(c), Some(b)) = (&context, &new_body) {
@@ -322,6 +480,9 @@ fn edit_doc(
 /// How a line of the hint an editor is opened with begins; such lines
 /// are dropped from what is saved.
 const HINT: &str = "#: ";
+
+/// The hint line that says which version of the document was edited.
+const VERSION: &str = "version ";
 
 /// The format, said at the top of what an editor is opened with.
 fn hint(shape: Shape, context: bool) -> String {
@@ -362,15 +523,48 @@ pub(crate) fn edit_in_editor(what: &str, text: &str) -> Result<String> {
     let mut file = tempfile::Builder::new().prefix(&format!("varde-{what}-")).suffix(".md").tempfile()?;
     file.write_all(text.as_bytes())?;
     file.flush()?;
-    let editor = std::env::var("VISUAL").or_else(|_| std::env::var("EDITOR")).unwrap_or_else(|_| "vi".into());
+    // An empty one is unset, as git takes it.
+    let set = |v: &str| std::env::var(v).ok().filter(|e| !e.trim().is_empty());
+    let editor = set("VISUAL").or_else(|| set("EDITOR")).unwrap_or_else(|| "vi".into());
+    // The shell says 127 when it finds no such command: nothing was
+    // typed, so nothing is kept.
+    let name = editor.split_whitespace().next().unwrap_or("vi");
+    let missing = || anyhow::anyhow!("{name} not found: set $VISUAL or $EDITOR");
     let status = std::process::Command::new("sh")
         .arg("-c")
         .arg(format!("{editor} \"$1\""))
         .arg("sh")
         .arg(file.path())
-        .status()?;
+        .status()
+        .map_err(|_| missing())?;
+    if status.code() == Some(127) {
+        return Err(missing());
+    }
     if !status.success() {
-        bail!("{editor} exited with {status}; nothing saved");
+        // What was typed before the editor failed is kept all the same.
+        let kept =
+            file.keep().map(|(_, p)| format!("; what it had is kept in {}", p.display())).unwrap_or_default();
+        bail!("{editor} exited with {status}; nothing saved{kept}");
     }
     Ok(std::fs::read_to_string(file.path())?)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_run_is_named_short_unless_its_ending_names_two() {
+        let conn = rusqlite::Connection::open_in_memory().unwrap();
+        conn.execute_batch(
+            "CREATE TABLE run (id TEXT PRIMARY KEY);
+             INSERT INTO run VALUES ('01AAAAAAAAAAAAAAAAAAABCDEF'), ('01BBBBBBBBBBBBBBBBBBGHJKMN'),
+                                    ('01CCCCCCCCCCCCCCCCCCGHJKMN');",
+        )
+        .unwrap();
+        assert_eq!(short_run(&conn, "01AAAAAAAAAAAAAAAAAAABCDEF"), "abcdef");
+        assert_eq!(resolve_run(&conn, "abcdef").unwrap(), "01AAAAAAAAAAAAAAAAAAABCDEF");
+        assert_eq!(short_run(&conn, "01BBBBBBBBBBBBBBBBBBGHJKMN"), "01BBBBBBBBBBBBBBBBBBGHJKMN");
+        assert!(resolve_run(&conn, "ghjkmn").is_err());
+    }
 }

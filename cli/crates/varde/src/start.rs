@@ -13,6 +13,7 @@ use varde_core::store::{self, Store};
 use varde_core::{memory, project, task};
 
 use crate::{config, git, now_ms, process, run, tmux, Paths};
+use unicode_width::UnicodeWidthStr;
 
 pub struct Options {
     pub want: Want,
@@ -33,6 +34,41 @@ pub fn default_agent() -> String {
         .filter(|a| !a.is_empty())
         .or_else(|| config::get().agent.clone())
         .unwrap_or_else(|| "claude".into())
+}
+
+/// The command that runs `agent`, as `varde run` starts it but with none
+/// of varde's arguments: `$VARDE_CLAUDE` and the like, else the config's
+/// command, else the agent's own name.
+pub fn agent_command(agent: &dyn varde_agent::Agent) -> Vec<String> {
+    config::get().launch(agent.name(), vec![agent.program()])
+}
+
+/// `varde agent`: the agent of a new conversation and its command, for a
+/// client that opens a session of your own (`docs/clients.md`).
+pub fn agent(as_json: bool) -> Result<()> {
+    let name = default_agent();
+    let Some(adapter) = varde_agent::by_name(&name) else {
+        bail!("unknown agent {name:?}: set agent to \"claude\" or \"pi\" in the config (or $VARDE_AGENT)");
+    };
+    let command = agent_command(&*adapter);
+    if as_json {
+        println!("{}", json!({"v": 1, "agent": name, "command": command}));
+    } else {
+        let quoted: Vec<String> = command
+            .iter()
+            .map(|a| {
+                let plain =
+                    !a.is_empty() && a.chars().all(|c| c.is_ascii_alphanumeric() || "-_./=:,+@%".contains(c));
+                if plain {
+                    a.clone()
+                } else {
+                    format!("'{}'", a.replace('\'', r"'\''"))
+                }
+            })
+            .collect();
+        println!("{}", quoted.join(" "));
+    }
+    Ok(())
 }
 
 pub enum Outcome {
@@ -101,7 +137,7 @@ pub fn start(paths: &Paths, reference: &str, opts: Options, as_json: bool) -> Re
             for n in notices {
                 eprintln!("varde: {n}");
             }
-            let command = format!("varde run {run}");
+            let command = format!("varde run {}", crate::memory_cmd::short_run(&store.conn, &run));
             if as_json {
                 println!("{}", json!({"v": 1, "action": "run", "run": run, "cwd": cwd, "command": command}));
             } else {
@@ -323,7 +359,8 @@ pub fn prepare(store: &mut Store, task_id: &str, opts: Options, interactive: boo
         }
         _ => opts.agent.clone().unwrap_or_else(default_agent),
     };
-    let agent = varde_agent::by_name(&agent_name).with_context(|| format!("unknown agent {agent_name}"))?;
+    let agent = varde_agent::by_name(&agent_name)
+        .with_context(|| format!("varde does not know the agent {agent_name}: it runs claude or pi"))?;
 
     let project = project.map(PathBuf::from);
     let here = match &project {
@@ -349,7 +386,8 @@ pub fn prepare(store: &mut Store, task_id: &str, opts: Options, interactive: boo
             Tree::Root
         }
         Tree::Ask if interactive => {
-            if ask("Work in a separate git worktree?")? {
+            if ask(&worktree_question(&title, project.as_deref(), crate::list::columns().saturating_sub(7)))?
+            {
                 Tree::Create
             } else {
                 Tree::Root
@@ -492,6 +530,7 @@ pub fn prepare(store: &mut Store, task_id: &str, opts: Options, interactive: boo
         tx.execute("UPDATE task SET project = ?2 WHERE id = ?1", params![task_id, p.to_string_lossy()])?;
     }
     tx.commit()?;
+    notices.extend(crate::doctor::unhooked(agent.name()));
     Ok(Outcome::Ready { run, cwd, notices })
 }
 
@@ -526,7 +565,7 @@ fn same_tree(a: &Path, b: &Path) -> bool {
 
 /// The project `dir` is in, refusing a directory that does not exist.
 pub fn project_of(store: &Store, dir: &Path) -> Result<PathBuf> {
-    let dir = dir.canonicalize().with_context(|| format!("no directory {}", dir.display()))?;
+    let dir = dir.canonicalize().map_err(|_| anyhow::anyhow!("there is no directory {}", dir.display()))?;
     Ok(project::of(&store.conn, &dir))
 }
 
@@ -659,6 +698,18 @@ fn ask_project(store: &Store, choices: &[String]) -> Result<PathBuf> {
     project_of(store, Path::new(&dir))
 }
 
+/// Whether to start the task titled `title` in a worktree of its own,
+/// in `project`, in `width` columns, the title cut to fit:
+/// `Start "Fix the login" in a worktree of its own (app)?`. The board,
+/// the CLI and Emacs ask it in the same words.
+pub fn worktree_question(title: &str, project: Option<&Path>, width: usize) -> String {
+    let project =
+        project.map(|p| format!(" ({})", crate::list::project_name(p.to_str()))).unwrap_or_default();
+    let room = width.saturating_sub("Start \"\" in a worktree of its own?".len() + project.width()).max(12);
+    let title = crate::list::clip(&varde_core::title::clean(title), room);
+    format!("Start \"{title}\" in a worktree of its own{project}?")
+}
+
 /// Yes by default; asked again until the answer is a yes or a no, so
 /// keys meant for something else never count as one.
 fn ask(question: &str) -> Result<bool> {
@@ -687,6 +738,17 @@ fn yes_or_no(line: &str) -> Option<bool> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_worktree_question_names_the_task_and_its_project() {
+        assert_eq!(
+            worktree_question("Fix the login\x1b[2J page", Some(Path::new("/src/app")), 80),
+            "Start \"Fix the login[2J page\" in a worktree of its own (app)?"
+        );
+        let long = worktree_question("Make the cache key take the locale and the region", None, 60);
+        assert_eq!(long, "Start \"Make the cache key take t…\" in a worktree of its own?");
+        assert_eq!(long.width(), 60);
+    }
 
     #[test]
     fn only_a_yes_or_a_no_answers() {

@@ -127,8 +127,16 @@ pub struct Hit {
     /// The bullet's anchor no longer resolves in the code.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub stale: bool,
+    /// How many other lines of the same task (or project cairn) matched
+    /// among the best rows, which one hit a task leaves out.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub more: u32,
     #[serde(skip)]
     rowid: i64,
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// Whether bullet `reference` of kind `kind` is marked stale.
@@ -281,9 +289,9 @@ pub fn related_quietly(
     }
     // The related rows are known now. Each is read by its id from the
     // index's own content table, the most terms first, then by what it
-    // is (a finding or decision, a note, an open item, a former bullet),
-    // then the newest; reading stops once nothing left can outrank what
-    // was found. No ranking over every row that matched one word: on a
+    // is (a line of the user's, a finding or decision, a note, an open
+    // item, a former bullet), then the newest; reading stops once
+    // nothing left can outrank what was found. No ranking over every row that matched one word: on a
     // large store that is what cost.
     use std::cmp::Reverse;
     let mut rows: Vec<(i64, u32)> = weight.into_iter().filter(|(_, w)| *w >= 2).collect();
@@ -294,6 +302,7 @@ pub fn related_quietly(
     let mut row = conn.prepare_cached(
         "SELECT c7, c8, c9, coalesce(c1, c2, c3, c4, c5) FROM memory_fts_content WHERE id = ?1",
     )?;
+    let mut mine = conn.prepare_cached("SELECT mine FROM cairn_item WHERE id = ?1")?;
     let mut about = conn.prepare_cached(
         "SELECT t.title, t.project, c.status, t.state FROM task t LEFT JOIN cairn c ON c.task = t.id
          WHERE t.id = ?1",
@@ -313,7 +322,7 @@ pub fn related_quietly(
         seen.len() >= limit
     };
     for (rowid, w) in rows {
-        if enough(&hits, w * 4 + 3) {
+        if enough(&hits, w * TIERS + TIERS - 1) {
             break;
         }
         let read = row
@@ -348,14 +357,21 @@ pub fn related_quietly(
         if task_project.as_deref() != project {
             continue;
         }
-        let rank = w * 4
+        let reference = reference.filter(|r| !r.is_empty());
+        let cairn_line = matches!(kind.as_str(), "findings" | "decisions" | "open");
+        let theirs = cairn_line
+            && match reference.as_deref().and_then(|r| r.parse::<i64>().ok()) {
+                Some(id) => mine.query_row([id], |r| r.get::<_, bool>(0)).optional()?.unwrap_or(false),
+                None => false,
+            };
+        let rank = w * TIERS
             + match kind.as_str() {
+                _ if theirs => 4,
                 "findings" | "decisions" => 3,
                 "notes" => 2,
                 "open" => 1,
                 _ => 0,
             };
-        let reference = reference.filter(|r| !r.is_empty());
         hits.push((
             rank,
             Hit {
@@ -370,6 +386,7 @@ pub fn related_quietly(
                 snippet: text.unwrap_or_default(),
                 score: Some(w as f64),
                 rowid,
+                more: 0,
                 task,
             },
         ));
@@ -385,6 +402,10 @@ pub fn related_quietly(
 
 /// At most this many related rows are read, the best first.
 const RELATED_ROWS: usize = 200;
+
+/// How many kinds of hit a related row's rank tells apart within its
+/// weight, the user's own lines first.
+const TIERS: u32 = 5;
 
 fn by_id(store: &Store, query: &str, exclude: Option<&str>, limit: usize) -> Result<Vec<Hit>> {
     let mut hits: Vec<Hit> = Vec::new();
@@ -416,6 +437,7 @@ fn by_id(store: &Store, query: &str, exclude: Option<&str>, limit: usize) -> Res
                     state: r.get(4)?,
                     stale: false,
                     rowid: 0,
+                    more: 0,
                 })
             })?
             .collect::<Result<_, _>>()?;
@@ -449,10 +471,55 @@ fn specific_rows(conn: &Connection, terms: &[(String, bool)]) -> Result<Vec<Opti
     Ok(out)
 }
 
-/// How many rows recall searches: counted in the index's table of row
-/// sizes, which has one small row for each.
+/// How many rows recall searches, as of the last commit: the count FTS5
+/// keeps itself, the first varint of its averages record (rowid 1 of
+/// `memory_fts_data`), written when a transaction that changed the index
+/// commits. Counting the table of row sizes read every row of it, a
+/// quarter of a millisecond of a hook on a store of 13 000 rows.
 pub(super) fn indexed_rows(conn: &Connection) -> Result<i64> {
-    Ok(conn.prepare_cached("SELECT count(*) FROM memory_fts_docsize")?.query_row([], |r| r.get(0))?)
+    let averages: Option<Vec<u8>> = conn
+        .prepare_cached("SELECT block FROM memory_fts_data WHERE id = 1")?
+        .query_row([], |r| r.get(0))
+        .optional()?;
+    Ok(averages.map_or(0, |b| varint(&b) as i64))
+}
+
+/// More b-trees than this in the index and `merge_index` merges them.
+const MAX_SEGMENTS: i64 = 4;
+
+/// Merge the index's b-trees a bounded step towards one, when it has more
+/// than `MAX_SEGMENTS`. Every reindex commits a b-tree of its own, and
+/// FTS5 merges them only four at a level: a thousand tasks reindexed one
+/// at a time left 22, and on 22 the terms related work looks up cost three
+/// times what they did on one. A step writes at most 64 pages (about 10 ms
+/// on 13 000 rows), so the write lock is never held for long; a merge goes
+/// on where the last left off. What the index holds, and so every search,
+/// is unchanged. Returns whether it merged.
+pub fn merge_index(conn: &Connection) -> Result<bool> {
+    let segments: i64 =
+        conn.query_row("SELECT count(DISTINCT segid) FROM memory_fts_idx", [], |r| r.get(0))?;
+    if segments <= MAX_SEGMENTS {
+        return Ok(false);
+    }
+    conn.execute("INSERT INTO memory_fts (memory_fts, rank) VALUES ('merge', -64)", [])?;
+    Ok(true)
+}
+
+/// SQLite's variable-length integer, as FTS5 writes its counts: seven
+/// bits a byte, high bit set on all but the last, and a ninth byte of
+/// eight. Empty is 0.
+fn varint(bytes: &[u8]) -> u64 {
+    let mut v: u64 = 0;
+    for (i, &b) in bytes.iter().take(9).enumerate() {
+        if i == 8 {
+            return (v << 8) | u64::from(b);
+        }
+        v = (v << 7) | u64::from(b & 0x7f);
+        if b & 0x80 == 0 {
+            break;
+        }
+    }
+    v
 }
 
 /// Rows matching `q`, best first, the best of each task or project
@@ -496,6 +563,7 @@ fn search(
             rowid: r.get(8)?,
             state: r.get(9)?,
             stale: r.get(10)?,
+            more: 0,
         })
     })?;
     let mut hits: Vec<Hit> = Vec::new();
@@ -503,7 +571,9 @@ fn search(
         let h = h?;
         match hits.iter_mut().find(|k| k.same_place(&h)) {
             // The task's best row was its title: this one says more.
-            Some(k) if k.kind == "title" && h.kind != "title" => *k = h,
+            Some(k) if k.kind == "title" && h.kind != "title" => *k = Hit { more: k.more, ..h },
+            // Another line of it matched: counted, not shown.
+            Some(k) if h.kind != "title" => k.more += 1,
             Some(_) => {}
             None => hits.push(h),
         }

@@ -481,7 +481,23 @@ fn a_task_belongs_to_the_checkout_it_was_made_in() {
     let task = inbox["rows"][0]["task"].as_str().unwrap();
     assert_eq!(e.show(task)["project"].as_str().unwrap(), repo.to_string_lossy());
     assert!(e.ok(&["accept", task]).starts_with("accepted "));
-    assert!(e.ok(&["accept", task]).ends_with(" was not in the Inbox"));
+    let again = e.run(&["accept", task]);
+    assert!(!again.status.success());
+    assert!(
+        String::from_utf8_lossy(&again.stderr).contains(" is not in the Inbox: accept is for Inbox tasks")
+    );
+    // Beside one that is, it is only named.
+    let mut agent = Command::new(e.path("claude"));
+    agent.args(["--session-id", "another-of-your-own"]);
+    assert!(e.env(&mut agent).current_dir(&repo).env("PWD", &repo).output().unwrap().status.success());
+    let board: Value = serde_json::from_str(&e.ok(&["list", "--json"])).unwrap();
+    let inbox = board["groups"].as_array().unwrap().iter().find(|g| g["key"] == "inbox").expect("an inbox");
+    let other = inbox["rows"][0]["short"].as_str().unwrap();
+    let both = e.ok(&["accept", other, task]);
+    assert_eq!(
+        both,
+        format!("accepted {other}\nnot in the Inbox, so left as they are: {}", task[20..].to_lowercase())
+    );
 }
 
 #[test]

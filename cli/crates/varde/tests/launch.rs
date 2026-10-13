@@ -8,7 +8,7 @@ use std::path::PathBuf;
 use std::process::{Command, Stdio};
 use std::time::Duration;
 
-use serde_json::Value;
+use serde_json::{json, Value};
 
 use common::*;
 
@@ -91,7 +91,7 @@ fn a_resume_is_by_the_agent_whose_conversation_it_is() {
     let e = Env::with_repo(AGENT);
     let t = e.new_task("Which agent");
     let out = e.run(&["start", &t, "--worktree", "never", "--agent", "nope"]);
-    assert!(String::from_utf8_lossy(&out.stderr).contains("unknown agent nope"));
+    assert!(String::from_utf8_lossy(&out.stderr).contains("does not know the agent nope"));
 
     e.ok(&["attach", &t, "--worktree", "never"]);
     // Asked for by name, another agent cannot continue claude's conversation.
@@ -111,8 +111,10 @@ fn start_prepares_and_run_launches() {
     assert_eq!(plan["action"], "run");
     assert_eq!(plan["cwd"].as_str().unwrap(), e.repo().to_string_lossy());
     let run = plan["run"].as_str().unwrap();
-    assert_eq!(plan["command"], format!("varde run {run}"));
-    e.ok(&["run", run]);
+    // The command names the run by the six characters `varde show` prints.
+    let short = run[20..].to_ascii_lowercase();
+    assert_eq!(plan["command"], format!("varde run {short}"));
+    e.ok(&["run", &short]);
     // A run launches once.
     assert!(!e.run(&["run", run]).status.success());
 }
@@ -877,6 +879,199 @@ fn an_update_counts_what_its_session_re_discovered() {
 }
 
 #[test]
+fn a_client_is_told_the_agent_of_a_new_conversation_and_its_command() {
+    let e = Env::new();
+    let agent = |vars: &[(&str, &str)], unset: &[&str]| -> Value {
+        let mut c = e.cmd(&["agent", "--json"]);
+        c.envs(vars.iter().copied());
+        for k in unset {
+            c.env_remove(k);
+        }
+        serde_json::from_slice(&c.output().unwrap().stdout).unwrap()
+    };
+    let claude = e.path("claude").to_string_lossy().to_string();
+    assert_eq!(agent(&[], &[]), json!({"v": 1, "agent": "claude", "command": [claude]}));
+    std::fs::write(
+        e.path("config.toml"),
+        "agent = \"pi\"\n[agents.claude]\ncommand = [\"claude-wrapper\", \"--x y\"]\n",
+    )
+    .unwrap();
+    assert_eq!(agent(&[], &["VARDE_PI"]), json!({"v": 1, "agent": "pi", "command": ["pi"]}));
+    let wrapped = json!({"v": 1, "agent": "claude", "command": ["claude-wrapper", "--x y"]});
+    assert_eq!(agent(&[("VARDE_AGENT", "claude")], &["VARDE_CLAUDE"]), wrapped);
+    let mut c = e.cmd(&["agent"]);
+    c.env("VARDE_AGENT", "claude").env_remove("VARDE_CLAUDE");
+    assert_eq!(String::from_utf8_lossy(&c.output().unwrap().stdout), "claude-wrapper '--x y'\n");
+    assert!(!e.cmd(&["agent"]).env("VARDE_AGENT", "nope").output().unwrap().status.success());
+}
+
+/// An ad-hoc session in `repo`, as its hooks tell it: `prompt` first, a
+/// reply, then its end, which starts an update with `vars`, waited for.
+/// Its task.
+fn ad_hoc(e: &Env, session: &str, prompt: &str, vars: &[(&str, &str)]) -> String {
+    let transcript = e.path(&format!("{session}.jsonl"));
+    let hook = |event: &str, file: &str| {
+        let mut p: Value = serde_json::from_str(&fixture(file)).unwrap();
+        p["session_id"] = session.into();
+        p["cwd"] = e.repo().to_string_lossy().into();
+        p["transcript_path"] = transcript.to_string_lossy().into();
+        p["prompt"] = prompt.into();
+        assert!(feed(e.cmd(&["hook", event]).envs(vars.iter().copied()), &p.to_string()).status.success());
+    };
+    hook("SessionStart", "session-start-startup.json");
+    hook("UserPromptSubmit", "user-prompt-submit.json");
+    let line = |role: &str, text: &str| {
+        json!({"type": role, "message": {"role": role, "content": text}}).to_string()
+    };
+    std::fs::write(&transcript, format!("{}\n{}\n", line("user", prompt), line("assistant", "Found it.")))
+        .unwrap();
+    hook("SessionEnd", "session-end.json");
+    poll(200, || e.query("SELECT count(*) FROM job WHERE state IN ('queued', 'running')") == "0");
+    e.query(&format!("SELECT task FROM run WHERE native_id = '{session}'"))
+}
+
+/// How many model calls were asked to name a task.
+fn asked_to_name(e: &Env) -> usize {
+    std::fs::read_to_string(e.path("name-argv")).unwrap_or_default().matches("You name tasks").count()
+}
+
+/// What the naming calls read, all of them.
+fn naming_read(e: &Env) -> String {
+    let mut all = String::new();
+    for f in std::fs::read_dir(e.dir.path()).unwrap().flatten() {
+        if f.file_name().to_string_lossy().starts_with("name-prompt.") {
+            all.push_str(&std::fs::read_to_string(f.path()).unwrap());
+        }
+    }
+    all
+}
+
+/// Whether varde has asked to name task `t`: its attempt is recorded.
+fn tried(e: &Env, t: &str) -> bool {
+    e.query(&format!("SELECT named IS NOT NULL FROM task WHERE id LIKE '%{}'", t.to_uppercase())) == "1"
+}
+
+#[test]
+fn a_task_made_from_its_context_alone_is_named_as_it_is_made() {
+    let e = Env::with_repo(AGENT);
+    let repo = e.repo().to_string_lossy().to_string();
+    let refused = e.run(&["new", "--project", &repo]);
+    assert!(!refused.status.success(), "neither a title nor a context");
+    let said = String::from_utf8_lossy(&refused.stderr);
+    assert!(said.contains("a task needs a title, or --context"), "{said}");
+
+    let new = |args: &[&str]| -> String {
+        let mut all = vec!["new", "--project", &repo];
+        all.extend(args);
+        let out = e.cmd(&all).env("FAKE_TITLE", "\\\"German pages served in English.\\\"").output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        String::from_utf8_lossy(&out.stdout).trim().to_string()
+    };
+    let t = new(&["--context", "hey so the page is in english for german users"]);
+    poll(200, || e.show(&t)["title"] == "German pages served in English");
+    let d = e.show(&t);
+    assert_eq!(d["prompt_title"], "hey so the page is in english…");
+    assert_eq!(asked_to_name(&e), 1);
+    assert!(naming_read(&e).contains("hey so the page is in english for german users"));
+    // The same model as the cairn updates, with varde's own prompt only.
+    let argv = std::fs::read_to_string(e.path("name-argv")).unwrap();
+    assert!(argv.contains("--model haiku") && argv.contains("--safe-mode"), "{argv}");
+    assert!(e.ok(&["show", &t, "--no-git"]).contains("named by the model; first titled: hey so the page"));
+
+    // A title you typed is never named, beside a context or not.
+    let typed = new(&["Fix the cart", "--context", "the total is off by a cent"]);
+    assert_eq!(e.show(&typed)["title"], "Fix the cart");
+    assert!(!tried(&e, &typed), "never asked");
+
+    // Its cairn updates are not asked for a title: naming is done.
+    e.cmd(&["attach", &t, "--worktree", "never"])
+        .env("FAKE_TALK", "Found it.")
+        .env("FAKE_REPLY", "STATUS: Cause found.")
+        .output()
+        .unwrap();
+    poll(200, || e.show(&t)["cairn"]["status"] == "Cause found.");
+    let asked = std::fs::read_to_string(e.path("model-argv")).unwrap();
+    assert!(!asked.contains("TITLE"), "{asked}");
+    assert_eq!(asked_to_name(&e), 1);
+    assert_eq!(e.show(&t)["title"], "German pages served in English");
+}
+
+#[test]
+fn an_ad_hoc_session_is_named_by_the_refresh_a_board_starts() {
+    let e = Env::with_repo(AGENT);
+    let t = ad_hoc(
+        &e,
+        "0b5d7c33-1c9e-4b7e-8f60-6d1a2b3c4d5e",
+        "hey so the page is in english for german users again",
+        &[("FAKE_REPLY", "STATUS: Cause found.")],
+    );
+    // The hook made it with the prompt's words, and asked nothing.
+    assert_eq!(e.show(&t)["title"], "hey so the page is in english…");
+    assert!(!tried(&e, &t));
+    e.cmd(&["list", "--json"]).env("FAKE_TITLE", "German pages served in English").output().unwrap();
+    poll(200, || e.show(&t)["title"] == "German pages served in English");
+    assert_eq!(e.show(&t)["prompt_title"], "hey so the page is in english…");
+    assert!(naming_read(&e).contains("hey so the page is in english for german users again"));
+    assert_eq!(asked_to_name(&e), 1);
+    // The update was not asked for one.
+    assert!(!std::fs::read_to_string(e.path("model-argv")).unwrap().contains("TITLE"));
+}
+
+#[test]
+fn a_task_the_model_fails_to_name_keeps_its_title_and_is_not_asked_again() {
+    let e = Env::with_repo(AGENT);
+    let repo = e.repo().to_string_lossy().to_string();
+    // No FAKE_TITLE: the call fails.
+    let t = e.ok(&["new", "--project", &repo, "--context", "see why the deploy fails on main"]);
+    poll(200, || tried(&e, &t));
+    poll(200, || asked_to_name(&e) == 1);
+    assert_eq!(e.show(&t)["title"], "see why the deploy fails on main");
+    assert!(e.show(&t)["prompt_title"].is_null(), "shown only once named");
+    // Asked again, by hand or by a refresh, it is not.
+    e.cmd(&["name", &e.query("SELECT id FROM task")])
+        .env("FAKE_TITLE", "Deploy fails on main")
+        .output()
+        .unwrap();
+    e.cmd(&["git-refresh"]).env("FAKE_TITLE", "Deploy fails on main").output().unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(300));
+    assert_eq!(asked_to_name(&e), 1);
+    assert_eq!(e.show(&t)["title"], "see why the deploy fails on main");
+
+    // A title that is not one is not taken either.
+    let t = e
+        .cmd(&["new", "--project", &repo, "--context", "look at https://x.example/deploy"])
+        .env("FAKE_TITLE", "See https://x.example/deploy")
+        .output()
+        .unwrap();
+    let t = String::from_utf8_lossy(&t.stdout).trim().to_string();
+    poll(200, || asked_to_name(&e) == 2);
+    poll(200, || tried(&e, &t));
+    assert!(e.show(&t)["prompt_title"].is_null(), "the cut title stays");
+}
+
+#[test]
+fn naming_is_off_with_titles_or_memory_off() {
+    for config in ["[memory]\ntitles = false\n", "[memory]\nenabled = false\n"] {
+        let e = Env::with_repo(AGENT);
+        std::fs::write(e.path("config.toml"), config).unwrap();
+        let repo = e.repo().to_string_lossy().to_string();
+        let t = e
+            .cmd(&["new", "--project", &repo, "--context", "why is ci red on main"])
+            .env("FAKE_TITLE", "CI red on main")
+            .output()
+            .unwrap();
+        let t = String::from_utf8_lossy(&t.stdout).trim().to_string();
+        e.cmd(&["name", &e.query("SELECT id FROM task")])
+            .env("FAKE_TITLE", "CI red on main")
+            .output()
+            .unwrap();
+        assert!(!tried(&e, &t), "{config}");
+        assert_eq!(asked_to_name(&e), 0);
+        assert_eq!(e.show(&t)["title"], "why is ci red on main");
+    }
+}
+
+#[test]
 fn nothing_worth_keeping_leaves_no_cairn() {
     let e = Env::with_repo(AGENT);
     let t = e.new_task("Quick question");
@@ -972,7 +1167,7 @@ fn runs_that_never_launched_are_left_out_once_a_later_one_exists() {
     assert_eq!(runs.len(), 1, "only the latest: {runs:?}");
     assert_eq!(e.query("SELECT count(*) FROM run"), "2");
     assert_eq!(runs[0]["launched"], false);
-    assert!(e.ok(&["show", &t, "--no-git"]).contains("never launched"));
+    assert!(e.ok(&["show", &t, "--no-git"]).contains("not launched yet"));
     e.ok(&["attach", &t]);
     let runs = e.show(&t)["runs"].as_array().unwrap().clone();
     assert_eq!(runs.len(), 1, "{runs:?}");
@@ -1173,6 +1368,7 @@ fn an_update_edits_only_the_bullets_it_names() {
     // What left is history, with its reason, and recall still finds it.
     let text = e.ok(&["show", &t, "--no-git", "--history"]);
     assert!(text.contains("drop") && text.contains("done"), "{text}");
+    assert!(text.contains(" ago) by an update --") && !text.contains("by job"), "{text}");
     let hits: Value =
         serde_json::from_str(&e.ok(&["recall", "add", "locale", "key", "--all", "--json"])).unwrap();
     assert_eq!(hits["hits"][0]["short"], t);
@@ -1366,7 +1562,7 @@ fn a_client_edits_the_text_varde_prints() {
     let t = e.new_task("Edit in a client");
     assert_eq!(
         e.ok(&["edit", &t, "--print"]),
-        "Context:\nDetails here.\n\nStatus: \nFindings:\nDecisions:\nOpen:"
+        "#: version 0\nContext:\nDetails here.\n\nStatus: \nFindings:\nDecisions:\nOpen:"
     );
     e.cmd(&["attach", &t, "--worktree", "never"]).env("FAKE_TALK", "Found it.").output().unwrap();
     wait_for_cairn(&e, &t);
@@ -1381,6 +1577,21 @@ fn a_client_edits_the_text_varde_prints() {
     assert_eq!(c["open"][0]["text"], "Add the locale and the region.");
     assert_eq!(c["open"][0]["mine"], true);
     assert!(e.ok(&["edit", &t, "--print"]).contains("- [mine] Add the locale and the region."));
+
+    // An update that lands while the text is out is not saved over: the
+    // edit is refused, and what was typed is kept.
+    let stale = text.replace("Status: ", "Status: Mine now.");
+    e.ok_in(&["edit", &t, "--stdin"], &(e.ok(&["edit", &t, "--print"]) + "\n- [mine] Landed meanwhile.\n"));
+    let out = feed(&mut e.cmd(&["edit", &t, "--stdin"]), &stale);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!out.status.success() && err.contains("updated while you were editing"), "{err}");
+    let kept = err.split("kept in ").nth(1).unwrap().trim();
+    assert_eq!(
+        std::fs::read_to_string(kept).unwrap().lines().find(|l| l.starts_with("Status")),
+        Some("Status: Mine now.Cause found; fix pending.")
+    );
+    let _ = std::fs::remove_file(kept);
+    assert!(e.ok(&["edit", &t, "--print"]).contains("Landed meanwhile."));
 }
 
 /// Fires the events `cli/pi/varde.ts` forwards, with its payloads.
@@ -1534,7 +1745,8 @@ fn show_says_where_a_session_that_moved_to_another_conversation_went() {
         text.contains("moved on to run")
     });
     child.wait().unwrap();
-    assert!(text.contains("process running; moved on to run"), "{text}");
+    // Its conversation ended; that its process runs on is the next run's to say.
+    assert!(text.contains("; moved on to run") && !text.contains("running; moved"), "{text}");
 }
 
 #[test]
@@ -1684,7 +1896,8 @@ fn an_agent_that_closes_its_own_task_is_not_stopped_under_it() {
     assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
     let log = std::fs::read_to_string(e.path("done.log")).unwrap();
     assert!(
-        log.contains("while a session runs in it; it goes once that ends") && log.ends_with("survived\n"),
+        log.contains("until the session in it has ended; its work has landed, so it goes then")
+            && log.ends_with("survived\n"),
         "{log}"
     );
     e.ok(&["git-refresh"]);
@@ -1752,6 +1965,15 @@ fn a_task_moves_to_another_project_and_starts_there_afresh() {
     assert_eq!(e.query("SELECT count(*) FROM git_state"), "0", "what git said was of the old repo");
     // Already there: nothing to say.
     assert_eq!(e.ok(&["set", &t, "--project", &root]), "");
+    // What set changed is said; the same text again changes nothing.
+    let title = e.show(&t)["title"].as_str().unwrap().to_string();
+    assert_eq!(
+        e.ok(&["set", &t, "--title", "Renamed", "--context", "Why."]),
+        format!("{t}: title and context changed")
+    );
+    assert_eq!(e.ok(&["set", &t, "--title", "Renamed", "--context", "Why."]), "");
+    assert_eq!(e.ok(&["set", &t, "--context", ""]), format!("{t}: context changed"));
+    assert_eq!(e.ok(&["set", &t, "--title", &title]), format!("{t}: title changed"));
     let d = e.show(&t);
     assert_eq!(d["project"], root.as_str());
     assert_eq!(d["runs"][0]["cwd"], e.repo().to_string_lossy().as_ref(), "a past run keeps its directory");

@@ -42,9 +42,9 @@ fn a_real_turn_lands_under_needs_you() {
     let e = Env::new();
     replay_a_turn(&e);
     let b = e.board();
-    assert_eq!(rows(&b, "needs_you"), ["Run ls once with the Bash tool"]);
+    assert_eq!(rows(&b, "needs_you"), ["Run ls once with the Bash tool…"]);
     hook(&e, "SessionEnd", &fixture("session-end.json"));
-    assert_eq!(rows(&e.board(), "inbox"), ["Run ls once with the Bash tool"]);
+    assert_eq!(rows(&e.board(), "inbox"), ["Run ls once with the Bash tool…"]);
 }
 
 #[test]
@@ -52,7 +52,7 @@ fn a_turn_that_ends_on_an_api_error_needs_you() {
     let e = Env::new();
     hook(&e, "UserPromptSubmit", &fixture("user-prompt-submit.json"));
     hook(&e, "StopFailure", &fixture("stop.json").replace("\"Stop\"", "\"StopFailure\""));
-    assert_eq!(rows(&e.board(), "needs_you"), ["Run ls once with the Bash tool"]);
+    assert_eq!(rows(&e.board(), "needs_you"), ["Run ls once with the Bash tool…"]);
     // Every event the plugin subscribes to is one varde reads.
     let plugin =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../plugin/hooks/hooks.json"));
@@ -89,7 +89,7 @@ fn a_hook_answers_whatever_its_command_line() {
     hook(&e, "UserPromptSubmit", &fixture("user-prompt-submit.json"));
     let out = feed(&mut e.cmd(&["hook", "--new-flag", "Stop"]), &fixture("stop.json"));
     assert_eq!(String::from_utf8_lossy(&out.stdout), "{}\n");
-    assert_eq!(rows(&e.board(), "needs_you"), ["Run ls once with the Bash tool"]);
+    assert_eq!(rows(&e.board(), "needs_you"), ["Run ls once with the Bash tool…"]);
 }
 
 #[test]
@@ -159,7 +159,7 @@ fn a_session_varde_did_not_launch_ends_with_its_process() {
     }
     // It went without a SessionEnd: a closed terminal, a crash, a reboot.
     assert_eq!(rows(&e.board(), "working"), Vec::<String>::new());
-    assert_eq!(rows(&e.board(), "inbox"), ["Run ls once with the Bash tool"]);
+    assert_eq!(rows(&e.board(), "inbox"), ["Run ls once with the Bash tool…"]);
     let task = e.board()["groups"][3]["rows"][0]["task"].as_str().unwrap().to_string();
     let show: Value = serde_json::from_slice(&e.run(&["show", &task, "--json", "--no-git"]).stdout).unwrap();
     assert_eq!(show["runs"][0]["status"], "exited");
@@ -247,7 +247,7 @@ fn a_locked_store_defers_to_pending_and_loses_nothing() {
     drop(db);
 
     // The next command applies them, in order.
-    assert_eq!(rows(&e.board(), "needs_you"), ["Run ls once with the Bash tool"]);
+    assert_eq!(rows(&e.board(), "needs_you"), ["Run ls once with the Bash tool…"]);
     assert!(!e.home().join("pending.jsonl").exists());
 }
 

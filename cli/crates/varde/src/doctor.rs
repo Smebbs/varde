@@ -70,7 +70,8 @@ pub fn run(paths: &Paths, as_json: bool) -> Result<()> {
     let failed: Vec<&str> =
         checks.iter().filter(|c| c["ok"] != true).filter_map(|c| c["name"].as_str()).collect();
     if !failed.is_empty() {
-        anyhow::bail!("failed: {}", failed.join(", "));
+        let n = failed.len();
+        anyhow::bail!("{n} check{} failed: {}", if n == 1 { "" } else { "s" }, failed.join(", "));
     }
     Ok(())
 }
@@ -170,26 +171,28 @@ fn agents() -> Vec<Value> {
     out
 }
 
+/// Said where a session starts when `agent` is on PATH but nothing hands
+/// its events to varde, which then never sees the session: the most
+/// likely thing to be missing on a new machine.
+pub fn unhooked(agent: &str) -> Option<String> {
+    agents().iter().any(|c| c["name"] == agent && c["ok"] == false).then(|| {
+        format!("{agent}'s varde hooks are missing or out of date, so varde cannot follow its sessions: varde doctor says how to fix it")
+    })
+}
+
 /// The agent a new conversation uses must be one varde knows, and its
 /// command must run.
 fn agent() -> Value {
     let name = crate::start::default_agent();
-    if varde_agent::by_name(&name).is_none() {
+    let Some(adapter) = varde_agent::by_name(&name) else {
         return fail(
             "agent",
             format!("unknown agent {name:?}"),
             "set agent to \"claude\" or \"pi\" in the config (or $VARDE_AGENT)",
         );
-    }
-    // As `varde run` picks it: `$VARDE_CLAUDE` and the like, then the
-    // config's command, then the agent's own name.
-    let pinned = std::env::var(format!("VARDE_{}", name.to_ascii_uppercase())).ok().filter(|p| !p.is_empty());
-    let config = crate::config::load(&crate::config::path()).unwrap_or_default();
-    // The config's command keeps its arguments; a pinned program has none.
-    let command = match pinned {
-        Some(p) => vec![p],
-        None => config.command(&name).map(<[String]>::to_vec).unwrap_or_else(|| vec![name.clone()]),
     };
+    // As `varde run` picks it.
+    let command = crate::start::agent_command(&*adapter);
     let program = command[0].clone();
     let found = if program.contains('/') {
         Some(PathBuf::from(&program)).filter(|p| runnable(p))

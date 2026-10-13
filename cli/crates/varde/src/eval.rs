@@ -90,6 +90,10 @@ pub fn run(paths: &Paths, all: bool, since_arg: Option<&str>, as_json: bool) -> 
     let report = report(&store.conn, scope.as_deref(), from, &transcripts)?;
     if as_json {
         println!("{report}");
+    } else if report["runs"] == 0 {
+        println!(
+            "nothing to measure yet: eval reads the sessions of the last 30 days, and there are none here"
+        );
     } else {
         print!("{}", describe(&report));
     }
@@ -712,10 +716,10 @@ fn holdout(
     json!({"held_out": group(1), "given": group(0)})
 }
 
+/// `n of of (p%)`; only asked for when `of` is more than none.
 fn pct(n: &Value, of: &Value) -> String {
     match (n.as_f64(), of.as_f64()) {
         (Some(n), Some(of)) if of > 0.0 => format!("{n} of {of} ({:.0}%)", 100.0 * n / of),
-        (Some(n), _) => format!("{n} of 0"),
         _ => "-".into(),
     }
 }
@@ -724,15 +728,12 @@ fn num(v: &Value, digits: usize) -> String {
     v.as_f64().map_or_else(|| "-".into(), |x| format!("{x:.digits$}"))
 }
 
-/// The report as text.
+/// The report as text, in the words the rest of varde uses: a cairn's
+/// lines, and the updates that write them. A measure with nothing to
+/// count is left out, and a part with no measures with it.
 pub fn describe(r: &Value) -> String {
-    let mut out = String::new();
-    let mut line = |s: String| {
-        out.push_str(&s);
-        out.push('\n');
-    };
-    line(format!(
-        "memory in {}{}: {} runs, {} transcripts read",
+    let mut out = format!(
+        "memory in {}{}: {} runs, {} transcripts read\n",
         r["scope"].as_str().unwrap_or("every project"),
         r["since"]
             .as_i64()
@@ -741,14 +742,21 @@ pub fn describe(r: &Value) -> String {
             .unwrap_or_default(),
         r["runs"],
         r["transcripts"]
-    ));
-    let zero = |v: &Value| v.as_u64().unwrap_or(0) == 0;
+    );
+    let some = |v: &Value| v.as_u64().unwrap_or(0) > 0;
+    let mut part = |title: &str, lines: Vec<String>| {
+        if !lines.is_empty() {
+            out.push_str(&format!("\n{title}\n"));
+            for l in lines {
+                out.push_str(&format!("  {l}\n"));
+            }
+        }
+    };
 
-    line("\nreach: did sessions get their task's cairn?".into());
-    line("  (of the sessions whose task already had a cairn, by how they started)".into());
-    for k in r["reach"]["cairn"].as_array().into_iter().flatten().filter(|k| !zero(&k["runs"])) {
-        line(format!(
-            "  {:<7} {} sessions, {} with a cairn: handed it {}; had it already from earlier in the conversation {}; held out {}",
+    let mut reach = Vec::new();
+    for k in r["reach"]["cairn"].as_array().into_iter().flatten().filter(|k| some(&k["eligible"])) {
+        reach.push(format!(
+            "{:<7} {} sessions, {} with a cairn: handed it {}; had it already from earlier in the conversation {}; held out {}",
             k["start"].as_str().unwrap_or(""),
             k["runs"],
             k["eligible"],
@@ -758,16 +766,21 @@ pub fn describe(r: &Value) -> String {
         ));
     }
     let p = &r["reach"]["project"];
-    line(format!(
-        "  project cairn handed to {} of the sessions whose project had one",
-        pct(&p["given"], &p["eligible"])
-    ));
+    if some(&p["eligible"]) {
+        reach.push(format!(
+            "project cairn handed to {} of the sessions whose project had one",
+            pct(&p["given"], &p["eligible"])
+        ));
+    }
+    part(
+        "reach: did sessions get their task's cairn? (of those whose task had one, by how they started)",
+        reach,
+    );
 
-    line("\nuse: did sessions act on what they were shown?".into());
-    line("  (a bullet counts as used when a later tool call names its file or identifier)".into());
-    for k in r["use"]["bullets"].as_array().into_iter().flatten().filter(|k| !zero(&k["shown"])) {
-        line(format!(
-            "  {:<8} {} bullets shown, {} name code, used {}",
+    let mut used = Vec::new();
+    for k in r["use"]["bullets"].as_array().into_iter().flatten().filter(|k| some(&k["anchored"])) {
+        used.push(format!(
+            "{:<8} {} lines shown, {} name code, used {}",
             k["kind"].as_str().unwrap_or(""),
             k["shown"],
             k["anchored"],
@@ -775,62 +788,91 @@ pub fn describe(r: &Value) -> String {
         ));
     }
     let rc = &r["use"]["recalls"];
-    line(format!(
-        "  agents ran varde recall {} times, {} found something, then looked at a hit with varde show {}",
-        rc["asked"],
-        rc["with_hits"],
-        pct(&rc["followed_by_show"], &rc["with_hits"])
-    ));
+    if some(&rc["asked"]) {
+        let mut l =
+            format!("agents ran varde recall {} times, {} found something", rc["asked"], rc["with_hits"]);
+        if some(&rc["with_hits"]) {
+            l.push_str(&format!(
+                ", then looked at a hit with varde show {}",
+                pct(&rc["followed_by_show"], &rc["with_hits"])
+            ));
+        }
+        used.push(l);
+    }
+    part(
+        "use: did sessions act on what they were shown? (a line is used when a later tool call names its file or identifier)",
+        used,
+    );
 
     let rd = &r["rediscovery"];
-    line("\nre-discovery: did updates write down what was already known?".into());
-    line(format!(
-        "  of {} bullets updates added, {} repeat one the session had been shown, {} one recall could have found, {} one only another project knew",
-        rd["added"], rd["ignored"], rd["missed"], rd["unreachable"]
-    ));
+    let mut again = Vec::new();
+    if some(&rd["added"]) {
+        again.push(format!(
+            "of {} lines updates added, {} repeat one the session had been shown, {} one recall could have found, {} one only another project knew",
+            rd["added"], rd["ignored"], rd["missed"], rd["unreachable"]
+        ));
+    }
     let u = &rd["at_update"];
-    if !zero(&u["jobs"]) {
-        line(format!(
-            "  as {} updates counted: {} ADDs repeated a bullet word for word, {} new bullets were close to one the session had been shown",
+    if some(&u["jobs"]) {
+        again.push(format!(
+            "over {} updates: {} lines added word for word as one already there, {} close to a line the session had been shown",
             u["jobs"], u["repeated"], u["like_shown"]
         ));
     }
+    part("re-discovery: did updates write down what was already known?", again);
 
     let f = &r["fidelity"];
-    line("\nfidelity: did notes and bullets survive?".into());
-    line(format!(
-        "  {} notes folded, {} naming files or identifiers; on average {} of those names reached the cairn and {} are still there; {} notes left no trace",
-        f["notes"],
-        f["with_specifics"],
-        share(&f["carried"]),
-        share(&f["kept"]),
-        f["carried_none"]
-    ));
-    line(format!(
-        "  bullets that left a cairn: {} with a reason, {} without, {} pushed out by the size cap, {} removed by you",
-        f["drops"]["with_reason"].as_u64().unwrap_or(0),
-        f["drops"]["without_reason"].as_u64().unwrap_or(0),
-        f["drops"]["cap"].as_u64().unwrap_or(0),
-        f["drops"]["by_user"].as_u64().unwrap_or(0),
-    ));
-    line(format!(
-        "  each update took out {} of the bullets before it, over {} updates",
-        share(&f["churn"]),
-        f["updates"]
-    ));
+    let mut kept = Vec::new();
+    if some(&f["notes"]) {
+        kept.push(format!(
+            "{} notes taken into a cairn, {} naming files or identifiers; on average {} of those names reached the cairn and {} are still there; {} notes left no trace",
+            f["notes"],
+            f["with_specifics"],
+            share(&f["carried"]),
+            share(&f["kept"]),
+            f["carried_none"]
+        ));
+    }
+    let d = &f["drops"];
+    let n = |k: &str| d[k].as_u64().unwrap_or(0);
+    if n("with_reason") + n("without_reason") + n("cap") + n("by_user") > 0 {
+        kept.push(format!(
+            "lines that left a cairn: {} with a reason, {} without, {} pushed out by the size cap, {} removed by you",
+            n("with_reason"),
+            n("without_reason"),
+            n("cap"),
+            n("by_user"),
+        ));
+    }
+    if some(&f["updates"]) {
+        kept.push(format!(
+            "each update took out {} of the lines before it, over {} updates",
+            share(&f["churn"]),
+            f["updates"]
+        ));
+    }
+    part("fidelity: did notes and lines survive?", kept);
 
     let s = &r["staleness"];
-    line("\nstaleness: do bullets still name code that exists?".into());
-    line(format!(
-        "  bullets shown that are marked stale now {}; of all current anchored bullets {}",
-        pct(&s["shown_stale_now"], &s["shown_anchored"]),
-        pct(&s["current_stale"], &s["current_anchored"])
-    ));
+    let mut stale = Vec::new();
+    if some(&s["shown_anchored"]) {
+        stale.push(format!(
+            "lines shown that name code and are marked stale now: {}",
+            pct(&s["shown_stale_now"], &s["shown_anchored"])
+        ));
+    }
+    if some(&s["current_anchored"]) {
+        stale.push(format!(
+            "lines in cairns now that name code and are stale: {}",
+            pct(&s["current_stale"], &s["current_anchored"])
+        ));
+    }
+    part("staleness: do lines still name code that exists?", stale);
 
-    line("\ncost: tokens the updates spent".into());
-    for k in r["cost"]["by_kind"].as_array().into_iter().flatten().filter(|k| !zero(&k["jobs"])) {
-        line(format!(
-            "  {:<8} {} jobs ({} changed nothing), {} model calls, {} tokens in, {} out, {} a job (of the {} that recorded tokens)",
+    let mut cost = Vec::new();
+    for k in r["cost"]["by_kind"].as_array().into_iter().flatten().filter(|k| some(&k["jobs"])) {
+        cost.push(format!(
+            "{:<8} {} updates ({} changed nothing), {} model calls, {} tokens in, {} out, {} an update (of the {} that recorded tokens)",
             k["kind"].as_str().unwrap_or(""),
             k["jobs"],
             k["unchanged"],
@@ -841,21 +883,27 @@ pub fn describe(r: &Value) -> String {
             k["metered"]
         ));
     }
-    line(format!("  tokens for each bullet a session used: {}", num(&r["cost"]["per_bullet_used"], 0)));
+    if !r["cost"]["per_bullet_used"].is_null() {
+        cost.push(format!("tokens for each line a session used: {}", num(&r["cost"]["per_bullet_used"], 0)));
+    }
+    part("cost: tokens the updates spent", cost);
 
     let (held, given) = (&r["holdout"]["held_out"], &r["holdout"]["given"]);
-    if !zero(&held["runs"]) {
-        line("\nholdout: did memory help? (fresh sessions held out of memory beside those given it)".into());
-        for (name, g) in [("held out", held), ("given", given)] {
-            line(format!(
-                "  {name:<8} {} sessions, {} edited code: median {} tool calls and {} minutes before the first edit; {} re-discoveries",
+    if some(&held["runs"]) {
+        let rows = [("held out", held), ("given", given)].map(|(name, g)| {
+            format!(
+                "{name:<8} {} sessions, {} edited code: median {} tool calls and {} minutes before the first edit; {} re-discoveries",
                 g["runs"],
                 g["with_an_edit"],
                 num(&g["calls_before_edit"], 0),
                 num(&g["minutes_before_edit"], 1),
                 g["rediscovered"]
-            ));
-        }
+            )
+        });
+        part(
+            "holdout: did memory help? (fresh sessions held out of memory beside those given it)",
+            rows.into(),
+        );
     }
     out
 }

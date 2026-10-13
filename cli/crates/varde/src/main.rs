@@ -7,6 +7,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use varde_core::plan::Want;
 use varde_core::store::Store;
 
+mod cairn_view;
 mod config;
 mod deliver;
 mod doctor;
@@ -16,7 +17,9 @@ mod git;
 mod hook;
 mod job;
 mod list;
+mod look;
 mod memory_cmd;
+mod naming;
 mod pending;
 mod process;
 mod run;
@@ -38,12 +41,18 @@ struct Cli {
     /// With no command, the board opens in the terminal.
     #[command(subcommand)]
     cmd: Option<Cmd>,
+    /// The board runs in a tmux popup (`display-popup -E`): going to a
+    /// session quits it, which closes the popup. Ignored outside tmux.
+    #[arg(long)]
+    popup: bool,
 }
 
 #[derive(Subcommand)]
 enum Cmd {
-    /// Show the board.
+    /// Show the board as text.
+    #[command(display_order = 3)]
     List {
+        /// Print the board as JSON, for clients.
         #[arg(long)]
         json: bool,
         /// Include old done tasks and dropped ones, and list the rows of
@@ -54,15 +63,17 @@ enum Cmd {
         #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = ".")]
         project: Option<PathBuf>,
     },
-    /// Create a task.
+    /// Create a task in the repository you are in.
+    #[command(display_order = 1)]
     New {
-        #[arg(required = true)]
+        /// Its title: what you would say to the agent first. Left out, it
+        /// is cut from --context, and the model names the task.
         title: Vec<String>,
-        /// Project directory; defaults to the repository you are in.
-        #[arg(long)]
+        /// Its project: the repository DIR is in, in place of the one you are in.
+        #[arg(long, value_name = "DIR")]
         project: Option<PathBuf>,
-        /// Task description, or `-` to read it from stdin.
-        #[arg(long)]
+        /// Context for the agent, given with the title; `-` reads it from stdin.
+        #[arg(long = "context", alias = "body", value_name = "TEXT")]
         body: Option<String>,
         /// Where the task also lives, e.g. `org`.
         #[arg(long, hide = true)]
@@ -72,16 +83,20 @@ enum Cmd {
         /// and names that task as its origin.
         #[arg(long, value_name = "RUN", conflicts_with = "external", hide = true)]
         from: Option<String>,
+        /// Print the new task's id and short id as JSON.
         #[arg(long)]
         json: bool,
     },
-    /// Change a task's title, body or project.
+    /// Change a task's title, context or project.
+    #[command(display_order = 10)]
     Set {
+        /// The task: the six characters the board shows, or their first four.
         task: String,
+        /// Its new title.
         #[arg(long)]
         title: Option<String>,
-        /// The body, or `-` to read it from stdin.
-        #[arg(long)]
+        /// Its context for the agent, or `-` to read it from stdin.
+        #[arg(long = "context", alias = "body", value_name = "TEXT")]
         body: Option<String>,
         /// Move the task to the project DIR is in. Refused while it has an
         /// active worktree or a live session, which belong to the old checkout.
@@ -89,7 +104,9 @@ enum Cmd {
         project: Option<PathBuf>,
     },
     /// Move Inbox tasks into Open.
+    #[command(display_order = 9)]
     Accept {
+        /// The tasks, by the six characters the board shows.
         #[arg(required = true)]
         tasks: Vec<String>,
     },
@@ -99,7 +116,8 @@ enum Cmd {
     /// Forget where a task lives elsewhere.
     #[command(hide = true)]
     Unlink { task: String },
-    /// Show a task: its cairn, runs and worktree; or a project's cairn.
+    /// Show a task: where it stands, its memory and its sessions.
+    #[command(display_order = 4)]
     Show {
         /// The task; inside a session varde runs, its own.
         task: Option<String>,
@@ -112,6 +130,8 @@ enum Cmd {
         /// Leave out the git and PR status, which runs git and gh.
         #[arg(long)]
         no_git: bool,
+        /// Print it as JSON, for clients: the cairn with each line's id,
+        /// and its limits.
         #[arg(long)]
         json: bool,
     },
@@ -129,28 +149,61 @@ enum Cmd {
         text: Vec<String>,
     },
     /// Search what earlier tasks learned.
+    #[command(display_order = 11)]
     Recall {
+        /// What to look for; a task's short id finds that task first.
         #[arg(required = true)]
         words: Vec<String>,
         /// Every project, not just the one you are in.
         #[arg(long)]
         all: bool,
+        /// The project DIR is in, in place of the one you are in.
+        #[arg(long, value_name = "DIR", conflicts_with = "all")]
+        project: Option<PathBuf>,
+        /// Print the hits as JSON.
         #[arg(long)]
         json: bool,
     },
-    /// Edit a task's cairn and the context above it, or a project's cairn,
-    /// in $EDITOR; your lines are kept by later updates.
+    /// Change a line of a cairn, or edit the whole cairn in $EDITOR.
+    ///
+    /// A cairn is what a task's sessions learned, handed to the next one.
+    /// --add, --set, --rm and --restore change one line, which becomes
+    /// yours: updates never change or drop it. `varde show` prints each
+    /// line's id after it (#12). Without them, the cairn and the task's
+    /// context open in $EDITOR, for bigger changes.
+    #[command(display_order = 12, group(clap::ArgGroup::new("line").args(["add", "set", "rm", "restore"])))]
     Edit {
+        /// The task: the six characters the board shows, or their first four.
         #[arg(required_unless_present = "project")]
         task: Option<String>,
         /// The cairn of the project DIR (default: here) is in, in place of a task.
         #[arg(long, value_name = "DIR", num_args = 0..=1, default_missing_value = ".", conflicts_with = "task")]
         project: Option<PathBuf>,
+        /// Add a line to SECTION: findings, decisions or open (for a project:
+        /// conventions, gotchas or howto); `status` replaces the Status.
+        /// TEXT `-` is read from stdin.
+        #[arg(long, num_args = 2.., value_names = ["SECTION", "TEXT"])]
+        add: Option<Vec<String>>,
+        /// Replace the words of the line with this id (`#12` or `12`).
+        /// TEXT `-` is read from stdin.
+        #[arg(long, num_args = 2.., value_names = ["ID", "TEXT"])]
+        set: Option<Vec<String>>,
+        /// Remove the line with this id; recall still finds it. `status`
+        /// hands a Status you set back to the updates, which may then change it.
+        #[arg(long, value_name = "ID", value_parser = memory_cmd::rm_target)]
+        rm: Option<memory_cmd::Rm>,
+        /// Bring back a line removed with --rm, where it was.
+        #[arg(long, value_name = "ID", value_parser = memory_cmd::line_id)]
+        restore: Option<i64>,
+        /// With --add, --set, --rm or --restore: print the cairn after the
+        /// change as JSON, as `varde show --json` has it.
+        #[arg(long, requires = "line")]
+        json: bool,
         /// Read the edited text from stdin instead of opening an editor.
-        #[arg(long)]
+        #[arg(long, conflicts_with = "line")]
         stdin: bool,
         /// Print the text to edit, for a client's own editor, and exit.
-        #[arg(long, conflicts_with = "stdin")]
+        #[arg(long, conflicts_with_all = ["stdin", "line"])]
         print: bool,
     },
     /// Run one queued cairn update (started by varde itself).
@@ -158,6 +211,7 @@ enum Cmd {
     Job { id: String },
     /// Decide how to start a task and record the run, without launching it
     /// (for clients; `attach` does both).
+    #[command(hide = true)]
     Start {
         task: String,
         #[command(flatten)]
@@ -165,13 +219,16 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
-    /// Start a task in this terminal.
+    /// Start a task here, resume it, or go to where it runs.
+    #[command(display_order = 2)]
     Attach {
+        /// The task: the six characters the board shows, or their first four.
         task: String,
         #[command(flatten)]
         how: StartArgs,
     },
-    /// Close a task; its worktree goes once its work has landed.
+    /// Mark a task done; its worktree goes once its work has landed.
+    #[command(display_order = 5)]
     Done {
         /// The task; inside a session varde runs, its own.
         task: Option<String>,
@@ -186,12 +243,14 @@ enum Cmd {
         /// stopped, and starting the task again resumes them.
         #[arg(long, hide = true)]
         keep_running: bool,
+        /// Print what happened as JSON: the worktree and the sessions stopped.
         #[arg(long)]
         json: bool,
     },
     /// Put a task aside; starting it again picks it back up.
     ///
     /// It leaves the board's working groups, and its worktree is left as it is.
+    #[command(display_order = 6)]
     Park {
         /// The task; inside a session varde runs, its own.
         task: Option<String>,
@@ -199,20 +258,39 @@ enum Cmd {
         /// stopped, and starting the task again resumes them.
         #[arg(long, hide = true)]
         keep_running: bool,
+        /// Print what happened as JSON: the sessions stopped.
         #[arg(long)]
         json: bool,
     },
-    /// Throw a task away; starting it again brings it back.
+    /// Drop a task: throw it away; starting it again brings it back.
     ///
     /// Its sessions are stopped. Work in its worktree is kept under
     /// refs/varde/discarded/, and the worktree is removed.
+    #[command(display_order = 7)]
     Drop {
+        /// The task: the six characters the board shows, or their first four.
         task: String,
+        /// Print what happened as JSON.
         #[arg(long)]
         json: bool,
     },
     /// Move a done, parked or dropped task back to Open.
-    Reopen { task: String },
+    #[command(display_order = 8)]
+    Reopen {
+        /// The task: the six characters the board shows, or their first four.
+        task: String,
+    },
+    /// In tmux, go to the next task that needs you: bind it to a key.
+    ///
+    /// Each press goes to the window of the next task in Needs you, round
+    /// to the first, and to the board when nothing else needs you. It says
+    /// what it cannot do in tmux's status line. Outside tmux it only says so.
+    #[command(display_order = 2)]
+    Next {
+        /// Go to the board's window instead.
+        #[arg(long)]
+        board: bool,
+    },
     /// Launch a run `varde start` prepared, in this terminal.
     #[command(hide = true)]
     Run { run: String },
@@ -229,8 +307,15 @@ enum Cmd {
     /// tasks' worktrees whose work has landed. Started by `varde list`.
     #[command(hide = true)]
     GitRefresh,
-    /// Report what memory was worth: reach, use, re-discovery, fidelity,
-    /// staleness and cost, from the store and the agents' transcripts.
+    /// Have the model name a task varde titled itself (§6.2). Started
+    /// detached by `varde new`, the board and `varde git-refresh`.
+    #[command(hide = true)]
+    Name { task: String },
+    /// Report what memory was worth.
+    ///
+    /// Reach, use, re-discovery, fidelity, staleness and cost, from the
+    /// store and the agents' transcripts. It changes nothing.
+    #[command(display_order = 13)]
     Eval {
         /// Every project, not just the one you are in.
         #[arg(long)]
@@ -239,11 +324,21 @@ enum Cmd {
         /// (7d). It looks back 30 days at most.
         #[arg(long, value_name = "D")]
         since: Option<String>,
+        /// Print the report as JSON.
         #[arg(long)]
         json: bool,
     },
-    /// Check the installation and the store.
+    /// Check the installation, and say how to fix what is wrong.
+    #[command(display_order = 14)]
     Doctor {
+        /// Print the checks as JSON.
+        #[arg(long)]
+        json: bool,
+    },
+    /// The agent of a new conversation and the command that runs it (for
+    /// clients that open a session of your own).
+    #[command(hide = true)]
+    Agent {
         #[arg(long)]
         json: bool,
     },
@@ -325,6 +420,13 @@ impl Paths {
         self.home.join("varde.db")
     }
 
+    /// The store's directory, as tmux windows of its board are tagged
+    /// with it.
+    pub fn tag(&self) -> String {
+        let home = &self.home;
+        home.canonicalize().unwrap_or_else(|_| home.clone()).to_string_lossy().into_owned()
+    }
+
     pub fn pending(&self) -> PathBuf {
         self.home.join("pending.jsonl")
     }
@@ -366,7 +468,7 @@ fn own_task(paths: &Paths, task: Option<String>, subcommand: &str) -> Result<Str
         let mut cli = Cli::command();
         cli.build();
         let sub = cli.find_subcommand_mut(subcommand).expect("a subcommand of varde");
-        let missing = "the following required arguments were not provided:\n  <TASK>";
+        let missing = "name the task, by the six characters the board shows; only inside a session varde started does it mean that session's task";
         sub.error(clap::error::ErrorKind::MissingRequiredArgument, missing).exit()
     };
     let store = paths.open(Duration::from_secs(2))?;
@@ -379,7 +481,7 @@ fn own_task(paths: &Paths, task: Option<String>, subcommand: &str) -> Result<Str
             [&run],
             |r| r.get(0),
         )
-        .with_context(|| format!("VARDE_RUN names run {run}, which has no task; name the task"))
+        .map_err(|_| anyhow::anyhow!("this shell's VARDE_RUN ({run}) is from a session varde no longer knows: name the task, or unset VARDE_RUN"))
 }
 
 /// The run a session varde launched or tracks carries (`VARDE_RUN`).
@@ -405,10 +507,18 @@ pub fn arg_or_stdin(text: Option<String>) -> Result<Option<String>> {
 
 /// Each earlier version of a task's or a project's cairn, and why it changed.
 pub fn print_history(versions: &[varde_core::memory::Version]) {
+    let now = now_ms();
     for v in versions {
-        println!("\n-- {} by {} --", v.ts, v.author);
-        for line in v.cairn.render().lines().chain(v.reason.iter().flat_map(|r| r.lines())) {
+        let when = chrono::DateTime::from_timestamp_millis(v.ts)
+            .map(|t| t.with_timezone(&chrono::Local).format("%Y-%m-%d %H:%M").to_string())
+            .unwrap_or_default();
+        let by = if v.author == "user" { "by you" } else { "by an update" };
+        println!("\n-- {when} ({} ago) {by} --", list::age(now - v.ts));
+        for line in cairn_view::version(&v.cairn) {
             println!("  {line}");
+        }
+        for line in v.reason.iter().flat_map(|r| r.lines()) {
+            println!("  why: {line}");
         }
     }
 }
@@ -482,7 +592,7 @@ fn main() -> ExitCode {
         return ExitCode::SUCCESS;
     }
     let cli = Cli::parse();
-    let result = dispatch(&paths, cli.cmd);
+    let result = dispatch(&paths, cli.cmd, cli.popup);
     // Leave with the agent's own exit code.
     match result {
         Ok(code) => ExitCode::from(code.clamp(0, 255) as u8),
@@ -493,11 +603,12 @@ fn main() -> ExitCode {
     }
 }
 
-fn dispatch(paths: &Paths, cmd: Option<Cmd>) -> Result<i32> {
-    let Some(cmd) = cmd else { return tui::run(paths).map(|_| 0) };
+fn dispatch(paths: &Paths, cmd: Option<Cmd>, popup: bool) -> Result<i32> {
+    let Some(cmd) = cmd else { return tui::run(paths, popup).map(|_| 0) };
     let result = match cmd {
         Cmd::List { json, all, project } => list::run(paths, json, all, project.as_deref()),
         Cmd::Doctor { json } => doctor::run(paths, json),
+        Cmd::Agent { json } => start::agent(json),
         Cmd::Eval { all, since, json } => eval::run(paths, all, since.as_deref(), json),
         Cmd::New { title, project, body, external, from, json } => {
             tasks::new(paths, &title, project, body, external, from, json)
@@ -513,7 +624,13 @@ fn dispatch(paths: &Paths, cmd: Option<Cmd>) -> Result<i32> {
         }
         Cmd::Seen { task } => tasks::seen(paths, &task),
         Cmd::Note { run, text } => memory_cmd::note(paths, run, &text),
-        Cmd::Recall { words, all, json } => memory_cmd::recall(paths, &words, all, json),
+        Cmd::Recall { words, all, project, json } => memory_cmd::recall(paths, &words, all, project, json),
+        Cmd::Edit { task, project, add, set, rm, restore, json, .. }
+            if add.is_some() || set.is_some() || rm.is_some() || restore.is_some() =>
+        {
+            let line = memory_cmd::Line::of(add, set, rm, restore)?;
+            memory_cmd::edit_line(paths, task.as_deref(), project.as_deref(), line, json)
+        }
         Cmd::Edit { project: Some(dir), stdin, print, .. } => {
             memory_cmd::edit_project(paths, &dir, stdin, print).map(drop)
         }
@@ -535,9 +652,11 @@ fn dispatch(paths: &Paths, cmd: Option<Cmd>) -> Result<i32> {
         }
         Cmd::Drop { task, json } => done::drop(paths, &task, json),
         Cmd::Reopen { task } => done::reopen(paths, &task),
+        Cmd::Next { board } => tmux::next(paths, board),
         Cmd::Run { run } => return run::run(paths, &run),
         Cmd::Reap { task, spare } => done::reap(paths, &task, &spare),
         Cmd::GitRefresh => sweep::run(paths),
+        Cmd::Name { task } => naming::run(paths, &task),
     };
     result.map(|()| 0)
 }

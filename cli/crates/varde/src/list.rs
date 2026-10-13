@@ -48,7 +48,7 @@ pub fn local_midnight_ms() -> i64 {
 }
 
 /// The terminal's width, or 80 when the output goes elsewhere.
-fn columns() -> usize {
+pub fn columns() -> usize {
     let mut size: libc::winsize = unsafe { std::mem::zeroed() };
     let ok = unsafe { libc::ioctl(1, libc::TIOCGWINSZ, &mut size) } == 0;
     if ok && size.ws_col > 0 {
@@ -58,42 +58,39 @@ fn columns() -> usize {
     }
 }
 
-/// The columns of a row other than its title.
-const FIXED: usize = 2 + 6 + 2 + 8 + 1 + 10 + 1 + 1 + PROJECT + 1 + 4;
-const PROJECT: usize = 12;
-
-/// The board as the TUI draws it, in `width` columns: `●` marks an
-/// unread row, and `← k2f0g3` the task deferred work came from. A
-/// collapsed group shows only its count, unless `all` asks for everything.
+/// The board as the TUI draws it, in `width` columns: a glyph for where
+/// each task stands, its title, then what else there is to know, its id
+/// last. Every group is there, in the same order, an empty one as its
+/// count; a collapsed one shows only its count, unless `all` asks for
+/// everything, which also adds the dropped tasks' group.
 fn table(board: &Board, now: i64, all: bool, width: usize) -> String {
-    let title_w = width.saturating_sub(FIXED).max(20);
     let mut out = String::new();
-    for g in &board.groups {
+    for g in board.groups.iter().filter(|g| !g.rows.is_empty() || g.key != "dropped") {
         let hidden = g.collapsed && !all && !g.rows.is_empty();
         out.push_str(&format!(
-            "{} ({}){}\n",
+            "{}  {}{}\n",
             g.label,
             g.rows.len(),
-            if hidden { " ▸ --all lists them" } else { "" }
+            if hidden { " ▸ (--all lists them)" } else { "" }
         ));
         for r in g.rows.iter().filter(|_| !hidden) {
-            let project = project_name(r.project.as_deref());
-            let origin = r.origin.as_ref().map(|o| format!("  ← {}", o.short)).unwrap_or_default();
+            // Under Needs you, a turn that is yours goes without saying.
+            let meta: Vec<String> = crate::look::meta(r, now, true)
+                .into_iter()
+                .map(|(t, _)| t)
+                .filter(|t| !(g.key == "needs_you" && t == crate::look::YOUR_TURN))
+                .collect();
+            let meta = format!("{}  {}", meta.join(crate::look::SEP), r.short);
+            let title_w = width.saturating_sub(5 + meta.width()).max(20);
             out.push_str(&format!(
-                " {}{}  {:<8} {} {} {} {:>4}\n",
-                if r.unread { "●" } else { " " },
-                r.short,
-                r.status,
-                pad(r.git.as_ref().map_or("", |g| g.label.as_str()), 10),
-                pad(
-                    &(clip(&varde_core::title::clean(&r.title), title_w.saturating_sub(origin.width()))
-                        + &origin),
-                    title_w
-                ),
-                pad(project, PROJECT),
-                age(now - r.last)
+                " {} {}  {meta}\n",
+                crate::look::glyph(r).0,
+                pad(&varde_core::title::clean(&r.title), title_w)
             ));
         }
+    }
+    if board.groups.iter().all(|g| g.rows.is_empty()) {
+        out.push_str("no tasks yet: varde new <title> makes one\n");
     }
     out
 }
@@ -164,11 +161,18 @@ mod tests {
         store.conn.execute("UPDATE task SET state = 'parked' WHERE id = ?1", [&parked]).unwrap();
         let board = board::build(&store, 10, 0, false, &|_, _| true).unwrap();
         let t = table(&board, 10, false, 80);
-        assert!(t.contains(&format!("Later bit  ← {}", varde_core::task::short(&origin))), "{t}");
-        assert!(t.contains("Parked (1) ▸ --all lists them") && !t.contains("Someday"), "{t}");
+        assert!(t.contains(&format!("← {}", varde_core::task::short(&origin))), "{t}");
+        assert!(t.contains("Parked  1 ▸ (--all lists them)") && !t.contains("Someday"), "{t}");
+        assert!(t.contains("Working  0\n") && !t.contains("Dropped"), "an empty group is its count:\n{t}");
+        store.conn.execute("UPDATE task SET state = 'open' WHERE id = ?1", [&parked]).unwrap();
+        let t = table(&board::build(&store, 10, 0, false, &|_, _| true).unwrap(), 10, false, 80);
+        assert!(t.contains("Parked  0\n"), "an empty folded group has no hint:\n{t}");
         let mut board = board;
-        board.groups[2].rows[0].unread = true;
-        assert!(table(&board, 10, false, 80).contains(&format!(" ●{}", board.groups[2].rows[0].short)));
+        let row =
+            board.groups.iter_mut().flat_map(|g| g.rows.iter_mut()).find(|r| r.title == "Later bit").unwrap();
+        (row.status, row.unread) = ("waiting", true);
+        let t = table(&board, 10, false, 80);
+        assert!(t.contains(" ● Later bit") && t.contains("your turn"), "{t}");
     }
 
     #[test]

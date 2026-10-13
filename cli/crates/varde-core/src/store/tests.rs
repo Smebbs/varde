@@ -615,3 +615,26 @@ fn a_newer_schema_is_refused() {
     let err = Store::open(&path, Duration::from_millis(200)).err().unwrap();
     assert!(err.to_string().contains("newer"));
 }
+
+#[test]
+fn a_store_from_before_naming_names_only_its_open_tasks() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("varde.db");
+    let c = Connection::open(&path).unwrap();
+    for sql in &MIGRATIONS[..2] {
+        c.execute_batch(sql).unwrap();
+    }
+    c.pragma_update(None, "user_version", 2).unwrap();
+    c.execute_batch(
+        "INSERT INTO task (id, title, prompt_title, state, created) VALUES
+           ('OPEN', 'fix the', 'fix the', 'open', 1), ('DONE', 'old', 'old', 'done', 1);
+         INSERT INTO task (id, title, created) VALUES ('TYPED', 'Typed', 1);",
+    )
+    .unwrap();
+    drop(c);
+    let s = Store::open(&path, Duration::from_millis(200)).unwrap();
+    let named = |id: &str| -> Option<i64> {
+        s.conn.query_row("SELECT named FROM task WHERE id = ?1", [id], |r| r.get(0)).unwrap()
+    };
+    assert_eq!((named("OPEN"), named("DONE"), named("TYPED")), (None, Some(0), None));
+}

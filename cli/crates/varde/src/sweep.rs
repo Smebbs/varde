@@ -3,7 +3,8 @@
 //! detached `varde git-refresh`. That checks every task the board tracks,
 //! writes what it found, and removes a done task's worktree once nothing
 //! in it can be lost. The store watch redraws the board. It also starts
-//! again any cairn update whose process died.
+//! again any cairn update whose process died, and names the tasks that
+//! wait to be (`naming.rs`).
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -137,6 +138,8 @@ pub fn run(paths: &Paths) -> Result<()> {
     for id in memory::requeue_stuck(&store.conn, now_ms())? {
         job::spawn(&id)?;
     }
+    // Tasks a hook made, titled from their first prompt, wait for a name.
+    let _ = crate::naming::sweep(&store);
     // Whether what cairns say about code still names code that exists.
     let _ = crate::stale::check_due(&store, now_ms());
     Ok(())

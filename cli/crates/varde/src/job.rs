@@ -142,7 +142,7 @@ fn run_job(paths: &Paths, store: &mut Store, job: &str) -> Result<()> {
 
 /// Text from a session or a note as an update may read it: no invisible
 /// characters, and no lines that read like secrets.
-fn hygienic(text: &str) -> String {
+pub(crate) fn hygienic(text: &str) -> String {
     cairn::without_secrets(&cairn::clean(text)).0
 }
 
@@ -510,7 +510,7 @@ and {w} words in all: an ADD that does not fit is refused, so EDIT or DROP first
 
 /// One headless call: `prompt` on stdin, run in the store's directory so
 /// nothing of a project's is picked up from where it runs.
-fn ask(
+pub(crate) fn ask(
     home: &Path,
     agent: &dyn varde_agent::Agent,
     system: &str,
@@ -740,6 +740,8 @@ mod tests {
         assert!(p.contains("A feature's behaviour is not a convention"));
         assert!(p.contains("NO EDITS is the usual answer. Never ADD more than 2"));
         let s = system();
+        // Naming is a call of its own (`naming.rs`): no update is asked to.
+        assert!(!s.contains("TITLE") && !p.contains("TITLE"));
         assert!(s.contains("A bug found and fixed, with its cause, is a finding"));
         assert!(s.contains("ADD findings: `cache_key_for`"));
         let input = JobInput {

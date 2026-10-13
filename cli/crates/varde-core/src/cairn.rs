@@ -72,11 +72,25 @@ impl Shape {
         }
     }
 
-    fn max_words(self) -> usize {
+    pub fn max_words(self) -> usize {
         match self {
             Shape::Task => MAX_WORDS,
             Shape::Project => MAX_PROJECT_WORDS,
         }
+    }
+
+    /// What a cairn of this shape holds at most, as `varde show --json`
+    /// gives it: words in the Status (a task's only), in a line and in
+    /// all, and lines in each section.
+    pub fn limits(self) -> serde_json::Value {
+        let sections: serde_json::Map<String, serde_json::Value> =
+            self.sections().iter().map(|s| (s.name().to_string(), s.max().into())).collect();
+        let mut out =
+            serde_json::json!({"line": MAX_BULLET_WORDS, "words": self.max_words(), "sections": sections});
+        if self == Shape::Task {
+            out["status"] = MAX_STATUS_WORDS.into();
+        }
+        out
     }
 
     /// Which section gives way first when the whole is over its words:
@@ -291,6 +305,28 @@ impl Cairn {
         self.render_with(|_| String::new(), |i| if i.stale { STALE_MARK.into() } else { String::new() })
     }
 
+    /// The cairn to read: its Status, then each section that has bullets,
+    /// without the marks only an edit needs.
+    pub fn reading(&self) -> String {
+        let mut out = String::new();
+        if !self.status.is_empty() {
+            out.push_str(&self.status);
+            out.push('\n');
+        }
+        for &s in self.shape.sections() {
+            let items = self.section(s);
+            if items.is_empty() {
+                continue;
+            }
+            out.push_str(s.heading());
+            out.push('\n');
+            for i in items {
+                out.push_str(&format!("- {}{}\n", i.text, if i.stale { STALE_MARK } else { "" }));
+            }
+        }
+        out
+    }
+
     /// What an update is given: each bullet with its id, what is known to
     /// be stale about it, and a Status the user wrote marked as theirs.
     pub fn for_update(&self) -> String {
@@ -437,7 +473,7 @@ impl Cairn {
                     } else {
                         c.status = s.to_string();
                         a.changed = true;
-                        a.summary.push("status".into());
+                        a.summary.push(format!("set status: {s}"));
                     }
                 }
                 Edit::Add { section, text } => {
@@ -763,8 +799,14 @@ pub fn similar(a: &str, b: &str) -> bool {
 /// The value of a `Status:` line, however a model decorated it; not a
 /// line that merely starts with the word, like "Status quo: ...".
 fn status_value(line: &str) -> Option<&str> {
+    labelled(line, "status")
+}
+
+/// The value of a line `<label>: value`, however a model decorated it.
+pub fn labelled<'a>(line: &'a str, label: &str) -> Option<&'a str> {
     let plain = line.trim().trim_start_matches('#').trim().trim_matches('*').trim();
-    let rest = plain.get(..6).filter(|w| w.eq_ignore_ascii_case("status")).map(|_| &plain[6..])?;
+    let n = label.len();
+    let rest = plain.get(..n).filter(|w| w.eq_ignore_ascii_case(label)).map(|_| &plain[n..])?;
     let rest = rest.trim_start_matches(['*', '_']).trim_start();
     Some(rest.strip_prefix(':')?.trim().trim_matches('*').trim())
 }

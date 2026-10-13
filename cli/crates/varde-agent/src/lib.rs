@@ -46,6 +46,10 @@ pub trait Agent {
     /// own: the run then takes the id of the first event that claims it.
     fn new_native_id(&self) -> Option<String>;
 
+    /// The program that runs the agent: its own name, unless
+    /// `$VARDE_<AGENT>` names another.
+    fn program(&self) -> String;
+
     /// The command line and extra environment that start a run.
     fn launch(&self, how: Launch) -> (Vec<String>, Vec<(String, String)>);
 

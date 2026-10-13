@@ -4,22 +4,29 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::Stylize;
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use ratatui::widgets::{Block, BorderType, Clear, Padding, Paragraph, Wrap};
 use ratatui::Frame;
 
+use serde_json::{json, Value};
 use varde_core::title::clean;
 
 use super::draw::left_clip;
+use super::field::{Field, Words};
 
 /// A new task being written: a short title, and as much context as it
 /// needs. Or a task already made, its title and context being changed.
-#[derive(Default)]
+#[derive(Default, Clone)]
 pub(super) struct Draft {
-    pub(super) title: String,
-    pub(super) body: String,
+    pub(super) title: Field,
+    pub(super) body: Field,
     pub(super) in_body: bool,
     /// The task this changes; a new one when `None`.
     pub(super) task: Option<String>,
+    /// C-x was pressed: C-e next opens the editor, as in a shell.
+    pub(super) prefix: bool,
+    /// Taken up again from where it was put away: emptied, Esc says it
+    /// is dropped.
+    pub(super) restored: bool,
 }
 
 pub(super) enum Edit {
@@ -34,29 +41,66 @@ pub(super) enum Edit {
 const HINT: &str = "#: ";
 
 impl Draft {
-    /// Tab moves between title and body. Enter creates from the title and
-    /// starts a new line in the body; Ctrl-S creates from either, and
-    /// Ctrl-G opens the draft in `$EDITOR`. Ctrl-W and Alt-Backspace rub
-    /// out a word, Ctrl-U the line.
+    /// A task's title and context, to change.
+    pub(super) fn of(task: &str, title: &str, body: &str) -> Draft {
+        Draft {
+            title: Field::new(title),
+            body: Field::new(body),
+            task: Some(task.to_string()),
+            ..Draft::default()
+        }
+    }
+
+    /// Whether anything has been typed.
+    pub(super) fn is_empty(&self) -> bool {
+        self.title.text().trim().is_empty() && self.body.text().trim().is_empty()
+    }
+
+    /// The draft as the drafts file keeps it.
+    pub(super) fn json(&self) -> Value {
+        let target = if self.task.is_some() { "edit task" } else { "new task" };
+        json!({ "task": self.task, "target": target, "title": self.title.text(), "text": self.body.text() })
+    }
+
+    /// A draft [`json`](Self::json) wrote; `None` for another kind.
+    pub(super) fn of_json(d: &Value) -> Option<Draft> {
+        let task = match d["target"].as_str()? {
+            "new task" => None,
+            "edit task" => Some(d["task"].as_str()?.to_string()),
+            _ => return None,
+        };
+        let (title, body) = (d["title"].as_str()?, d["text"].as_str()?);
+        let mut draft = Draft { task, ..Draft::of("", title, body) };
+        draft.in_body = !body.is_empty();
+        Some(draft)
+    }
+
+    /// Tab, or Down and Up across the rule, move between title and body.
+    /// Enter creates from the title and starts a new line in the body;
+    /// C-s creates from either. Esc and C-g put the form away, and C-x C-e
+    /// or Alt-e opens the draft in `$EDITOR`. The rest edits the text as
+    /// every prompt of the board does.
     pub(super) fn key(&mut self, key: KeyEvent) -> Edit {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
-        let field = if self.in_body { &mut self.body } else { &mut self.title };
+        if std::mem::take(&mut self.prefix) && ctrl && key.code == KeyCode::Char('e') {
+            return Edit::Editor;
+        }
         match key.code {
             KeyCode::Esc => return Edit::Cancel,
+            KeyCode::Char('g') if ctrl => return Edit::Cancel,
             KeyCode::Char('s') if ctrl => return Edit::Create,
-            KeyCode::Char('g') if ctrl => return Edit::Editor,
+            KeyCode::Char('x') if ctrl => self.prefix = true,
+            KeyCode::Char('e') if alt => return Edit::Editor,
             KeyCode::Enter if !self.in_body => return Edit::Create,
-            KeyCode::Enter => field.push('\n'),
+            KeyCode::Enter => self.body.insert("\n"),
             KeyCode::Tab | KeyCode::BackTab => self.in_body = !self.in_body,
-            KeyCode::Char('w') if ctrl => rub_word(field),
-            KeyCode::Backspace if alt || ctrl => rub_word(field),
-            KeyCode::Char('u') if ctrl => field.truncate(field.rfind('\n').map_or(0, |i| i + 1)),
-            KeyCode::Backspace => {
-                field.pop();
+            KeyCode::Down if !self.in_body => self.in_body = true,
+            KeyCode::Up if self.in_body && self.body.on_first_line() => self.in_body = false,
+            _ => {
+                let field = if self.in_body { &mut self.body } else { &mut self.title };
+                field.key(key, Words::Prose);
             }
-            KeyCode::Char(c) if !ctrl => field.push(c),
-            _ => {}
         }
         Edit::Typing
     }
@@ -66,16 +110,15 @@ impl Draft {
     pub(super) fn paste(&mut self, text: &str) {
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
         if self.in_body {
-            self.body.push_str(&text);
+            self.body.insert(&text);
             return;
         }
         let (first, rest) = text.split_once('\n').unwrap_or((&text, ""));
-        self.title.push_str(first);
+        self.title.insert(first);
         if !rest.trim().is_empty() {
-            if !self.body.is_empty() && !self.body.ends_with('\n') {
-                self.body.push('\n');
-            }
-            self.body.push_str(rest);
+            let body = self.body.text();
+            let gap = if !body.is_empty() && !body.ends_with('\n') { "\n" } else { "" };
+            self.body.set(&format!("{body}{gap}{rest}"));
             self.in_body = true;
         }
     }
@@ -88,7 +131,7 @@ impl Draft {
             "Lines starting with \"#:\" are left out. Save and quit to go back to the form.",
         ];
         let hint: String = hint.iter().map(|l| format!("{HINT}{l}\n")).collect();
-        format!("{hint}{}\n\n{}\n", self.title, self.body.trim_end())
+        format!("{hint}{}\n\n{}\n", self.title.text(), self.body.text().trim_end())
     }
 
     /// Take back the draft as [`text`](Self::text) wrote it.
@@ -96,56 +139,50 @@ impl Draft {
         let text: String = text.split_inclusive('\n').filter(|l| !l.starts_with(HINT)).collect();
         let text = text.trim_start();
         let (title, body) = text.split_once('\n').unwrap_or((text, ""));
-        self.title = title.trim().to_string();
-        self.body = body.trim().to_string();
-        self.in_body = !self.body.is_empty();
+        self.title.set(title.trim());
+        self.body.set(body.trim());
+        self.in_body = !self.body.text().is_empty();
     }
 }
 
-/// Rub out the word before the end of `s`, and the blanks after it; at
-/// the start of a line, the line break.
-fn rub_word(s: &mut String) {
-    let kept = s.trim_end_matches([' ', '\t']).trim_end_matches(|c: char| !c.is_whitespace()).len();
-    if kept < s.len() {
-        s.truncate(kept);
-    } else {
-        s.pop();
-    }
-}
-
-/// The new-task form, over the bottom of the board. The title stays put
-/// and the body scrolls to keep its end, where you type, in view.
+/// The new-task form, over the bottom of the board, a pane as the view
+/// is. The title stays put and the body scrolls to keep the cursor in
+/// view.
 pub(super) fn draw_draft(f: &mut Frame, draft: &Draft, area: Rect) {
-    let width = area.width.saturating_sub(2).max(1) as usize;
-    let rows: usize = draft.body.split('\n').map(|l| l.chars().count() / width + 1).sum();
+    let width = area.width.saturating_sub(4).max(1) as usize;
+    let body = draft.body.text();
+    let rows: usize = body.split('\n').map(|l| l.chars().count() / width + 1).sum();
     // Six rows where the screen has them; a smaller one gets all it has.
     let height = (rows + 4).max(6).min(area.height as usize) as u16;
     let area = Rect { y: area.bottom() - height, height, ..area };
     let name = if draft.task.is_some() { " Edit task " } else { " New task " };
-    let block = Block::default().title(name).borders(Borders::ALL);
-    let [title, rule, body] =
+    let block =
+        Block::bordered().border_type(BorderType::Rounded).padding(Padding::horizontal(1)).title(name);
+    let [title, rule, body_area] =
         Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)])
             .areas(block.inner(area));
     f.render_widget(Clear, area);
     f.render_widget(block, area);
 
-    let cursor = |on: bool| if on { "▏" } else { "" };
-    // A title wider than the box shows its end, where the typing is.
-    let shown = left_clip(&clean(&draft.title), width.saturating_sub(8));
-    let line = Line::from(vec!["Title: ".bold(), Span::raw(shown), cursor(!draft.in_body).into()]);
-    f.render_widget(Paragraph::new(line), title);
+    let mut line = vec!["Title: ".bold()];
+    if draft.in_body {
+        line.push(Span::raw(left_clip(&clean(draft.title.text()), width.saturating_sub(8))));
+    } else {
+        line.extend(draft.title.line_spans(width.saturating_sub(8)));
+    }
+    f.render_widget(Paragraph::new(Line::from(line)), title);
     f.render_widget(Paragraph::new("─".repeat(width).dark_gray()), rule);
 
-    if draft.body.is_empty() && !draft.in_body {
-        f.render_widget(Paragraph::new("Tab to add context for the agent".dark_gray()), body);
+    if body.is_empty() && !draft.in_body {
+        f.render_widget(Paragraph::new("Tab to add context for the agent".dark_gray()), body_area);
         return;
     }
-    let mut lines: Vec<Line> = draft.body.split('\n').map(|l| Line::from(clean(l))).collect();
-    if let Some(last) = lines.last_mut().filter(|_| draft.in_body) {
-        last.push_span(cursor(true));
-    }
-    let scroll = rows.saturating_sub(body.height as usize) as u16;
-    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((scroll, 0)), body);
+    // The cursor's row, as wrapped, kept in view.
+    let before = &body[..draft.body.cursor()];
+    let at: usize = before.split('\n').map(|l| l.chars().count() / width + 1).sum::<usize>() - 1;
+    let scroll = (at + 1).saturating_sub(body_area.height as usize) as u16;
+    let lines = draft.body.lines(draft.in_body);
+    f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((scroll, 0)), body_area);
 }
 
 #[cfg(test)]
@@ -172,10 +209,10 @@ mod tests {
         assert!(matches!(press(&mut d, KeyCode::Enter), Edit::Typing));
         typed(&mut d, "line two");
         press(&mut d, KeyCode::Backspace);
-        assert_eq!(d.title, "Short title");
-        assert_eq!(d.body, "line one\nline tw");
+        assert_eq!(d.title.text(), "Short title");
+        assert_eq!(d.body.text(), "line one\nline tw");
         assert!(matches!(d.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)), Edit::Create));
-        assert_eq!(d.body, "line one\nline tw", "Ctrl-S is not typed");
+        assert_eq!(d.body.text(), "line one\nline tw", "Ctrl-S is not typed");
     }
 
     #[test]
@@ -195,47 +232,51 @@ mod tests {
         let mut d = Draft::default();
         typed(&mut d, "Fix the  login");
         d.key(ctrl('w'));
-        assert_eq!(d.title, "Fix the  ");
+        assert_eq!(d.title.text(), "Fix the  ");
         d.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
-        assert_eq!(d.title, "Fix ");
+        assert_eq!(d.title.text(), "Fix ");
         press(&mut d, KeyCode::Tab);
         typed(&mut d, "one");
         press(&mut d, KeyCode::Enter);
         typed(&mut d, "two words");
         d.key(ctrl('u'));
-        assert_eq!(d.body, "one\n");
+        assert_eq!(d.body.text(), "one\n");
         d.key(ctrl('w'));
-        assert_eq!(d.body, "one", "at a line's start, the line break goes");
+        assert_eq!(d.body.text(), "one", "at a line's start, the line break goes");
         d.key(ctrl('u'));
-        assert_eq!(d.body, "");
-        assert!(matches!(d.key(ctrl('g')), Edit::Editor));
+        assert_eq!(d.body.text(), "");
+        assert!(matches!(d.key(ctrl('g')), Edit::Cancel), "C-g puts it away, as everywhere");
+        assert!(matches!(d.key(ctrl('x')), Edit::Typing));
+        assert!(matches!(d.key(ctrl('e')), Edit::Editor), "C-x C-e, as in a shell");
+        assert!(matches!(d.key(KeyEvent::new(KeyCode::Char('e'), KeyModifiers::ALT)), Edit::Editor));
     }
 
     #[test]
     fn a_draft_goes_to_the_editor_and_comes_back() {
-        let mut d =
-            Draft { title: "Fix the login".into(), body: "It fails.\n".into(), in_body: false, task: None };
+        let mut d = Draft::default();
+        d.title.set("Fix the login");
+        d.body.set("It fails.\n");
         let text = d.text();
         assert!(text.starts_with(HINT), "{text}");
         assert!(text.ends_with("Fix the login\n\nIt fails.\n"), "{text}");
         d.set_text(&format!("{text}\n    indented()\n\n"));
-        assert_eq!(d.title, "Fix the login");
-        assert_eq!(d.body, "It fails.\n\n    indented()");
+        assert_eq!(d.title.text(), "Fix the login");
+        assert_eq!(d.body.text(), "It fails.\n\n    indented()");
         assert!(d.in_body);
         // Only a title, and no blank line after it.
         d.set_text("#: hint\n\nJust a title\n");
-        assert_eq!((d.title.as_str(), d.body.as_str(), d.in_body), ("Just a title", "", false));
+        assert_eq!((d.title.text(), d.body.text(), d.in_body), ("Just a title", "", false));
     }
 
     #[test]
     fn a_paste_into_the_title_puts_its_other_lines_in_the_body() {
         let mut d = Draft::default();
         d.paste("Fix the login\r\nIt fails on Safari.\r\nSee the log.");
-        assert_eq!(d.title, "Fix the login");
-        assert_eq!(d.body, "It fails on Safari.\nSee the log.");
+        assert_eq!(d.title.text(), "Fix the login");
+        assert_eq!(d.body.text(), "It fails on Safari.\nSee the log.");
         assert!(d.in_body);
         d.paste("\nqdpx");
-        assert_eq!(d.body, "It fails on Safari.\nSee the log.\nqdpx", "typed, never run");
+        assert_eq!(d.body.text(), "It fails on Safari.\nSee the log.\nqdpx", "typed, never run");
     }
 
     #[test]
@@ -244,12 +285,12 @@ mod tests {
         typed(&mut d, "Board git status");
         let screen = |d: &Draft| render(40, 12, |f| draw_draft(f, d, f.area()));
         let s = screen(&d);
-        assert!(s.contains("Title: Board git status▏"), "{s}");
+        assert!(s.contains("Title: Board git status "), "{s}");
         // Past the box's width, the title scrolls to keep the typing in view.
         let mut long = Draft::default();
         typed(&mut long, "A title far longer than this narrow box ends here");
         let s = screen(&long);
-        assert!(s.contains("Title: …") && s.contains("box ends here▏"), "{s}");
+        assert!(s.contains("Title: …") && s.contains("box ends here"), "{s}");
         assert!(s.contains("Tab to add context"), "{s}");
         press(&mut d, KeyCode::Tab);
         for i in 0..15 {
@@ -259,6 +300,17 @@ mod tests {
         typed(&mut d, "the end");
         let s = screen(&d);
         assert!(s.contains("Title: Board git status"), "the title stays:\n{s}");
-        assert!(s.contains("the end▏"), "the cursor stays in view:\n{s}");
+        assert!(s.contains("the end"), "the cursor stays in view:\n{s}");
+        // Up to the middle, and the cursor's line is still in view.
+        for _ in 0..8 {
+            press(&mut d, KeyCode::Up);
+        }
+        press(&mut d, KeyCode::Home);
+        typed(&mut d, ">");
+        assert!(screen(&d).contains(">line 7"), "{}", screen(&d));
+        for _ in 0..8 {
+            press(&mut d, KeyCode::Up);
+        }
+        assert!(!d.in_body, "Up from the first line goes to the title");
     }
 }

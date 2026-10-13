@@ -9,7 +9,7 @@ use serde_json::{json, Value};
 use varde_core::store::Store;
 use varde_core::{memory, project, task};
 
-use crate::{git, now_ms, Paths};
+use crate::{cairn_view, git, now_ms, Paths};
 
 const BUSY: Duration = Duration::from_secs(2);
 
@@ -24,8 +24,13 @@ pub fn new(
 ) -> Result<()> {
     let store = paths.open(BUSY)?;
     let body = crate::arg_or_stdin(body)?.map(|b| b.trim().to_string()).filter(|b| !b.is_empty());
+    if body.is_none() && varde_core::title::clean(&title.join(" ")).trim().is_empty() {
+        bail!("a task needs a title, or --context TEXT to cut one from");
+    }
     let id = match from {
         Some(run) => {
+            // By its id, or the six characters a session is told.
+            let run = crate::memory_cmd::resolve_run(&store.conn, &run)?;
             let root = project_dir.map(|d| crate::start::project_of(&store, &d)).transpose()?;
             let root = root.map(|r| r.display().to_string());
             task::defer(&store, &title.join(" "), body.as_deref(), &run, root.as_deref(), now_ms())?
@@ -45,6 +50,7 @@ pub fn new(
             )?
         }
     };
+    crate::naming::start(&store, &id);
     if as_json {
         println!("{}", json!({"v": 1, "id": id, "short": task::short(&id)}));
     } else if unsafe { libc::isatty(1) } == 1 {
@@ -71,13 +77,28 @@ pub fn set(
     // nothing starts the task between the checks and the move.
     let tx = Transaction::new_unchecked(&store.conn, TransactionBehavior::Immediate)?;
     let to = project_dir.map(|d| moving(&store, &id, &d)).transpose()?.flatten();
-    task::set(&store, &id, title.as_deref(), body.as_deref())?;
+    let set = task::set(&store, &id, title.as_deref(), body.as_deref())?;
     if let Some(to) = &to {
         task::set_project(&store, &id, to)?;
     }
     tx.commit()?;
-    if let Some(to) = to {
-        println!("moved {} to {to}", task::short(&id));
+    if set.title {
+        crate::naming::start(&store, &id);
+    }
+    // What changed, and nothing when nothing did: clients send the
+    // title and context before every start.
+    let short = task::short(&id);
+    let what = match (set.title, set.body) {
+        (true, true) => Some("title and context"),
+        (true, false) => Some("title"),
+        (false, true) => Some("context"),
+        (false, false) => None,
+    };
+    match (to, what) {
+        (Some(to), Some(what)) => println!("moved {short} to {to}; {what} changed"),
+        (Some(to), None) => println!("moved {short} to {to}"),
+        (None, Some(what)) => println!("{short}: {what} changed"),
+        (None, None) => {}
     }
     Ok(())
 }
@@ -148,15 +169,25 @@ pub fn accept(paths: &Paths, references: &[String]) -> Result<()> {
     let store = paths.open(BUSY)?;
     // Every reference is checked before any task moves.
     let ids = references.iter().map(|r| task::resolve(&store, r)).collect::<Result<Vec<_>>>()?;
+    let mut outside = Vec::new();
     for id in ids {
         let inbox: bool =
             store.conn.query_row("SELECT inbox FROM task WHERE id = ?1", [&id], |r| r.get(0))?;
-        task::accept(&store, &id)?;
         if inbox {
+            task::accept(&store, &id)?;
             println!("accepted {}", task::short(&id));
         } else {
-            println!("{} was not in the Inbox", task::short(&id));
+            outside.push(task::short(&id));
         }
+    }
+    // Named alone, a task not in the Inbox is a mistake, as on the board.
+    match outside.as_slice() {
+        [] => {}
+        [one] if references.len() == 1 => bail!("{one} is not in the Inbox: accept is for Inbox tasks"),
+        _ if outside.len() == references.len() => {
+            bail!("none of them is in the Inbox: accept is for Inbox tasks")
+        }
+        _ => println!("not in the Inbox, so left as they are: {}", outside.join(", ")),
     }
     Ok(())
 }
@@ -178,6 +209,7 @@ pub fn show(paths: &Paths, reference: &str, history: bool, with_git: bool, as_js
     let id = task::resolve(&store, reference)?;
     let d = task::detail(&store, &id, &crate::process::alive)?;
     let cairn = memory::cairn(&store.conn, &id)?.map(|(c, _)| c);
+    let usage = memory::usage(&store.conn, memory::Owner::Task(&id))?;
     let notes: Vec<String> = memory::pending_notes(&store.conn, &id)?.into_iter().map(|(_, t)| t).collect();
     let versions = if history { memory::history(&store.conn, &id)? } else { Vec::new() };
     // A conversation left by `/clear` or `/resume` has ended while its
@@ -204,8 +236,12 @@ pub fn show(paths: &Paths, reference: &str, history: bool, with_git: bool, as_js
     let facts = if with_git { git_facts(&d) } else { None };
     if as_json {
         let mut v = serde_json::to_value(&d)?;
+        // `body` is the old name, kept for v2 clients.
+        v["context"] = v["body"].clone();
         v["cairn"] = serde_json::to_value(&cairn)?;
+        v["usage"] = serde_json::to_value(&usage)?;
         v["notes"] = json!(notes);
+        v["limits"] = varde_core::cairn::Shape::Task.limits();
         if with_git {
             v["git"] = facts.as_ref().map_or(Value::Null, git::Facts::to_json);
         }
@@ -215,75 +251,156 @@ pub fn show(paths: &Paths, reference: &str, history: bool, with_git: bool, as_js
         println!("{v}");
         return Ok(());
     }
-    println!("{}  {}", d.short, d.title);
-    println!("  state    {}{}", d.state, if d.inbox { " (inbox)" } else { "" });
-    if let Some(p) = &d.project {
-        println!("  project  {p}");
-    }
-    if let Some(e) = &d.external {
-        println!("  linked   {e}");
-    }
-    if let Some(o) = &d.origin {
-        println!("  from     {}", task::short(o));
-    }
-    if let Some(w) = &d.worktree {
-        println!("  worktree {} [{} from {}] {}", w.path, w.branch, w.base, w.state);
-    }
-    if let Some(f) = &facts {
-        println!("  git      {}", describe_git(f));
-        if let Some(p) = &f.pr {
-            let draft = if p.draft { " draft" } else { "" };
-            let checks = p.checks.map(|c| format!(", checks {c}")).unwrap_or_default();
-            println!("  pr       #{} {}{draft}{checks}  {}", p.number, p.state, p.url);
-        }
-    }
-    if let Some(b) = &d.body {
-        println!();
-        for line in b.lines() {
-            println!("  {line}");
-        }
-    }
-    if let Some(c) = &cairn {
-        println!("\ncairn");
-        for line in c.display().lines() {
-            println!("  {line}");
-        }
-    }
-    if !notes.is_empty() {
-        println!(
-            "\n{}",
-            if crate::config::get().memory.enabled {
-                "notes, for the next cairn update"
-            } else {
-                "notes (cairn updates are off)"
-            }
-        );
-        for n in &notes {
-            println!("  - {n}");
+    let git = facts.as_ref().map(describe_git);
+    let pr = facts.as_ref().and_then(|f| f.pr.as_ref()).map(|p| {
+        let draft = if p.draft { " draft" } else { "" };
+        let checks = p.checks.map(|c| format!(", checks {c}")).unwrap_or_default();
+        format!("#{} {}{draft}{checks}  {}", p.number, p.state, p.url)
+    });
+    let view = View { git, pr, moved, sessions: usize::MAX };
+    let add = format!("varde edit {} --add findings TEXT adds a line now", d.short);
+    let block =
+        cairn_view::lines(cairn_view::Whose::Task, cairn.as_ref(), &usage, &notes, &add, false, now_ms());
+    for (kind, line) in view.lines(&d, cairn_view::text(&block), now_ms()) {
+        match kind {
+            Part::Heading => println!("\n{line}"),
+            _ => println!("{line}"),
         }
     }
     crate::print_history(&versions);
-    if !d.runs.is_empty() {
-        println!("\nruns");
-        for r in &d.runs {
-            println!(
-                "  {}  {:<6} {:<8} {:<8} {}{}",
-                task::short(&r.id),
-                r.relation,
-                r.launch,
-                if r.launched { r.status.unwrap_or("-") } else { "never launched" },
-                r.cwd.as_deref().unwrap_or(""),
-                if r.held_out { "  (held out of memory)" } else { "" }
-            );
-            if let Some(why) = describe_why(&r.why, now_ms()) {
-                match moved.iter().find(|(run, _)| *run == r.id) {
-                    Some((_, to)) => println!("          {why}; {to}"),
-                    None => println!("          {why}"),
-                }
+    Ok(())
+}
+
+/// What a line of a task's view is, for whoever styles it.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Part {
+    Title,
+    /// Where it stands, its project and worktree: one line each.
+    Fact,
+    /// A section's name.
+    Heading,
+    Text,
+    /// What only matters when something looks wrong.
+    Quiet,
+}
+
+/// What a task's view shows besides the task itself: its git status,
+/// its PR, where moved sessions went, and how many sessions to list.
+pub struct View {
+    pub git: Option<String>,
+    pub pr: Option<String>,
+    pub moved: Vec<(String, String)>,
+    pub sessions: usize,
+}
+
+impl View {
+    /// The task as `varde show` prints it: what it is and where it
+    /// stands, its `cairn`'s lines, the context it was given, then its
+    /// sessions, newest first.
+    pub fn lines(&self, d: &task::Detail, cairn: Vec<(Part, String)>, now: i64) -> Vec<(Part, String)> {
+        let mut out = vec![(Part::Title, d.title.clone())];
+        out.extend(self.facts(d));
+        out.extend(cairn);
+        out.extend(self.rest(d, now));
+        out
+    }
+
+    /// Where the task stands, its project and worktree: one line each.
+    pub fn facts(&self, d: &task::Detail) -> Vec<(Part, String)> {
+        let mut out = Vec::new();
+        let live = d.runs.last().and_then(|r| r.status).and_then(crate::look::word);
+        let mut facts = vec![d.short.clone(), live.map_or(d.state.clone(), |(w, _)| w.to_string())];
+        if d.inbox {
+            facts.push("in the Inbox".into());
+        }
+        if let Some(p) = &d.project {
+            facts.push(format!("{} ({})", crate::list::project_name(Some(p)), tilde(p)));
+        }
+        if let Some(o) = &d.origin {
+            facts.push(format!("deferred from {}", task::short(o)));
+        }
+        if let Some(e) = &d.external {
+            facts.push(format!("linked to {e}"));
+        }
+        out.push((Part::Fact, facts.join(" · ")));
+        if let Some(p) = &d.prompt_title {
+            out.push((Part::Quiet, format!("named by the model; first titled: {p}")));
+        }
+        if let Some(w) = d.worktree.as_ref().filter(|w| w.state == "active") {
+            out.push((Part::Fact, format!("worktree {} on {} from {}", tilde(&w.path), w.branch, w.base)));
+        }
+        if let Some(g) = &self.git {
+            out.push((Part::Fact, format!("git {g}")));
+        }
+        if let Some(p) = &self.pr {
+            out.push((Part::Fact, format!("PR {p}")));
+        }
+        out
+    }
+
+    /// What follows the cairn: the context the task was given, then its
+    /// sessions, newest first.
+    pub fn rest(&self, d: &task::Detail, now: i64) -> Vec<(Part, String)> {
+        let mut out = Vec::new();
+        if let Some(b) = d.body.as_deref().filter(|b| !b.trim().is_empty()) {
+            out.push((Part::Heading, "Context".into()));
+            out.extend(b.lines().map(|l| (Part::Text, format!("  {l}"))));
+        }
+        let runs: Vec<&task::RunDetail> = d.runs.iter().rev().collect();
+        if !runs.is_empty() {
+            out.push((Part::Heading, "Sessions".into()));
+        }
+        for r in runs.iter().take(self.sessions) {
+            let status = match r.status {
+                _ if !r.launched => "not launched yet",
+                Some(s) => crate::look::word(s).map_or(if s == "exited" { "ended" } else { s }, |(w, _)| w),
+                None => "starting",
+            };
+            let held = if r.held_out { " · held out of memory" } else { "" };
+            out.push((
+                Part::Text,
+                format!(
+                    "  {}  {status} · {} {}{}{held}",
+                    task::short(&r.id),
+                    match r.relation.as_str() {
+                        "resume" => "resumed",
+                        "fork" => "forked",
+                        _ => "started",
+                    },
+                    clock(r.started, now),
+                    // Where it ran, when that is not where the task is.
+                    r.cwd
+                        .as_deref()
+                        .filter(|c| Some(*c) != d.project.as_deref()
+                            && Some(*c) != d.worktree.as_ref().map(|w| w.path.as_str()))
+                        .map(|c| format!(" · in {}", tilde(c)))
+                        .unwrap_or_default()
+                ),
+            ));
+            if let Some(why) = describe_why(&r.why, now) {
+                let moved = self.moved.iter().find(|(run, _)| *run == r.id).map(|(_, to)| format!("; {to}"));
+                out.push((Part::Quiet, format!("          {why}{}", moved.unwrap_or_default())));
             }
         }
+        if runs.len() > self.sessions {
+            out.push((
+                Part::Quiet,
+                format!("  and {} earlier: varde show {}", runs.len() - self.sessions, d.short),
+            ));
+        }
+        out
     }
-    Ok(())
+}
+
+/// `path` with the home directory as `~`.
+pub fn tilde(path: &str) -> String {
+    use std::path::{Path, PathBuf};
+    let home = std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute() && h != Path::new("/"));
+    match home.and_then(|h| Path::new(path).strip_prefix(h).ok().map(Path::to_path_buf)) {
+        Some(rest) if rest.as_os_str().is_empty() => "~".into(),
+        Some(rest) => format!("~/{}", rest.display()),
+        None => path.to_string(),
+    }
 }
 
 /// Someone looked at the task's sessions: what they finished is read.
@@ -297,19 +414,31 @@ pub fn seen(paths: &Paths, reference: &str) -> Result<()> {
 /// `turn_end at 14:03:12, seen 14:05:40, process gone`: the facts a run's
 /// status was derived from. `None` before its first status event.
 pub fn describe_why(why: &varde_core::store::Why, now: i64) -> Option<String> {
-    let mut parts = vec![format!("{} at {}", why.event.as_deref()?, clock(why.at?, now))];
+    let event = why.event.as_deref()?;
+    let said = match event {
+        "prompt" => "prompted",
+        "turn_end" => "turn ended",
+        "delegated" => "turn ended, sub-agents at work",
+        "blocked" => "asked for input",
+        "unblocked" => "input given",
+        other => other,
+    };
+    let mut parts = vec![format!("{said} {}", clock(why.at?, now))];
     if let Some(t) = why.idle_at {
-        parts.push(format!("idle at {}", clock(t, now)));
+        parts.push(format!("idle {}", clock(t, now)));
     }
     if let Some(t) = why.seen_at {
-        parts.push(format!("seen at {}", clock(t, now)));
+        parts.push(format!("seen {}", clock(t, now)));
     }
+    // An ended conversation's process is gone, or has gone on to another
+    // conversation: either way, nothing more to say of it here.
     match why.alive {
-        Some(true) => parts.push("process running".into()),
+        _ if event == "ended" => {}
+        Some(true) => parts.push("running".into()),
         Some(false) => parts.push("process gone".into()),
         None => {}
     }
-    Some(parts.join(", "))
+    Some(parts.join(" · "))
 }
 
 /// The time of day for today, else the date too.
@@ -341,7 +470,7 @@ fn git_facts(d: &task::Detail) -> Option<git::Facts> {
 fn describe_git(f: &git::Facts) -> String {
     let mut parts = vec![];
     if f.shared {
-        parts.push(format!("{} (shared checkout)", f.branch));
+        parts.push(format!("on {}, shared with other tasks", f.branch));
     }
     if let Some(t) = &f.target {
         parts.push(format!("{} ahead, {} behind {t}", f.ahead, f.behind));
@@ -356,5 +485,8 @@ fn describe_git(f: &git::Facts) -> String {
             Some(n) => parts.push(format!("{n} unpushed")),
         }
     }
-    format!("{}: {}", f.stage(), parts.join(", "))
+    if parts.is_empty() {
+        return f.stage().to_string();
+    }
+    format!("{} · {}", f.stage(), parts.join(", "))
 }

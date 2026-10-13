@@ -40,27 +40,31 @@ the contract. What org-varde does beyond it is Emacs's own business.
 | Command | Returns |
 |---|---|
 | `varde list --json [--all] [--project [DIR]]` | The board: groups, already ordered and labelled. `--all` adds old done tasks and a Dropped group. `--project` keeps only the rows of the project DIR (default: here) is in. |
-| `varde new --json [--project DIR] [--body -] [--external REF] -- TITLE` | `{"id", "short"}` of the new task. `--body -` reads it from stdin. |
-| `varde set TASK [--title=T] [--body -] [--project DIR]` | Refreshes the title or body from where the client keeps them. `--project` moves the task to the project DIR is in (its repository root, as `new` takes it) and prints `moved <short> to <project>`; already there, it does nothing and prints nothing. A move is refused (exit 1, nothing changed, the title and body included) while the task has an active worktree or a live session, which belong to the old checkout; show the message. Past runs keep their directories and the cairn stays with the task; the next start is a fresh conversation in the new project, given that project's cairn. |
-| `varde accept TASK…` | Moves Inbox tasks into Open. |
+| `varde new --json [--project DIR] [--context -] [--external REF] -- TITLE` | `{"id", "short"}` of the new task. `--context -` reads its context (the task's `body`) from stdin. `--body` is a hidden alias of `--context`, kept for clients written against 1.0; org-varde still passes it. With no TITLE (nothing after `--`), the title is cut from the context's first words and a model, started detached, names the task, as an ad-hoc session's: the next `list --json` shows the new title; with neither, it exits 1 (`a task needs a title, or --context TEXT to cut one from`). |
+| `varde set TASK [--title=T] [--context -] [--project DIR]` | Refreshes the title or context (`body`) from where the client keeps them (`--body` works too, as for `new`), and says what changed: `<short>: title and context changed` (or `title changed`, `context changed`); the same text again changes nothing and prints nothing. A title changed this way is the user's: no model names the task after it. An empty `--title=` cuts the title from the context again, and a model names the task once more. `--project` moves the task to the project DIR is in (its repository root, as `new` takes it) and prints `moved <short> to <project>` (followed by `; title changed` and the like when the text changed too); already there, it does nothing and prints nothing. A move is refused (exit 1, nothing changed, the title and body included) while the task has an active worktree or a live session, which belong to the old checkout; show the message. Past runs keep their directories and the cairn stays with the task; the next start is a fresh conversation in the new project, given that project's cairn. |
+| `varde accept TASK…` | Moves Inbox tasks into Open, printing `accepted <short>` for each. When none of the tasks named is in the Inbox it exits 1 (`<short> is not in the Inbox: accept is for Inbox tasks`, or for several `none of them is in the Inbox: …`); beside ones that are, the others are named on a last line (`not in the Inbox, so left as they are: …`). |
 | `varde link TASK SOURCE`, `varde unlink TASK` | Records or forgets where the task lives in your client. Linking takes the task out of the Inbox. |
-| `varde drop TASK [--json]` | Throws a task away. Work in its worktree is kept under `refs/varde/discarded/`, and starting the task again brings it back. |
-| `varde show TASK --json [--no-git]` | The task, its cairn, its runs, its worktree and its git status. `--no-git` skips git and `gh`, which can take a second. |
+| `varde drop TASK [--json]` | Drops a task. Work in its worktree is kept under `refs/varde/discarded/`, and starting the task again brings it back. |
+| `varde show TASK --json [--no-git]` | The task, its cairn, its runs, its worktree and its git status. `--no-git` skips git and `gh`, which can take a second. `prompt_title`, present only on a task a model has named, is the title varde cut from its first prompt or context (or the agent wrote, for deferred work). |
+| `varde agent --json` | `{"v": 1, "agent", "command"}`: the agent a new conversation uses (`$VARDE_AGENT`, else `agent` in the config, else `claude`) and the argv that runs it (`$VARDE_CLAUDE` or `$VARDE_PI`, else `[agents.NAME] command`, else its name). Run `command` in a terminal for a session of the user's own, which becomes an Inbox task on its first prompt; never hardcode `claude`. Exit 1 for an agent varde does not know. Without `--json`, the command line, quoted for a shell. |
 | `varde start TASK --json [--fresh\|--fork] [--worktree always\|never] [--project DIR] [--context-file F] [--agent A]` | A plan: see below. |
 | `varde done TASK --json [--remove [--force]] [--keep-running]` | What happened to the worktree and which sessions were stopped. |
 | `varde park TASK --json [--keep-running]` | Which sessions were stopped. |
 | `varde reopen TASK` | Back to Open from done, parked or dropped, without starting. |
-| `varde edit TASK --print` | The cairn as text to edit. |
+| `varde edit TASK --add SECTION TEXT… [--json]` | Adds a line to the cairn, as the user's: `findings`, `decisions` or `open`; `status` replaces the Status. See below. |
+| `varde edit TASK --set ID TEXT… [--json]`, `--rm ID`, `--restore ID` | Changes the line with that id, removes it, or brings back one removed with `--rm`. `--rm status` hands a Status the user set back to the updates. |
+| `varde edit TASK --print` | The cairn as text to edit, for bulk changes. |
 | `varde edit TASK --stdin` | Saves an edited cairn. Prints `saved` or `unchanged`. Text without the cairn's shape is refused (exit 1, nothing saved). |
-| `varde show --project [DIR] --json` | The cairn of the project DIR (default: the current directory) is in: `{"v": 1, "project", "version", "cairn"}`, `cairn` being `null` before there is any (see below). |
-| `varde edit --project [DIR] --print`, `--stdin` | The project cairn as text, and back, as for a task's. |
-| `varde recall --json [--all] WORDS…` | Search hits over cairns, former bullets, notes and project cairns, one per task (or project), best first: `{"v": 1, "everywhere", "hits": [{"task", "short", "title", "project", "status", "snippet", "kind", "ref", "score", "state", "stale"}]}`. `snippet` is the text that matched, a bullet or note before the title whenever one matched; `kind` says what it is (`findings`, `decisions`, `open`, `history` for a bullet that has left its cairn, `notes`, `title`, or `id` for a task named by its id, whose `snippet` is its Status); `ref` is the bullet's or note's id, as a string; `state` is the task's (`open`, `done`, `parked`, `dropped`; absent for a project cairn); `stale: true` (absent otherwise) marks a bullet whose code is gone. A hit in a project's cairn has `kind` `conventions`, `gotchas` or `howto` (or `history`), an empty `task`, `short` `project` and `title` `project cairn`: there is no task to go to. `everywhere` is true when nothing matched in this project and the hits come from every project. A task's id or short id among the words finds that task first. `status` is the task's cairn Status (empty without one); `ref` is absent when there is none; `score` is `null` for an `id` hit. At most 10 hits. |
+| `varde show --project [DIR] --json` | The cairn of the project DIR (default: the current directory) is in: `{"v": 1, "project", "version", "cairn", "usage", "limits"}`, `cairn` being `null` before there is any (see below). |
+| `varde edit --project [DIR] --add SECTION TEXT…`, `--set`, `--rm`, `--restore`, `--print`, `--stdin` | The project cairn, as for a task's; its sections are `conventions`, `gotchas` and `howto`. |
+| `varde recall --json [--all \| --project DIR] WORDS…` | Search hits over cairns, former bullets, notes and project cairns, one per task (or project), best first: `{"v": 1, "everywhere", "hits": [{"task", "short", "title", "project", "status", "snippet", "kind", "ref", "score", "state", "stale", "more"}]}`. `snippet` is the text that matched, a bullet or note before the title whenever one matched; `kind` says what it is (`findings`, `decisions`, `open`, `history` for a bullet that has left its cairn, `notes`, `title`, or `id` for a task named by its id, whose `snippet` is its Status); `ref` is the bullet's or note's id, as a string; `state` is the task's (`open`, `done`, `parked`, `dropped`; absent for a project cairn); `stale: true` (absent otherwise) marks a bullet whose code is gone. `more` (absent when 0) counts the other lines of the same task, or project cairn, that matched among the best rows: one hit a task shows only the best of them (`varde recall` says `(+2 more in this task)`). A hit in a project's cairn has `kind` `conventions`, `gotchas` or `howto` (or `history`), an empty `task`, `short` `project` and `title` `project cairn`: there is no task to go to. `everywhere` is true when nothing matched in this project and the hits come from every project. `--project DIR` searches the project DIR is in first, in place of the current directory's. A task's id or short id among the words finds that task first. `status` is the task's cairn Status (empty without one); `ref` is absent when there is none; `score` is `null` for an `id` hit. At most 10 hits. |
 | `varde doctor --json` | `{"v": 1, "checks": [{"name", "ok", "detail", "fix"}]}`. `fix` says what to do, on a failed check only. It exits 1 when any check failed, after printing the report. |
 | `varde seen TASK` | Marks what the task's sessions finished as read. Call it when the user looks at the task's terminal. A `start` that answers `focus` already does it. Calling it again is harmless. |
 
 `--external` and `link` take free text naming where the task lives
-outside varde. org-varde passes `org`. Pick a short name for your
-client. Only a client that is a *task source*, one with objects of its
+outside varde. Pick a short name for your client. org-varde 1.0
+passed `org`; it now links nothing, and notes link to tasks instead
+(`[[varde:SHORT]]`). Only a client that is a *task source*, one with objects of its
 own that a task can belong to, links tasks. A client that only hosts
 terminals, such as a tmux integration, never does.
 
@@ -80,7 +84,7 @@ names the task it came from: put it next to that one if you can.
   {"key": "needs_you", "label": "Needs you", "collapsed": false, "rows": [
     {"task": "01M3CARHR5A6R1T620XWK2F0G3", "short": "k2f0g3",
      "title": "Fix the login bug", "project": "/home/me/src/app",
-     "status": "blocked", "unread": true, "agents": 0, "shells": 0,
+     "status": "blocked", "unread": true, "busy": true, "agents": 0, "shells": 0,
      "inbox": false, "external": "org", "state": "open",
      "last": 1790341564302, "changed": 1790341500000,
      "run": {"id": "01M3CARHTABHFFZDKTDRRB0R2D",
@@ -98,6 +102,10 @@ names the task it came from: put it next to that one if you can.
   last turn ended with sub-agents still running: the session wakes
   itself as they report back. `last` is Unix milliseconds.
 - `state` is the task's own: `open`, `done`, `parked` or `dropped`.
+  `closed` is when it was done, parked or dropped, in Unix
+  milliseconds, and `null` while it is open. With `--all`, a row whose
+  task has a cairn Status has it as `cairn_status`, for a review; the
+  board leaves it out, to stay small.
   `changed` is when it, the Inbox flag or the link last changed, in Unix
   milliseconds, however the change was made (a CLI, an agent, another
   client). `last` moves with closing, runs and events, but not with a
@@ -107,6 +115,15 @@ names the task it came from: put it next to that one if you can.
   first in the group. Draw them so they stand out from the rows the user
   has seen and left. A session the user started or interrupted is
   never unread, since they were there. `varde seen` clears it.
+- `busy` is true while a session of the task is at work: mid-turn
+  (`working`, `delegated` or `blocked`), or `waiting` with sub-agents or
+  background shells its last turn left running (`agents` or `shells`
+  above 0), in any of its live sessions, not only the one the row shows.
+  Closing a busy task stops work in progress, the background work done
+  or park would end with the session, or a question waiting for its
+  answer: ask first (the board asks "is
+  working" or "is waiting for your answer", with y to stop it and close,
+  n to close and leave it running).
 - `agents` and `shells` count what the session's last turn left running
   in the background. They are 0 unless the row is `delegated` or
   `waiting`. Shells never make a row `delegated`.
@@ -140,11 +157,12 @@ names the task it came from: put it next to that one if you can.
 
 ```json
 {"v": 1, "action": "run", "run": "01M3…", "cwd": "/home/me/src/app/.worktrees/fix-the-login-bug-k2f0g3",
- "command": "varde run 01M3…"}
+ "command": "varde run x7q2kd"}
 ```
 
 Open a terminal in `cwd` running the user's shell, and type `command`
-into it. Remember which terminal belongs to which task. The agent
+into it: it names the run by the six characters `varde show` prints
+(the full id, in the rare store where they name two runs). Remember which terminal belongs to which task. The agent
 exits back into that shell, so the user can read what it left and start
 again in the same place. `varde run` must be the agent's parent: that
 is how varde knows the session is alive. Never run the agent yourself.
@@ -192,8 +210,9 @@ task's sessions live in the same directory. Show those lines; the
 plan still follows on stdout.
 
 `--context-file F` adds text to a fresh run's first prompt: the
-surroundings the task has in your client, such as the outline around an
-org heading. Keep it short (org-varde caps it at about 150 words).
+surroundings the task has in your client. Keep it short. org-varde no
+longer passes it: a task made from a note carries a `From:` line in its
+context instead.
 
 ## Closing and parking
 
@@ -253,7 +272,9 @@ A task dropped elsewhere is on the board only with `--all`, in the
 
 A user may step through several states quickly (org cycles TODO,
 SOMEDAY, DONE on one key). Act once the state has rested for a moment,
-on where it ended rather than on each step: org-varde waits a second.
+on where it ended rather than on each step. org-varde goes one way
+only: a heading marked DONE offers to close the tasks it links, and
+nothing changes the heading back.
 
 ## Memory reaches the session by itself
 
@@ -270,9 +291,9 @@ first prompt, which makes its task. The memory is framed as records
 ## Showing and editing the cairn
 
 `show TASK --json` (`"v": 2`) has the task's `id`, `short`, `title`,
-`body`, `project`, `state`, `inbox`, `external`, `origin` (a task id
-here), `created`, `closed` and `changed`; its `cairn` and pending
-`notes`; its `worktree` (`{path, repo, branch, base, state}`, or
+`context` (also as `body`, its 1.0 name, kept for v2 clients), `project`, `state`, `inbox`, `external`, `origin` (a task id
+here), `created`, `closed` and `changed`; its `cairn`, its `usage` and
+pending `notes`; its `worktree` (`{path, repo, branch, base, state}`, or
 `null`); its `runs`; and its `git` (below). `--history` adds every
 earlier version of the cairn, with why it changed.
 
@@ -299,16 +320,98 @@ otherwise): it was given only the user's own lines.
 ```
 
 It is `null` before the first update. Each bullet has an `id` that stays
-the same while it is in the cairn. `anchor`, when present, is the path
+the same while it is in the cairn; `varde show` prints it after the
+line, as `#12`, which `--set`, `--rm` and `--restore` take with or
+without the `#`. `anchor`, when present, is the path
 or identifier the bullet is about, and `stale: true` (absent otherwise)
 says that anchor is no longer found in the project's code; `varde show`
 marks such a bullet `(stale?)`. A bullet that leaves the cairn is kept,
 and `recall` still finds it. `notes` lists the texts pinned
-with `varde note` that no update has folded in yet. To edit it, get the text from
+with `varde note` that no update has taken in yet.
+
+`usage` says how the cairn is used, for a client to show beside it:
+
+```json
+"usage": {"updated": 1760000000000, "author": "job", "run": "01K…", "sessions": 3,
+          "handed": 1760000100000, "notes": 1, "stale": 1}
+```
+
+`updated` and `author` (`job` for an update, `user` for an edit) are its
+last change, or `null`; `run` is the run whose update made it (`null`
+for the user's); `sessions` is how many sessions were handed it whole in
+the last 30 days, and `handed` the last time, or `null`; `notes` and
+`stale` count the notes waiting and the bullets whose code is gone. A
+project's `usage` has `task`, the task whose promotion last changed it,
+and `notes` 0. `varde show` words these the way the board does:
+`updated 20m ago by session k3m9qz · handed to 3 sessions, last 9m ago · 1 stale`.
+
+`limits` are the caps the core holds a cairn to, for a client to show
+beside a line being typed (`12/40 words`, `Open 4/5`) rather than
+hard-code them:
+
+```json
+"limits": {"status": 30, "line": 40, "words": 200,
+           "sections": {"findings": 7, "decisions": 5, "open": 5}}
+```
+
+`status` and `line` are the most words in the Status and in a line,
+`words` the most in the whole cairn, and `sections` the most lines in
+each. A project's has no `status`, and its sections are `conventions`
+(5), `gotchas` (7) and `howto` (5).
+
+**One line at a time.** An edit of one line is the normal one, and the
+user's line is never lost to a concurrent update: each is one
+transaction on the cairn as it is, and ids are stable, so nothing needs
+to travel with it.
+
+```
+varde edit TASK --add findings The cache key omits the locale.   # or open, decisions; status
+varde edit TASK --set 12 The cache key omits the locale and region.
+varde edit TASK --rm 12
+varde edit TASK --restore 12
+```
+
+TEXT is the rest of the line, its words joined by one space, or `-` to
+read it from stdin (for text that starts with `-`). The line written is
+the user's (`mine`), and so is a Status set with `--add status`. `--rm`
+moves the line to history with the reason `removed by you`, where
+`recall` still finds it, and `--restore ID` brings it back where it was.
+`--set` with the words a line already has makes it the user's and
+changes nothing else. `--rm status` hands a Status the user set back to
+the updates (`status_mine` in `show --json` goes), keeping its words
+for the next update to change; on a Status that is not the user's it
+is refused: `the Status is already the updates'`. ID is the number `varde show` prints after the
+line, `#12` or `12`. Each prints what it did (`added line #23`,
+`changed line #12`, `Status set, yours now: …`, `Status handed back: …`,
+`removed line #12; …`, `brought back line #12`, or `unchanged`); with `--json`, the cairn after it:
+
+```json
+{"v": 1, "version": 4, "id": 23, "changed": true,
+ "cairn": {"status": "Cause found.", "status_mine": true, "findings": [{"id": 23, "text": "…", "mine": true}], …}}
+```
+
+`id` is the line added, changed, removed or brought back (`null` for the
+Status), and `cairn` is as `show --json` has it. A change is refused
+(exit 1, `varde: not saved: <why>` on stderr, nothing written) when a
+line is over 40 words or a Status over 30, when the section is full
+(`not saved: Open is full (5 of 5): change or remove one of its lines
+first`), when the cairn would pass its 200 words, when another line
+already says the same (`a line already says this (line #12)`), or when
+there is no line with that id in this cairn (`no line #12 in this
+cairn: varde show lists the current ids`; one already removed says
+`line #12 is already removed; --restore 12 brings it back`, and one a
+whole-document edit changed names the line it became: `line #12 was
+changed since: it is #15 now`). An unknown section is refused before anything is read
+(`no section "x": a task's cairn has status, findings, decisions and
+open`), and a project cairn has no Status. A client keeps what the user
+typed when a change is refused, and shows the message.
+
+**The whole document.** For bulk changes, get the text from
 `varde edit TASK --print`, let the user change it, and send the whole
 text back to `varde edit TASK --stdin`:
 
 ```
+#: version 3
 Status: Cause found; fix pending.
 Findings:
 - The cache key omits the locale.
@@ -317,7 +420,7 @@ Open:
 - [mine] Add the locale to the key.
 ```
 
-A line prefixed `[mine]` is the user's. varde compares what comes back
+Lines starting `#: ` are varde's notes and are never saved. A line prefixed `[mine]` is the user's. varde compares what comes back
 with its own text, and any line that is new or changed becomes the
 user's, which later updates must keep. So edit the printed text rather
 than rendering the cairn yourself: a rendering that differs by a space
@@ -330,9 +433,12 @@ cairn's shape, or when it is past the caps, the user's lines included:
 conventions, 7 gotchas, 5 how-tos and 200 words in a project's cairn.
 The message says what is over, and the last line of stderr is
 `what you wrote is kept in PATH`, a file holding the text sent, so a
-client can offer it back. An edit is also refused when the document
-changed since `--print`: then no file is kept, and the client prints it
-again.
+client can offer it back. The printed text starts with a
+`#: version N` line, which says which version was printed: pass it back
+as it is. An edit is also refused when the document changed since that
+`--print`, since saving would undo the update; the message says it was
+updated while you were editing, and the text is kept as for any
+refusal. Print it again, and offer the user what they wrote.
 
 A project's cairn is the same, with no Status and three sections of
 its own, `conventions`, `gotchas` and `howto` (as text, `Conventions:`,

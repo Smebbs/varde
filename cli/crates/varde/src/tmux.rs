@@ -12,7 +12,6 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use anyhow::{bail, Result};
-use varde_core::task;
 
 /// What separates the fields `panes` asks tmux for.
 const SEP: &str = "|~|";
@@ -71,6 +70,8 @@ pub struct Pane {
     pub owned: bool,
     /// The store of the board that opened it.
     pub home: String,
+    /// The store of the board running in it, if one is.
+    pub board: String,
     /// On a client's screen: the active pane of the active window of an
     /// attached session.
     pub shown: bool,
@@ -125,6 +126,7 @@ impl Tmux {
             "#{@varde_task}",
             "#{@varde_owned}",
             "#{@varde_home}",
+            "#{@varde_board}",
             "#{pane_active}#{window_active}#{session_attached}",
             "#{pane_tty}",
             "#{pane_current_path}",
@@ -136,12 +138,13 @@ impl Tmux {
         Ok(out
             .lines()
             .filter_map(|l| {
-                let mut f = l.splitn(9, SEP).map(String::from);
+                let mut f = l.splitn(10, SEP).map(String::from);
                 Some(Pane {
                     id: f.next()?,
                     task: f.next()?,
                     owned: !f.next()?.is_empty(),
                     home: f.next()?,
+                    board: f.next()?,
                     shown: f
                         .next()
                         .is_some_and(|s| s.starts_with("11") && s.get(2..).is_some_and(|n| n != "0")),
@@ -194,9 +197,9 @@ impl Tmux {
                 p.id
             }
             None => {
+                // The title alone, short: panes are found by `@varde_task`.
                 // tmux expands formats in both: `#(cmd)` in a title would run.
-                let name =
-                    literal(&format!("{} {}", task::short(task), title.chars().take(20).collect::<String>()));
+                let name = literal(&crate::list::clip(title, 14));
                 let dir = literal(&cwd_s);
                 let mut args = vec!["new-window", "-d", "-P", "-F", "#{pane_id}", "-c", &dir, "-n", &name];
                 let env = environment(home, std::env::vars_os());
@@ -237,6 +240,23 @@ impl Tmux {
         Ok(())
     }
 
+    /// Mark `pane` as running the board of the store `home`, or as no
+    /// board's when `home` is empty: `varde next --board` goes to it.
+    pub fn mark_board(&self, pane: &str, home: &str) -> Result<()> {
+        if home.is_empty() {
+            self.tmux(&["set-option", "-p", "-u", "-t", pane, "@varde_board"])?;
+        } else {
+            self.tmux(&["set-option", "-p", "-t", pane, "@varde_board", home])?;
+        }
+        Ok(())
+    }
+
+    /// Say `text` in tmux's status line.
+    fn say(&self, text: &str) -> Result<()> {
+        self.tmux(&["display-message", &literal(text)])?;
+        Ok(())
+    }
+
     /// Close the windows the board opened for `task` that are back at an
     /// idle shell. Returns how many are still busy, and so were left.
     pub fn close(&self, task: &str) -> Result<usize> {
@@ -259,6 +279,68 @@ impl Tmux {
     pub fn go(&self, pane: &str) -> Result<()> {
         self.tmux(&["switch-client", "-t", pane])?;
         Ok(())
+    }
+}
+
+/// `varde next`, for a tmux key: go to the window of the next task that
+/// needs you, after the one on screen and round to the first, or with
+/// none left, or `board`, to the board. What it cannot do it says in
+/// tmux's status line, not on stdout, which `run-shell` would show in a
+/// pane of its own. Outside tmux it only says what it is for: it never
+/// switches the windows of a tmux it was not run from.
+pub fn next(paths: &crate::Paths, board: bool) -> Result<()> {
+    let Some(t) = here() else { bail!("`varde next` is for a key in tmux (see the guide)") };
+    next_in(&t, paths, board)
+}
+
+fn next_in(t: &Tmux, paths: &crate::Paths, board: bool) -> Result<()> {
+    let panes = t.panes()?;
+    // Tasks that need you with no window to go to, for what is said.
+    let mut windowless = Vec::new();
+    if !board {
+        let store = paths.open(std::time::Duration::from_secs(2))?;
+        let built = varde_core::board::build(
+            &store,
+            crate::now_ms(),
+            crate::list::local_midnight_ms(),
+            false,
+            &crate::process::alive,
+        )?;
+        let needs = built.groups.iter().filter(|g| g.key == "needs_you").flat_map(|g| &g.rows);
+        let mut windows: Vec<&Pane> = Vec::new();
+        for r in needs {
+            let tty = r.run.as_ref().and_then(|run| crate::start::tty_of(&store, &run.id).ok().flatten());
+            match find(&panes, &r.task, tty.as_deref()) {
+                Some(p) => windows.push(p),
+                None => windowless.push(r.short.clone()),
+            }
+        }
+        let n = windows.len();
+        let to = match windows.iter().position(|p| p.shown) {
+            Some(i) => (n > 1).then(|| windows[(i + 1) % n]),
+            None => windows.first().copied(),
+        };
+        if let Some(p) = to {
+            return t.go(&p.id);
+        }
+    }
+    let home = paths.tag();
+    let nothing = nothing_to_go_to(&windowless);
+    match panes.iter().find(|p| p.board == home && !p.idle()) {
+        Some(p) if p.shown && !board => t.say(&nothing),
+        Some(p) => t.go(&p.id),
+        None if board => t.say("varde: no board is open in tmux; run varde in a window"),
+        None => t.say(&nothing),
+    }
+}
+
+/// What `next` says when it has no window to go to: the tasks that
+/// need you but have none, if any.
+fn nothing_to_go_to(windowless: &[String]) -> String {
+    match windowless {
+        [] => "varde: nothing else needs you".to_string(),
+        [one] => format!("varde: {one} needs you but has no window: RET on the board opens one"),
+        many => format!("varde: {} need you but have no window: RET on the board opens one", many.join(", ")),
     }
 }
 
@@ -297,6 +379,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn next_names_what_needs_you_but_has_no_window() {
+        assert_eq!(nothing_to_go_to(&[]), "varde: nothing else needs you");
+        assert_eq!(
+            nothing_to_go_to(&["k3m9qz".into()]),
+            "varde: k3m9qz needs you but has no window: RET on the board opens one"
+        );
+        assert!(nothing_to_go_to(&["a".into(), "b".into()])
+            .starts_with("varde: a, b need you but have no window"));
+    }
+
+    #[test]
     fn a_session_the_board_starts_gets_the_settings_not_the_markers() {
         let vars =
             [("VARDE_RUN", "r"), ("VARDE_INTERNAL", "1"), ("VARDE_HOME", "/other"), ("VARDE_AGENT", "pi")]
@@ -332,11 +425,11 @@ mod tests {
         let Some(t) = server(dir.path()) else { return eprintln!("no tmux; skipped") };
         let cwd = dir.path().canonicalize().unwrap().join("a#{pane_id}");
         std::fs::create_dir(&cwd).unwrap();
-        t.open("01TASKBBBBBB", "#(touch pwn) #{host}", &cwd, "/s", "true", false).unwrap();
+        t.open("01TASKBBBBBB", "#(touch p)#{h}", &cwd, "/s", "true", false).unwrap();
         let ours: Vec<Pane> = t.panes().unwrap().into_iter().filter(|p| p.task == "01TASKBBBBBB").collect();
         assert_eq!(ours.len(), 1);
         let name = t.tmux(&["display", "-p", "-t", &ours[0].id, "#{window_name}"]).unwrap();
-        assert_eq!(name, "bbbbbb #(touch pwn) #{host}");
+        assert_eq!(name, "#(touch p)#{h}");
         assert_eq!(ours[0].path, cwd.to_string_lossy());
         let _ = t.tmux(&["kill-server"]);
     }
@@ -352,7 +445,7 @@ mod tests {
         assert_eq!(ours.len(), 1);
         let shown = wait_for(&t, &ours[0].id, "\nfirst-run");
         assert_eq!(shown.matches("echo first-run").count(), 1, "typed once, after the prompt: {shown}");
-        assert_eq!(t.tmux(&["display", "-p", "-t", &ours[0].id, "#{window_name}"]).unwrap(), "aaaaaa Fix it");
+        assert_eq!(t.tmux(&["display", "-p", "-t", &ours[0].id, "#{window_name}"]).unwrap(), "Fix it");
 
         // Back at the shell, starting again types into the same pane.
         t.open("01TASKAAAAAA", "Fix it", &cwd, "/s", "echo second-run", false).unwrap();
@@ -436,12 +529,40 @@ mod tests {
     }
 
     #[test]
+    fn next_goes_to_the_board_of_its_own_store_while_it_runs() {
+        let dir = tempfile::tempdir().unwrap();
+        let Some(t) = server(dir.path()) else { return eprintln!("no tmux; skipped") };
+        let paths = crate::Paths { home: dir.path().join("store") };
+        let board = t.tmux(&["new-window", "-d", "-P", "-F", "#{pane_id}", "exec sleep 300"]).unwrap();
+        // A board runs there once its shell has exec'd; until then it looks idle.
+        for _ in 0..500 {
+            if t.panes().unwrap().iter().any(|p| p.id == board && p.command.ends_with("sleep")) {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        // Another store's board is not this one's to go to: it only says so.
+        t.mark_board(&board, "/another/store").unwrap();
+        next_in(&t, &paths, true).unwrap();
+        // Its own is found; no client is attached to switch.
+        t.mark_board(&board, &paths.tag()).unwrap();
+        let r = next_in(&t, &paths, true);
+        assert!(r.as_ref().is_err_and(|e| e.to_string().contains("client")), "{r:?}");
+        // Nothing needs you: to the board.
+        assert!(next_in(&t, &paths, false).is_err_and(|e| e.to_string().contains("client")));
+        t.mark_board(&board, "").unwrap();
+        assert!(t.panes().unwrap().iter().all(|p| p.board.is_empty()));
+        let _ = t.tmux(&["kill-server"]);
+    }
+
+    #[test]
     fn the_pane_a_session_runs_on_comes_before_one_only_tagged() {
         let pane = |id: &str, task: &str, tty: &str| Pane {
             id: id.into(),
             task: task.into(),
             owned: true,
             home: String::new(),
+            board: String::new(),
             shown: false,
             tty: tty.into(),
             window: String::new(),

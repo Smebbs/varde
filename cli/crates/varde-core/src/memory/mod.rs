@@ -12,9 +12,11 @@ use serde::Serialize;
 use crate::cairn::{Cairn, Item, Section, Shape};
 use crate::store::Store;
 
+mod change;
 mod job;
 mod recall;
 
+pub use change::*;
 pub use job::*;
 pub use recall::*;
 
@@ -226,7 +228,19 @@ fn write_doc(conn: &Connection, owner: Owner, expected: i64, new: &Cairn, w: &Wr
         for (pos, i) in new.section(s).iter().enumerate() {
             match before.get(&i.id) {
                 None => {
-                    insert(s, pos, i, "current", None)?;
+                    // A bullet brought back from its history keeps its id.
+                    let revived = i.id != 0
+                        && conn.execute(
+                            &format!(
+                                "UPDATE cairn_item SET state = 'current', reason = NULL, left_at = NULL, section = ?3,
+                                                       pos = ?4
+                                 WHERE id = ?1 AND {col} = ?2 AND state = 'history'"
+                            ),
+                            params![i.id, key, s.name(), pos as i64],
+                        )? > 0;
+                    if !revived {
+                        insert(s, pos, i, "current", None)?;
+                    }
                 }
                 Some(was) => {
                     if *was != i.text {
@@ -326,6 +340,80 @@ pub fn history_of(conn: &Connection, owner: Owner) -> Result<Vec<Version>> {
         out.push(Version { ts, author, reason, cairn: serde_json::from_str(&doc)? });
     }
     Ok(out)
+}
+
+/// How a cairn is used: who last changed it and when, how many sessions
+/// were handed it, and what waits for its next update.
+#[derive(Debug, Default, Serialize)]
+pub struct Usage {
+    /// When it last changed, and by whom: `user`, or `job` for an update.
+    pub updated: Option<i64>,
+    pub author: Option<String>,
+    /// The run whose update last changed it; for a project's cairn, the
+    /// run whose task's promotion did.
+    pub run: Option<String>,
+    /// For a project's cairn, the task that promotion was of.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub task: Option<String>,
+    /// Sessions handed it whole (`shown` keeps 30 days), and the last time.
+    pub sessions: i64,
+    pub handed: Option<i64>,
+    /// Notes waiting for the next update; a task's only.
+    pub notes: usize,
+    /// Bullets whose code is gone.
+    pub stale: usize,
+}
+
+/// How `owner`'s document is used.
+pub fn usage(conn: &Connection, owner: Owner) -> Result<Usage> {
+    let mut u = Usage::default();
+    let last: Option<(i64, String)> = conn
+        .query_row(
+            &format!(
+                "SELECT ts, author FROM {} WHERE {} = ?1 ORDER BY ts DESC, id DESC LIMIT 1",
+                owner.history(),
+                owner.column()
+            ),
+            [owner.key()],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .optional()?;
+    if let Some((ts, author)) = last {
+        u.updated = Some(ts);
+        u.author = Some(author);
+    }
+    let (handed, by) = match owner {
+        Owner::Task(_) => (
+            "FROM run r JOIN shown s ON s.run = r.id WHERE r.task = ?1 AND s.kind = 'cairn' AND s.task = ?1",
+            "SELECT j.run, r.task FROM job j JOIN run r ON r.id = j.run
+             WHERE r.task = ?1 AND j.kind IN ('fold', 'close') AND j.state = 'done'
+             ORDER BY j.finished DESC LIMIT 1",
+        ),
+        Owner::Project(_) => (
+            "FROM task t JOIN run r ON r.task = t.id JOIN shown s ON s.run = r.id
+             WHERE t.project = ?1 AND s.kind = 'project'",
+            "SELECT j.run, r.task FROM job j JOIN run r ON r.id = j.run JOIN task t ON t.id = r.task
+             WHERE t.project = ?1 AND j.kind = 'promote' AND j.state = 'done'
+             ORDER BY j.finished DESC LIMIT 1",
+        ),
+    };
+    (u.sessions, u.handed) =
+        conn.query_row(&format!("SELECT count(DISTINCT s.run), max(s.ts) {handed}"), [owner.key()], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?;
+    if u.author.as_deref() == Some("job") {
+        let found: Option<(String, Option<String>)> =
+            conn.query_row(by, [owner.key()], |r| Ok((r.get(0)?, r.get(1)?))).optional()?;
+        if let Some((run, task)) = found {
+            u.run = Some(run);
+            u.task = task.filter(|_| matches!(owner, Owner::Project(_)));
+        }
+    }
+    if let Owner::Task(task) = owner {
+        u.notes = pending_notes(conn, task)?.len();
+    }
+    u.stale = document(conn, owner)?.map_or(0, |(c, _)| c.items().filter(|(_, i)| i.stale).count());
+    Ok(u)
 }
 
 /// A bullet that has left a cairn, and why.

@@ -1,19 +1,23 @@
 //! `varde` with no arguments: the board, live, in the terminal. It reads
 //! the same pre-grouped rows as `varde list --json`, so it decides
-//! nothing about what is shown. RET suspends it and runs the session in
-//! this terminal; it comes back when the agent exits. Inside tmux the
+//! nothing about what is shown. RET asks what a first start needs to
+//! know, then suspends it and runs the session in this terminal; it
+//! comes back when the agent exits. Inside tmux the
 //! session gets a window of its own instead, and the board stays live.
 //! Nothing in-process writes to the terminal while the board owns it:
 //! notices come back as values, and a broken config file, which would
 //! be reported on stderr, is shown in its message line.
 
+mod cairn;
 mod diff;
 mod draft;
 mod draw;
+mod field;
+mod keys;
 mod session;
 mod term;
 
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -21,7 +25,7 @@ use anyhow::Result;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::widgets::ListState;
 use ratatui::DefaultTerminal;
-use varde_core::board::{self, Board, Row};
+use varde_core::board::{self, Group, Row};
 use varde_core::plan::Want;
 use varde_core::store::Store;
 use varde_core::task;
@@ -29,6 +33,8 @@ use varde_core::task;
 use crate::{done, now_ms, process, tmux, Paths};
 use diff::Diff;
 use draft::{Draft, Edit};
+use field::{Field, Words};
+use keys::{Act, Keys};
 use term::{enter, have_terminal, input, leave, quit_on_sigterm, terminated};
 
 const BUSY: Duration = Duration::from_secs(2);
@@ -37,9 +43,12 @@ const TICK: Duration = Duration::from_millis(1000);
 /// The groups whose tasks are still being worked on.
 const OPEN_GROUPS: [&str; 4] = ["needs_you", "working", "open", "inbox"];
 
+/// A line of the board: a group's header, or a row of it, by where
+/// they are in `App::groups`.
+#[derive(Clone, Copy)]
 enum Item {
-    Header { label: &'static str, count: usize, collapsed: bool },
-    Row(Box<Row>),
+    Header(usize),
+    Row(usize, usize),
 }
 
 enum Mode {
@@ -48,19 +57,19 @@ enum Mode {
     Help,
     /// Writing a new task.
     New(Draft),
-    /// Asked to confirm throwing the task away.
-    Drop(String),
+    /// Asked to confirm throwing the tasks away.
+    Drop(Vec<String>),
     /// Asked whether closing or parking stops a working session, or
     /// keeps it running.
     Stop(Close, Vec<String>),
     /// Asked to confirm starting a done or parked task, which reopens it.
     Reopen(Start, String),
     /// Typing a recall query.
-    Recall(String),
+    Recall(Field),
     /// Typing the directory of the project to move the task to.
-    Move(String, String),
+    Move(String, Field),
     /// Typing the directory of the project a new task is in.
-    Where(Draft, String),
+    Where(Draft, Field),
     /// Asked whether a first run in tmux gets its own worktree, with the
     /// project picked for it.
     Worktree(Start, Asked, Option<PathBuf>),
@@ -90,7 +99,12 @@ struct Start {
 
 /// What a key asks for that takes the screen from the board.
 enum Away {
-    Attach(Start),
+    /// Run this task's session, prepared as `run`, in this terminal.
+    Attach {
+        task: String,
+        run: String,
+        notices: Vec<String>,
+    },
     Edit(String),
     /// Edit the cairn of this project.
     EditProject(String),
@@ -99,8 +113,9 @@ enum Away {
     Draft(Draft),
 }
 
-/// What recall found: j/k pick a hit, RET goes to its task on the board,
-/// s starts it, Tab searches this project or every one.
+/// What recall found: j/k pick a hit, RET (or `v`) opens the view on it,
+/// `s` starts it, and the keys that act on a task act on it; `.`
+/// searches this project or every one.
 struct Found {
     query: String,
     /// Every project, rather than the one the board was started in.
@@ -115,23 +130,58 @@ struct App<'a> {
     paths: &'a Paths,
     /// The tmux the board runs in, which then hosts the sessions.
     tmux: Option<tmux::Tmux>,
+    /// In a tmux popup: going to a session quits the board, closing it.
+    popup: bool,
+    /// The board as last read, every group in its fixed order.
+    groups: Vec<Group>,
     items: Vec<Item>,
     list: ListState,
     /// The selected task, kept across refreshes as rows move between groups.
     selected: Option<String>,
-    /// Where the selection stays after its task moves away (closed,
-    /// parked, accepted), so the next key acts on the next row.
-    keep_at: Option<usize>,
+    /// Or the folded group whose header is selected.
+    group_at: Option<&'static str>,
+    /// The groups folded or opened with `z`; the rest are as varde has them.
+    folds: HashMap<&'static str, bool>,
+    /// The task each group was folded from, which unfolding it selects.
+    folded_at: HashMap<&'static str, String>,
+    /// What the store had when the view last read it: it reads it again
+    /// only when that changed, or a minute on.
+    seen: Option<Seen>,
+    /// The first `g` of `gg` was typed.
+    pending_g: bool,
+    /// The lines the list and the pane under it had when last drawn, for
+    /// half a page.
+    page: u16,
+    pane: u16,
+    /// Where the selection goes after its task moves away (closed,
+    /// parked, accepted): the tasks nearest it, nearest first, of which
+    /// the first still open is taken.
+    keep: Vec<String>,
     /// Tasks marked with space; `a`, `d` and `p` act on them all.
     marked: Vec<String>,
+    /// The tasks last closed on this board, with d, P or x: `u` reopens
+    /// them.
+    closed: Vec<String>,
+    /// They were closed from the view, where `u` reopens them too.
+    closed_in_view: bool,
+    /// The selection was moved since the board opened: until it is, the
+    /// first Tab goes to the first task that needs you, where it is.
+    placed: bool,
+    /// How far the help is scrolled, and how far it can be.
+    help_scroll: u16,
+    help_most: u16,
+    /// The question being asked is about the marked tasks: cancelling it
+    /// marks them again.
+    asked_marks: bool,
+    /// The key is for the recall hit just gone to, not the marked tasks.
+    on_hit: bool,
     mode: Mode,
+    /// The view is open, and has the keys.
     detail: bool,
-    /// The detail pane shows the selected task's project cairn, not the task.
+    /// The view is on its Project tab: the task's project cairn.
     project_detail: bool,
     /// How far the detail pane is scrolled.
     scroll: u16,
-    /// Whether collapsed groups (Parked) are opened.
-    expanded: bool,
     /// The project the board was opened in; `None` outside a repository.
     here: Option<String>,
     /// Whether the board keeps to `here`, when it has tasks there.
@@ -146,6 +196,17 @@ struct App<'a> {
     /// The directories Tab could complete a directory prompt to, shown
     /// until a key other than Tab.
     menu: Option<Menu>,
+    /// Drafts put away with Esc: the new task's, and one for each task
+    /// being edited. `n` (or `e` on its task) takes one up again, so
+    /// nothing typed is lost.
+    kept: Vec<Draft>,
+    /// A task just made or moved, to show even when that means every
+    /// project.
+    reveal: Option<String>,
+    /// The cairn the detail pane shows, which takes the keys while open.
+    view: cairn::View,
+    /// The board's keys, as the config binds them.
+    keys: Keys,
     /// Unread tasks whose tmux window has rung; `None` until the first
     /// refresh, which rings nothing.
     rung: Option<HashSet<String>>,
@@ -159,23 +220,42 @@ struct App<'a> {
     upgraded: bool,
 }
 
-pub fn run(paths: &Paths) -> Result<()> {
+/// `popup`: the board runs in a tmux popup, which closes once a key
+/// takes you to a session. Outside tmux there is no popup to close.
+pub fn run(paths: &Paths, popup: bool) -> Result<()> {
     if !have_terminal() {
         anyhow::bail!("the board needs a terminal; varde list prints it");
     }
     let mut app = App::new(paths, tmux::here());
+    app.popup = popup && app.tmux.is_some();
     app.here = paths.open(BUSY).ok().and_then(|s| here_project(&s).ok().flatten());
     app.scoped = crate::config::get().board.scope == crate::config::Scope::Project;
+    app.keys = Keys::of(&crate::config::get().keys);
     app.refresh()?;
     // Read before the board takes the screen, so its warning is not
     // written over it.
     if let Some(w) = crate::config::warning() {
         app.message = format!("error: {w}");
     }
+    app.take_draft();
+    if app.message.is_empty() {
+        app.message = crate::doctor::unhooked(&crate::start::default_agent()).unwrap_or_default();
+    }
     quit_on_sigterm();
+    // In tmux, its pane is the board's while it runs: `varde next --board`
+    // comes back to it.
+    let pane = app.tmux.as_ref().and_then(|t| {
+        let (pane, _) = tmux::this_pane()?;
+        t.mark_board(&pane, &paths.tag()).ok().map(|_| pane)
+    });
     let mut term = enter()?;
     let result = app.main(&mut term);
     leave();
+    if let (Some(t), Some(pane)) = (&app.tmux, pane) {
+        let _ = t.mark_board(&pane, "");
+    }
+    // What is being typed, or was put away, waits for the next board.
+    app.put_draft();
     if app.upgraded {
         // A newer varde migrated the store under this board: the new
         // binary takes over, in the same terminal, with the same arguments.
@@ -184,6 +264,11 @@ pub fn run(paths: &Paths) -> Result<()> {
         anyhow::bail!("varde was upgraded, and starting the new board failed ({e}): run varde again");
     }
     result
+}
+
+/// What is wrong with the config's `[keys]`, if anything.
+pub fn check_keys(keys: &std::collections::BTreeMap<String, String>) -> std::result::Result<(), String> {
+    keys::check(keys)
 }
 
 /// Whether `e` says a newer varde has migrated the store.
@@ -196,16 +281,31 @@ impl<'a> App<'a> {
         App {
             paths,
             tmux,
+            popup: false,
+            groups: Vec::new(),
             items: Vec::new(),
             list: ListState::default(),
             selected: None,
-            keep_at: None,
+            group_at: None,
+            folds: HashMap::new(),
+            folded_at: HashMap::new(),
+            seen: None,
+            pending_g: false,
+            page: 0,
+            pane: 0,
+            keep: Vec::new(),
             marked: Vec::new(),
+            closed: Vec::new(),
+            closed_in_view: false,
+            placed: false,
+            help_scroll: 0,
+            help_most: 0,
+            asked_marks: false,
+            on_hit: false,
             mode: Mode::Normal,
             detail: false,
             project_detail: false,
             scroll: 0,
-            expanded: false,
             here: None,
             scoped: true,
             here_has: false,
@@ -213,6 +313,10 @@ impl<'a> App<'a> {
             found: None,
             message: String::new(),
             menu: None,
+            kept: Vec::new(),
+            reveal: None,
+            view: cairn::View::default(),
+            keys: Keys::default(),
             rung: None,
             redraw: false,
             stale: false,
@@ -262,20 +366,24 @@ impl<'a> App<'a> {
     fn event(&mut self, event: Event, term: &mut DefaultTerminal) -> Result<()> {
         match event {
             Event::Key(key) if key.kind == KeyEventKind::Press => {
-                // A drop waits for the task's sessions to stop: the board
+                // A drop waits for the tasks' sessions to stop: the board
                 // says so before it blocks.
-                if let (Mode::Drop(task), KeyCode::Char('y')) = (&self.mode, key.code) {
-                    let task = task.clone();
-                    if self
-                        .paths
-                        .open(BUSY)
-                        .and_then(|s| done::live_runs(&s, &task))
-                        .is_ok_and(|r| !r.is_empty())
-                    {
+                if let (Mode::Drop(ids), KeyCode::Char('y' | 'Y')) = (&self.mode, key.code) {
+                    let ids = ids.clone();
+                    let live = |id: &String| {
+                        self.paths
+                            .open(BUSY)
+                            .and_then(|s| done::live_runs(&s, id))
+                            .is_ok_and(|r| !r.is_empty())
+                    };
+                    if ids.iter().any(live) {
                         self.mode = Mode::Normal;
-                        self.message = format!("stopping {}'s session…", task::short(&task));
+                        self.message = match ids.as_slice() {
+                            [id] => format!("stopping {}'s session…", task::short(id)),
+                            _ => "stopping their sessions…".into(),
+                        };
                         term.draw(|f| self.draw(f))?;
-                        self.drop_task(&task);
+                        self.drop_tasks(&ids);
                         return Ok(());
                     }
                 }
@@ -291,55 +399,114 @@ impl<'a> App<'a> {
 
     fn refresh(&mut self) -> Result<()> {
         let store = self.paths.open(BUSY)?;
+        let seen = Seen::of(&store, self.selected.as_deref())?;
+        if self.seen.as_ref() != Some(&seen) {
+            self.seen = Some(seen);
+            self.view.reload();
+        }
         let now = now_ms();
         let mut board = board::build(&store, now, crate::list::local_midnight_ms(), false, &process::alive)?;
         let kicked = crate::sweep::kick(self.paths, &board, now);
         self.watch_tmux(&store, &mut board, now);
         // Kept to the project only now: the sweep and tmux see every task.
         self.here_has = self.here.as_ref().is_some_and(|p| board.has(p));
+        // A task just made, moved or picked in another project is shown,
+        // not hidden by the board keeping to this one.
+        if let Some(task) = self.reveal.take() {
+            let row = board.groups.iter().flat_map(|g| &g.rows).find(|r| r.task == task);
+            if self.scoped && row.is_some_and(|r| r.project.as_deref() != self.here.as_deref()) {
+                self.scoped = false;
+                self.message.push_str("; showing every project (. keeps to this one)");
+            }
+        }
         self.elsewhere = match &self.here {
             Some(p) if self.scoped && self.here_has => Some(board.only(p)),
             _ => None,
         };
-        let Board { groups, .. } = board;
-        self.items.clear();
-        for g in groups {
-            let collapsed = g.collapsed && !self.expanded;
-            self.items.push(Item::Header { label: g.label, count: g.rows.len(), collapsed });
-            if !collapsed {
-                self.items.extend(g.rows.into_iter().map(|r| Item::Row(Box::new(r))));
-            }
-        }
-        let index = match self.keep_at.take() {
-            Some(at) => (at..self.items.len()).chain((0..at).rev()).find(|&i| self.row(i).is_some()),
-            None => self
-                .selected
-                .as_ref()
-                .and_then(|t| self.items.iter().position(|i| matches!(i, Item::Row(r) if &r.task == t)))
-                .or_else(|| self.items.iter().position(|i| matches!(i, Item::Row(_)))),
-        };
-        let was = self.selected.take();
-        self.list.select(index);
-        self.selected = index.and_then(|i| self.row(i)).map(|r| r.task.clone());
-        if self.selected != was {
-            self.scroll = 0;
-        }
+        self.groups = board.groups;
+        self.layout();
         let mut marked = std::mem::take(&mut self.marked);
         marked.retain(|t| self.row_of(t).is_some());
         self.marked = marked;
         kicked
     }
 
+    /// Whether group `g` shows only its header: as varde has it, unless
+    /// `z` said otherwise. An empty group has nothing to fold.
+    fn folded(&self, g: &Group) -> bool {
+        !g.rows.is_empty() && self.folds.get(g.key).copied().unwrap_or(g.collapsed)
+    }
+
+    /// Lay the board out from `groups`, keeping the selection. Every
+    /// group is there, in its fixed order, so nothing jumps: an empty one
+    /// is its header. Dropped tasks are only read when asked for, so
+    /// their group is there only with some.
+    fn layout(&mut self) {
+        self.items.clear();
+        for (gi, g) in self.groups.iter().enumerate() {
+            if g.rows.is_empty() && g.key == "dropped" {
+                continue;
+            }
+            self.items.push(Item::Header(gi));
+            if !self.folded(g) {
+                self.items.extend((0..g.rows.len()).map(|ri| Item::Row(gi, ri)));
+            }
+        }
+        let n = self.items.len();
+        let keep = std::mem::take(&mut self.keep);
+        let open = |i: usize| OPEN_GROUPS.contains(&self.group(i).key);
+        // An open task first; only with none, a closed one.
+        let kept = [true, false].into_iter().find_map(|only_open| {
+            keep.iter().find_map(|t| {
+                (0..n).find(|&i| (open(i) || !only_open) && self.row(i).is_some_and(|r| &r.task == t))
+            })
+        });
+        let index = match kept {
+            Some(i) => Some(i),
+            None => self
+                .group_at
+                .and_then(|k| (0..n).find(|&i| self.selectable(i) && self.group(i).key == k))
+                .or_else(|| {
+                    let t = self.selected.as_ref()?;
+                    (0..n).find(|&i| self.row(i).is_some_and(|r| &r.task == t))
+                })
+                .or_else(|| (0..n).find(|&i| self.selectable(i))),
+        };
+        let was = self.selected.take();
+        self.list.select(index);
+        self.selected = index.and_then(|i| self.row(i)).map(|r| r.task.clone());
+        self.group_at = index.filter(|&i| self.row(i).is_none()).map(|i| self.group(i).key);
+        if self.selected != was {
+            self.scroll = 0;
+        }
+    }
+
     fn row(&self, i: usize) -> Option<&Row> {
         match self.items.get(i) {
-            Some(Item::Row(r)) => Some(r),
+            Some(Item::Row(g, r)) => Some(&self.groups[*g].rows[*r]),
             _ => None,
+        }
+    }
+
+    /// The group of the line at `i`.
+    fn group(&self, i: usize) -> &Group {
+        match self.items[i] {
+            Item::Header(g) | Item::Row(g, _) => &self.groups[g],
+        }
+    }
+
+    /// What the selection can be on: a task, or a folded group's header.
+    fn selectable(&self, i: usize) -> bool {
+        match self.items.get(i) {
+            Some(Item::Row(..)) => true,
+            Some(Item::Header(g)) => self.folded(&self.groups[*g]),
+            None => false,
         }
     }
 
     fn rows(&self) -> impl Iterator<Item = &Row> {
         self.items.iter().filter_map(|i| match i {
-            Item::Row(r) => Some(&**r),
+            Item::Row(g, r) => Some(&self.groups[*g].rows[*r]),
             _ => None,
         })
     }
@@ -348,8 +515,9 @@ impl<'a> App<'a> {
         self.rows().find(|r| r.task == task)
     }
 
-    /// Whether closing `task` would stop a session in the middle of a
-    /// turn: any of its live sessions, not only the one its row shows.
+    /// Whether closing `task` would stop a session at work: in the middle
+    /// of a turn, or with agents and shells its last turn left running;
+    /// any of its live sessions, not only the one its row shows.
     fn mid_turn(&self, task: &str) -> bool {
         let runs = || -> Result<bool> {
             let store = self.paths.open(BUSY)?;
@@ -361,7 +529,7 @@ impl<'a> App<'a> {
             }
             Ok(false)
         };
-        self.row_of(task).is_some_and(|r| busy(r.status)) || runs().unwrap_or(false)
+        self.row_of(task).is_some_and(|r| r.busy) || runs().unwrap_or(false)
     }
 
     fn current(&self) -> Option<&Row> {
@@ -381,7 +549,7 @@ impl<'a> App<'a> {
                 (false, i) if i > 0 => i - 1,
                 _ => return,
             };
-            if self.row(i).is_some() {
+            if self.selectable(i) {
                 return self.select(i);
             }
         }
@@ -389,76 +557,234 @@ impl<'a> App<'a> {
 
     /// To the first row, or the last.
     fn jump(&mut self, last: bool) {
-        let rows = (0..self.items.len()).filter(|&i| self.row(i).is_some());
+        let rows = (0..self.items.len()).filter(|&i| self.selectable(i));
         let i = if last { rows.max() } else { rows.min() };
         if let Some(i) = i {
             self.select(i);
         }
     }
 
+    /// `}` to the next group with anything in it; `{` to the top of this
+    /// one, or else of the one before.
+    fn group_step(&mut self, down: bool) {
+        let Some(at) = self.list.selected() else { return };
+        // The first line the selection can be on in each group.
+        let mut tops: Vec<usize> = Vec::new();
+        for i in (0..self.items.len()).filter(|&i| self.selectable(i)) {
+            if tops.last().is_none_or(|&t| self.group(t).key != self.group(i).key) {
+                tops.push(i);
+            }
+        }
+        let to = if down { tops.into_iter().find(|&t| t > at) } else { tops.into_iter().rfind(|&t| t < at) };
+        if let Some(i) = to {
+            self.select(i);
+        }
+    }
+
+    /// C-d and C-u: half the list down or up, or with a pane open, half
+    /// the pane.
+    fn half(&mut self, down: bool) {
+        if self.detail || self.found.is_some() {
+            let n = (self.pane / 2).max(1);
+            self.scroll = if down { self.scroll.saturating_add(n) } else { self.scroll.saturating_sub(n) };
+            return;
+        }
+        let Some(at) = self.list.selected() else { return };
+        let (len, n) = (self.items.len(), (self.page as usize / 2).max(1));
+        let to = if down { (at + n).min(len.saturating_sub(1)) } else { at.saturating_sub(n) };
+        // The nearest line it can be on, short of there before beyond it.
+        let short: Vec<usize> = if down { (at + 1..=to).rev().collect() } else { (to..at).collect() };
+        let beyond: Vec<usize> = if down { (to + 1..len).collect() } else { (0..to).rev().collect() };
+        if let Some(i) = short.into_iter().chain(beyond).find(|&i| self.selectable(i)) {
+            self.select(i);
+        }
+    }
+
+    /// Tab: to the next task that needs you, round to the first; S-Tab
+    /// back. Its group opens if it was folded.
+    fn next_needs(&mut self, back: bool) {
+        let Some(gi) = self.groups.iter().position(|g| g.key == "needs_you") else { return };
+        let n = self.groups[gi].rows.len();
+        if n == 0 {
+            self.message = match self.elsewhere {
+                Some(e) if e.need_you > 0 => {
+                    format!("nothing here needs you; {} in other projects: . shows them", e.need_you)
+                }
+                _ => "nothing needs you".into(),
+            };
+            return;
+        }
+        let at = match self.list.selected().and_then(|i| self.items.get(i)) {
+            Some(Item::Row(g, r)) if *g == gi => Some(*r),
+            _ => None,
+        };
+        let to = match (at, back) {
+            // Where the board opened, the first Tab stays on the first.
+            (Some(0), false) if !self.placed => 0,
+            (Some(r), false) => (r + 1) % n,
+            (Some(r), true) => (r + n - 1) % n,
+            (None, false) => 0,
+            (None, true) => n - 1,
+        };
+        self.folds.remove("needs_you");
+        self.placed = true;
+        (self.selected, self.group_at) = (Some(self.groups[gi].rows[to].task.clone()), None);
+        self.layout();
+        if n > 1 {
+            self.message = format!("needs you: {} of {n}", to + 1);
+        }
+    }
+
+    /// `z`: fold the group at point, or open the folded one on the task
+    /// it was folded from.
+    fn fold(&mut self) {
+        let Some(at) = self.list.selected() else { return };
+        let (gi, open) = match self.items[at] {
+            Item::Header(g) => (g, true),
+            Item::Row(g, _) => (g, false),
+        };
+        let g = &self.groups[gi];
+        self.folds.insert(g.key, !open);
+        if open {
+            let from = self.folded_at.remove(g.key).filter(|t| g.rows.iter().any(|r| r.task == *t));
+            (self.selected, self.group_at) = (from.or_else(|| g.rows.first().map(|r| r.task.clone())), None);
+        } else {
+            if let Some(t) = self.selected.clone() {
+                self.folded_at.insert(g.key, t);
+            }
+            (self.selected, self.group_at) = (None, Some(g.key));
+        }
+        self.layout();
+    }
+
     fn select(&mut self, i: usize) {
+        self.placed = true;
         self.selected = self.row(i).map(|r| r.task.clone());
+        self.group_at = (self.selected.is_none() && i < self.items.len()).then(|| self.group(i).key);
         self.list.select(Some(i));
         self.scroll = 0;
     }
 
-    /// The selection stays where it is when its task moves away.
-    fn keep_place(&mut self) {
-        self.keep_at = self.list.selected();
+    /// When `acted` move away, the selection goes to the task still open
+    /// nearest it, the one after it on a tie: never to one of them.
+    fn keep_place(&mut self, acted: &[String]) {
+        let at = self.list.selected().unwrap_or(0);
+        let mut near: Vec<(usize, &String)> = (0..self.items.len())
+            .filter_map(|i| Some((i, &self.row(i)?.task)))
+            .filter(|(_, t)| !acted.contains(t))
+            .collect();
+        near.sort_by_key(|(i, _)| (i.abs_diff(at), *i < at));
+        self.keep = near.into_iter().map(|(_, t)| t.clone()).collect();
+    }
+
+    /// J and K in the view: the next or previous task, past the groups'
+    /// headers, a folded group opened as Tab opens one.
+    fn step_task(&mut self, down: bool) {
+        let tasks: Vec<(&'static str, &String)> =
+            self.groups.iter().flat_map(|g| g.rows.iter().map(move |r| (g.key, &r.task))).collect();
+        let at = match (&self.selected, self.group_at) {
+            (Some(t), _) => tasks.iter().position(|(_, x)| *x == t).map(|i| (i, true)),
+            // On a folded group: its first task is next.
+            (None, Some(k)) => tasks.iter().position(|(g, _)| *g == k).map(|i| (i, false)),
+            (None, None) => None,
+        };
+        let to = match (at, down) {
+            (Some((i, on)), true) => i + usize::from(on),
+            (Some((i, _)), false) => match i.checked_sub(1) {
+                Some(i) => i,
+                None => return,
+            },
+            (None, _) => 0,
+        };
+        let Some((group, task)) = tasks.get(to).map(|(g, t)| (*g, (*t).clone())) else { return };
+        if self.groups.iter().any(|g| g.key == group && self.folded(g)) {
+            self.folds.insert(group, false);
+        }
+        (self.selected, self.group_at, self.placed) = (Some(task), None, true);
+        self.layout();
     }
 
     fn key(&mut self, key: KeyEvent) -> Option<Away> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let menu = self.menu.take();
+        // What was said over a form or prompt lasts until the next key.
+        if matches!(self.mode, Mode::New(_) | Mode::Where(..) | Mode::Move(..) | Mode::Recall(_)) {
+            self.message.clear();
+        }
         match std::mem::replace(&mut self.mode, Mode::Normal) {
+            // Taller than the screen, it scrolls; any other key closes it.
+            Mode::Help if self.help_most > 0 => {
+                let (at, half) = (self.help_scroll, (self.page / 2).max(1));
+                self.help_scroll = match key.code {
+                    KeyCode::Char('j') | KeyCode::Down if !ctrl => at + 1,
+                    KeyCode::Char('k') | KeyCode::Up if !ctrl => at.saturating_sub(1),
+                    KeyCode::Char('d') if ctrl => at + half,
+                    KeyCode::Char('u') if ctrl => at.saturating_sub(half),
+                    KeyCode::PageDown => at + half,
+                    KeyCode::PageUp => at.saturating_sub(half),
+                    _ => return None,
+                }
+                .min(self.help_most);
+                self.mode = Mode::Help;
+            }
             Mode::Help => {}
             Mode::New(mut draft) => match draft.key(key) {
                 Edit::Typing => self.mode = Mode::New(draft),
                 Edit::Editor => return Some(Away::Draft(draft)),
-                Edit::Create if draft.title.trim().is_empty() => self.message = "a task needs a title".into(),
-                Edit::Create if draft.task.is_some() => self.save(&draft),
-                Edit::Create => {
-                    let dir = self.current().and_then(|r| r.project.clone());
-                    let dir = dir
-                        .or_else(|| self.paths.open(BUSY).ok().and_then(|s| here_project(&s).ok().flatten()));
-                    self.mode = Mode::Where(draft, dir.as_deref().map(draw::tilde).unwrap_or_default());
+                // A task with only a context, new or edited, is titled from it.
+                Edit::Create if draft.is_empty() => {
+                    self.message = "a task needs a title or a context".into();
+                    self.mode = Mode::New(draft);
                 }
-                Edit::Cancel => {}
+                Edit::Create if draft.task.is_some() => self.save(draft),
+                Edit::Create => match self.new_task_project() {
+                    Some(dir) => self.create(draft, &dir),
+                    None => {
+                        let dir =
+                            self.current().and_then(|r| r.project.clone()).or_else(|| self.here.clone());
+                        self.mode = Mode::Where(
+                            draft,
+                            Field::new(&dir.as_deref().map(draw::tilde).unwrap_or_default()),
+                        );
+                    }
+                },
+                Edit::Cancel => self.keep(draft),
             },
             Mode::Where(draft, mut dir) => match key.code {
-                KeyCode::Enter => self.create(&draft, &dir),
+                KeyCode::Enter => {
+                    let typed = dir.text().to_string();
+                    self.create(draft, &typed);
+                }
                 KeyCode::Esc => self.mode = Mode::New(draft),
+                KeyCode::Char('g') if ctrl => self.mode = Mode::New(draft),
                 KeyCode::Tab | KeyCode::BackTab => {
                     self.menu = tab(&mut dir, menu, key.code == KeyCode::BackTab);
                     self.mode = Mode::Where(draft, dir);
                 }
                 _ => {
-                    edit_line(&mut dir, key);
+                    dir.key(key, Words::Path);
                     self.mode = Mode::Where(draft, dir);
                 }
             },
             Mode::Recall(mut query) => match key.code {
-                KeyCode::Enter => self.recall(&query, false),
+                KeyCode::Enter => self.recall(query.text(), false),
                 KeyCode::Esc => {}
-                KeyCode::Backspace => {
-                    query.pop();
+                KeyCode::Char('g') if ctrl => {}
+                _ => {
+                    query.key(key, Words::Prose);
                     self.mode = Mode::Recall(query);
                 }
-                KeyCode::Char(c) if !ctrl => {
-                    query.push(c);
-                    self.mode = Mode::Recall(query);
-                }
-                _ => self.mode = Mode::Recall(query),
             },
             Mode::Move(task, mut dir) => match key.code {
-                KeyCode::Enter => self.move_task(&task, &dir),
+                KeyCode::Enter => self.move_task(&task, dir.text()),
                 KeyCode::Esc => {}
+                KeyCode::Char('g') if ctrl => {}
                 KeyCode::Tab | KeyCode::BackTab => {
                     self.menu = tab(&mut dir, menu, key.code == KeyCode::BackTab);
                     self.mode = Mode::Move(task, dir);
                 }
                 _ => {
-                    edit_line(&mut dir, key);
+                    dir.key(key, Words::Path);
                     self.mode = Mode::Move(task, dir);
                 }
             },
@@ -471,25 +797,29 @@ impl<'a> App<'a> {
                     KeyCode::Char('k') | KeyCode::Up => {
                         self.mode = Mode::Project(start, asked, choices, (i + n - 1) % n)
                     }
-                    KeyCode::Enter => self.answer(asked, start, None, Some(PathBuf::from(&choices[i]))),
+                    KeyCode::Enter => {
+                        return self.answer(asked, start, None, Some(PathBuf::from(&choices[i])))
+                    }
                     _ => self.message = "cancelled".into(),
                 }
             }
             Mode::Worktree(start, asked, project) => match key.code {
-                KeyCode::Char('y') | KeyCode::Enter => self.answer(asked, start, Some(true), project),
-                KeyCode::Char('n') => self.answer(asked, start, Some(false), project),
+                KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
+                    return self.answer(asked, start, Some(true), project)
+                }
+                KeyCode::Char('n' | 'N') => return self.answer(asked, start, Some(false), project),
                 _ => self.message = "cancelled".into(),
             },
-            Mode::Drop(task) => match key.code {
-                KeyCode::Char('y') => self.drop_task(&task),
-                _ => self.message = "cancelled".into(),
+            Mode::Drop(ids) => match key.code {
+                KeyCode::Char('y' | 'Y') => self.drop_tasks(&ids),
+                _ => self.unasked(ids),
             },
             Mode::Reopen(start, task) => match key.code {
-                KeyCode::Char('y') if self.current_id().as_deref() == Some(task.as_str()) => {
+                KeyCode::Char('y' | 'Y') if self.current_id().as_deref() == Some(task.as_str()) => {
                     return self.begin(start)
                 }
                 // Asked by `s` on a recall hit, which may be too old for the board.
-                KeyCode::Char('y') if self.picked().as_deref() == Some(task.as_str()) => {
+                KeyCode::Char('y' | 'Y') if self.picked().as_deref() == Some(task.as_str()) => {
                     let reopened = self.paths.open(BUSY).and_then(|s| crate::start::reopen(&s.conn, &task));
                     if let Err(e) = reopened {
                         self.report(Err(e));
@@ -500,101 +830,189 @@ impl<'a> App<'a> {
                 _ => self.message = "cancelled".into(),
             },
             Mode::Stop(how, ids) => match key.code {
-                KeyCode::Char('s') => self.close_now(how, ids, true),
-                KeyCode::Char('k') => self.close_now(how, ids, false),
-                _ => {
-                    if ids.len() > 1 {
-                        self.marked = ids;
-                    }
-                    self.message = "cancelled".into();
-                }
+                KeyCode::Char('y' | 'Y') => self.close_now(how, ids, true),
+                KeyCode::Char('n' | 'N') => self.close_now(how, ids, false),
+                _ => self.unasked(ids),
             },
             Mode::Normal => {
                 self.message.clear();
-                if self.found.is_some() && key.code == KeyCode::Char('s') {
-                    return self.start_hit();
+                self.on_hit = false;
+                let pending_g = std::mem::take(&mut self.pending_g);
+                if let Some(away) = self.recall_key(key) {
+                    return away;
                 }
-                if self.found.is_some() && self.recall_key(key.code) {
-                    return None;
+                // The cairn view takes the keys that work on its lines; the
+                // rest do what they do on the board.
+                if self.detail && self.found.is_none() && !self.on_hit {
+                    if let Some(away) = self.view_key(key, pending_g) {
+                        return away;
+                    }
                 }
-                let start = |want, go| Some(Away::Attach(Start { want, go }));
-                let away = match key.code {
+                let act = match key.code {
                     KeyCode::Char('c') if ctrl => {
                         self.quit = true;
-                        None
+                        return None;
                     }
-                    KeyCode::Char('l') if ctrl => {
-                        self.redraw = true;
-                        None
-                    }
-                    KeyCode::Char('d') | KeyCode::PageDown if ctrl || key.code == KeyCode::PageDown => {
-                        self.scroll = self.scroll.saturating_add(10);
-                        None
-                    }
-                    KeyCode::Char('u') | KeyCode::PageUp if ctrl || key.code == KeyCode::PageUp => {
-                        self.scroll = self.scroll.saturating_sub(10);
-                        None
-                    }
+                    KeyCode::Char('l') if ctrl => Some(Act::Refresh),
+                    KeyCode::Char('d') if ctrl => Some(Act::HalfDown),
+                    KeyCode::Char('u') if ctrl => Some(Act::HalfUp),
                     _ if ctrl => None,
-                    KeyCode::Enter => start(Want::Continue, true),
-                    KeyCode::Char('s') => start(Want::Continue, false),
-                    KeyCode::Char('R') => start(Want::Fresh, true),
-                    KeyCode::Char('F') => start(Want::Fork, true),
-                    KeyCode::Char('e') => self.edit(),
-                    KeyCode::Char('E') => match self.current() {
-                        Some(r) => match r.project.clone() {
-                            Some(p) => Some(Away::EditProject(p)),
-                            None => {
-                                self.message =
-                                    "this task has no project yet: its first start picks one".into();
-                                None
-                            }
-                        },
-                        None => None,
-                    },
-                    KeyCode::Char('=') => self.current_id().and_then(|id| self.changes(&id)),
-                    code => {
-                        self.normal(code);
+                    KeyCode::Esc => {
+                        self.escape();
+                        return None;
+                    }
+                    code => self.keys.act(code),
+                };
+                // `g` goes to the top as vi's does: twice.
+                if act == Some(Act::First) && key.code == KeyCode::Char('g') && !pending_g {
+                    self.pending_g = true;
+                    return None;
+                }
+                let start = |want, go| Some(Start { want, go });
+                let start = match act {
+                    // On a folded group, RET opens it.
+                    Some(Act::Start) if self.group_at.is_some() => {
+                        self.fold();
                         None
                     }
+                    Some(Act::Start) => start(Want::Continue, true),
+                    Some(Act::Background) => start(Want::Continue, false),
+                    Some(Act::Fresh) => start(Want::Fresh, true),
+                    Some(Act::Fork) => start(Want::Fork, true),
+                    Some(Act::Edit) => return self.edit(),
+                    Some(Act::Editor) => return self.editor(),
+                    Some(Act::Diff) => return self.current_id().and_then(|id| self.changes(&id)),
+                    Some(act) => {
+                        self.normal(act);
+                        None
+                    }
+                    None => None,
                 };
-                return match away {
+                return match (start, self.current()) {
                     // Starting a closed task reopens it: one key too easily
                     // pressed for that.
-                    Some(Away::Attach(start)) => match self.current() {
-                        Some(r) if matches!(r.state.as_str(), "done" | "parked" | "dropped") => {
-                            self.mode = Mode::Reopen(start, r.task.clone());
-                            None
-                        }
-                        _ => self.begin(start),
-                    },
-                    away => away,
+                    (Some(start), Some(r)) if matches!(r.state.as_str(), "done" | "parked" | "dropped") => {
+                        self.mode = Mode::Reopen(start, r.task.clone());
+                        None
+                    }
+                    (Some(start), _) => self.begin(start),
+                    (None, _) => None,
                 };
             }
         }
         None
     }
 
-    /// A key for the recall pane: j/k pick a hit, RET goes to its task,
-    /// Tab widens or narrows the search; `s` is `start_hit`. Whether it took the key.
-    fn recall_key(&mut self, code: KeyCode) -> bool {
-        let Some(found) = self.found.as_mut() else { return false };
+    /// A key for the recall pane, while it is open: `Some` with what it
+    /// asks for when the pane took it, `None` for the board's. j/k pick a
+    /// hit; RET or `v` open the view on it, on the Project tab for a
+    /// project's cairn; `s` is `start_hit`; `.` widens or narrows the
+    /// search, as it does the board. The keys that act on a task go to the
+    /// hit first, and then act on it: never on the row the pane hides.
+    fn recall_key(&mut self, key: KeyEvent) -> Option<Option<Away>> {
+        let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
+        let act = if ctrl { None } else { self.keys.act(key.code) };
+        let found = self.found.as_mut()?;
         let n = found.hits.len();
-        match code {
-            KeyCode::Char('j') | KeyCode::Down if n > 0 => found.at = (found.at + 1).min(n - 1),
-            KeyCode::Char('k') | KeyCode::Up => found.at = found.at.saturating_sub(1),
-            KeyCode::Tab => {
+        match (key.code, act) {
+            (KeyCode::Char('j') | KeyCode::Down, _) if !ctrl && n > 0 => found.at = (found.at + 1).min(n - 1),
+            (KeyCode::Char('k') | KeyCode::Up, _) if !ctrl => found.at = found.at.saturating_sub(1),
+            (_, Some(Act::Scope)) => {
                 let (query, all) = (found.query.clone(), !found.all);
                 self.recall(&query, all);
             }
-            KeyCode::Enter => {
-                if let Some(hit) = found.hits.get(found.at) {
-                    let (task, short) = (hit.task.clone(), hit.short.clone());
-                    self.go_to(&task, &short);
+            (_, Some(Act::Start | Act::View)) => self.view_hit(),
+            (_, Some(Act::Background)) => return Some(self.start_hit()),
+            (
+                _,
+                Some(
+                    Act::Fresh
+                    | Act::Fork
+                    | Act::Edit
+                    | Act::Editor
+                    | Act::Diff
+                    | Act::Done
+                    | Act::Park
+                    | Act::Drop
+                    | Act::Accept
+                    | Act::Move
+                    | Act::Mark,
+                ),
+            ) => {
+                if !self.go_to_hit() {
+                    return Some(None);
                 }
+                self.on_hit = true;
+                return None;
             }
-            _ => return false,
+            _ => return None,
         }
+        Some(None)
+    }
+
+    /// The picked hit's task selected on the board, the recall pane
+    /// closed, for a key to act on it; whether it is. A project's cairn
+    /// has no task to act on.
+    fn go_to_hit(&mut self) -> bool {
+        let Some(hit) = self.found.as_ref().and_then(|f| f.hits.get(f.at)) else { return false };
+        if hit.task.is_empty() {
+            self.message = "a project cairn has no task to act on: RET views it".into();
+            return false;
+        }
+        let (task, short) = (hit.task.clone(), hit.short.clone());
+        self.go_to(&task, &short);
+        self.found.is_none() && self.current_id().as_deref() == Some(task.as_str())
+    }
+
+    /// RET on a hit: the view, on its task, or on the Project tab of a
+    /// task of its project for a project's cairn.
+    fn view_hit(&mut self) {
+        let Some(hit) = self.found.as_ref().and_then(|f| f.hits.get(f.at)) else { return };
+        let (task, short, project) = (hit.task.clone(), hit.short.clone(), hit.project.clone());
+        if task.is_empty() {
+            let Some(p) = project else { return };
+            if !self.go_to_project(&p) {
+                return;
+            }
+        } else {
+            self.go_to(&task, &short);
+            if self.current_id().as_deref() != Some(task.as_str()) {
+                return;
+            }
+        }
+        self.found = None;
+        (self.detail, self.project_detail, self.scroll) = (true, task.is_empty(), 0);
+        self.view.open();
+    }
+
+    /// Select a task of project `p`, whose cairn the view's Project tab
+    /// then shows: the one selected if it is of `p`, else the first on the
+    /// board, every project shown for it if need be. Whether there is one.
+    fn go_to_project(&mut self, p: &str) -> bool {
+        let of = |app: &Self| {
+            let mine = |r: &&Row| r.project.as_deref() == Some(p);
+            app.current().filter(mine).or_else(|| app.rows().find(mine)).map(|r| r.task.clone())
+        };
+        let mut task = of(self);
+        if task.is_none() && self.scoped {
+            self.scoped = false;
+            if let Err(e) = self.refresh() {
+                self.report(Err(e));
+            }
+            task = of(self);
+            if task.is_some() {
+                self.message = "showing every project (. keeps to this one)".into();
+            } else {
+                (self.scoped, self.stale) = (true, true);
+            }
+        }
+        let Some(task) = task else {
+            let name = crate::list::project_name(Some(p));
+            self.message = format!("no task of {name} on the board: varde show --project {}", draw::tilde(p));
+            return false;
+        };
+        (self.selected, self.group_at) = (Some(task), None);
+        self.layout();
         true
     }
 
@@ -607,6 +1025,10 @@ impl<'a> App<'a> {
     /// if it is closed, as RET on its row does.
     fn start_hit(&mut self) -> Option<Away> {
         let task = self.picked()?;
+        if task.is_empty() {
+            self.message = "a project cairn has no session to start: RET views it".into();
+            return None;
+        }
         let state: String = self.paths.open(BUSY).ok().and_then(|s| {
             s.conn.query_row("SELECT state FROM task WHERE id = ?1", [&task], |r| r.get(0)).ok()
         })?;
@@ -623,7 +1045,8 @@ impl<'a> App<'a> {
     fn start_on_board(&mut self, task: &str, start: Start) -> Option<Away> {
         self.found = None;
         self.selected = Some(task.to_string());
-        self.keep_at = None;
+        self.reveal = Some(task.to_string());
+        self.keep.clear();
         if let Err(e) = self.refresh() {
             self.report(Err(e));
             return None;
@@ -640,68 +1063,107 @@ impl<'a> App<'a> {
         let state: Option<String> = self.paths.open(BUSY).ok().and_then(|s| {
             s.conn.query_row("SELECT state FROM task WHERE id = ?1", [task], |r| r.get(0)).ok()
         });
-        match state.as_deref() {
-            Some("parked") => self.expanded = true,
-            _ if self.row_of(task).is_some() => {}
-            Some(state) => {
-                self.message = format!("{short} is {state} and not on the board: varde show {short}");
-                return;
-            }
-            None => return,
+        let Some(state) = state else { return };
+        let (found, scoped, folds) = (self.found.take(), self.scoped, self.folds.clone());
+        if state == "parked" {
+            self.folds.insert("parked", false);
         }
-        self.found = None;
         self.selected = Some(task.to_string());
-        self.keep_at = None;
-        self.stale = true;
+        self.reveal = Some(task.to_string());
+        self.keep.clear();
+        if let Err(e) = self.refresh() {
+            self.report(Err(e));
+        }
+        if self.current_id().as_deref() != Some(task) {
+            // An old done or dropped task: the pane stays, as it was.
+            (self.found, self.scoped, self.folds) = (found, scoped, folds);
+            self.message = format!("{short} is {state} and not on the board: varde show {short}");
+            self.stale = true;
+        }
+    }
+
+    /// Esc on the board: unmark, else close the pane; it quits only in a
+    /// popup, which Esc closes as it does any, or when `[keys]` binds it
+    /// to. The view has its own, which unmarks first too.
+    fn escape(&mut self) {
+        if !self.marked.is_empty() {
+            self.marked.clear();
+        } else if self.found.is_some() {
+            self.found = None;
+        } else if self.detail {
+            self.detail = false;
+        } else if self.popup || self.keys.act(KeyCode::Esc) == Some(Act::Quit) {
+            self.quit = true;
+        } else {
+            self.message = format!("{} quits", self.keys.label(Act::Quit));
+        }
     }
 
     /// A key on the board that stays on the board.
-    fn normal(&mut self, code: KeyCode) {
-        match code {
+    fn normal(&mut self, act: Act) {
+        match act {
             // As in the help: a pane open is what `q` closes.
-            KeyCode::Char('q') if self.found.is_some() => self.found = None,
-            KeyCode::Char('q') if self.detail => self.detail = false,
-            KeyCode::Char('q') => self.quit = true,
-            KeyCode::Esc if !self.marked.is_empty() => self.marked.clear(),
-            KeyCode::Esc if self.found.is_some() => self.found = None,
-            KeyCode::Esc if self.detail => self.detail = false,
-            KeyCode::Esc => self.message = "q quits".into(),
-            KeyCode::Char('?') => self.mode = Mode::Help,
-            KeyCode::Char('/') => self.mode = Mode::Recall(String::new()),
-            KeyCode::Char('j') | KeyCode::Down => self.step(true),
-            KeyCode::Char('k') | KeyCode::Up => self.step(false),
-            KeyCode::Home => self.jump(false),
-            KeyCode::Char('G') | KeyCode::End => self.jump(true),
-            KeyCode::Char('v') => self.show_detail(false),
-            KeyCode::Char('V') => self.show_detail(true),
-            KeyCode::Char('n') => self.mode = Mode::New(Draft::default()),
-            KeyCode::Char('m') => {
+            Act::Quit if self.found.is_some() => self.found = None,
+            Act::Quit if self.detail => self.detail = false,
+            Act::Quit => self.quit = true,
+            Act::Help => (self.mode, self.help_scroll) = (Mode::Help, 0),
+            Act::Recall => self.mode = Mode::Recall(Field::default()),
+            Act::Down => self.step(true),
+            Act::Up => self.step(false),
+            Act::First => self.jump(false),
+            Act::Last => self.jump(true),
+            Act::NextGroup => self.group_step(true),
+            Act::PrevGroup => self.group_step(false),
+            Act::HalfDown => self.half(true),
+            Act::HalfUp => self.half(false),
+            Act::NextNeeds => self.next_needs(false),
+            Act::PrevNeeds => self.next_needs(true),
+            Act::Fold => self.fold(),
+            Act::View => self.show_detail(false),
+            Act::Cairn => self.show_detail(true),
+            Act::New => {
+                let draft = match self.kept.iter().position(|d| d.task.is_none()) {
+                    Some(i) => {
+                        self.message = "your new task, as you left it".into();
+                        Draft { restored: true, ..self.kept.remove(i) }
+                    }
+                    None => Draft::default(),
+                };
+                self.mode = Mode::New(draft);
+            }
+            Act::Move => {
                 if let Some(r) = self.current() {
                     let dir = r.project.as_deref().map(draw::tilde).unwrap_or_default();
-                    self.mode = Mode::Move(r.task.clone(), dir);
+                    self.mode = Mode::Move(r.task.clone(), Field::new(&dir));
                 }
             }
-            KeyCode::Char(' ') => self.mark(),
-            KeyCode::Char('a') => self.accept(),
-            KeyCode::Char('d') => self.close(Close::Done),
-            KeyCode::Char('p') => self.close(Close::Park),
-            KeyCode::Char('x') => {
-                if let Some(id) = self.current_id() {
-                    self.mode = Mode::Drop(id);
+            Act::Mark => self.mark(),
+            Act::Accept => self.accept(),
+            Act::Reopen => self.reopen_last(),
+            Act::Done => self.close(Close::Done),
+            Act::Park => self.close(Close::Park),
+            Act::Drop => {
+                let ids = self.targets();
+                if !ids.is_empty() {
+                    self.mode = Mode::Drop(ids);
                 }
             }
-            KeyCode::Char('g') => {
+            Act::Refresh => {
                 self.redraw = true;
                 self.stale = true;
-                self.message = "refreshed".into();
             }
-            KeyCode::Tab => {
-                self.expanded = !self.expanded;
-                self.stale = true;
-            }
-            KeyCode::Char('.') => self.toggle_scope(),
-            _ => {}
+            Act::Scope => self.toggle_scope(),
+            Act::Start | Act::Background | Act::Fresh | Act::Fork | Act::Edit | Act::Editor | Act::Diff => {}
         }
+    }
+
+    /// The footer's keys, for the selected row, in `width` columns.
+    fn footer(&self, width: usize) -> Vec<(String, &'static str)> {
+        let row = self.current();
+        let needs = self.groups.iter().any(|g| g.key == "needs_you" && !g.rows.is_empty());
+        let state = row.map(|r| r.state.as_str()).or(self.group_at.map(|_| "folded"));
+        let reopen = !self.closed.is_empty();
+        self.keys.footer(state, row.is_some_and(|r| r.inbox), needs, reopen, self.marked.len(), width)
     }
 
     /// Keep to the project the board was opened in, or show every one.
@@ -720,20 +1182,22 @@ impl<'a> App<'a> {
         self.message = if self.scoped { format!("only {name}") } else { "every project".into() };
     }
 
-    /// Open the detail pane on the task, or on its project cairn; the same
-    /// key again closes it.
+    /// Open the view on its Task tab, or its Project tab; `v` again closes
+    /// it, on either.
     fn show_detail(&mut self, project: bool) {
-        self.detail = !(self.detail && self.project_detail == project);
+        self.detail = !(self.detail && (!project || self.project_detail));
         self.project_detail = project;
         self.scroll = 0;
+        self.view.open();
     }
 
     /// Pasted text goes into the prompt being typed, and nowhere else.
     fn paste(&mut self, text: &str) {
         match &mut self.mode {
             Mode::New(draft) => draft.paste(text),
-            Mode::Recall(query) => query.push_str(&text.split_whitespace().collect::<Vec<_>>().join(" ")),
-            Mode::Move(_, dir) | Mode::Where(_, dir) => dir.push_str(text.trim()),
+            Mode::Recall(query) => query.insert(&text.split_whitespace().collect::<Vec<_>>().join(" ")),
+            Mode::Move(_, dir) | Mode::Where(_, dir) => dir.insert(text.trim()),
+            Mode::Normal if self.detail && self.view.paste(text) => {}
             Mode::Normal => self.message = "pasted text goes into a prompt: n new task, / recall".into(),
             _ => {}
         }
@@ -743,7 +1207,7 @@ impl<'a> App<'a> {
     fn away(&mut self, away: Away, term: &mut DefaultTerminal) -> Result<()> {
         leave();
         let result = match away {
-            Away::Attach(start) => self.attach_here(start.want),
+            Away::Attach { task, run, notices } => self.attach_here(&task, &run, notices),
             Away::Edit(id) => {
                 crate::memory_cmd::edit(self.paths, &id, false, false).map(|s| saved("cairn", s))
             }
@@ -770,14 +1234,30 @@ impl<'a> App<'a> {
     /// Say how an action went. Any action may have changed the store.
     fn report(&mut self, result: Result<String>) {
         self.stale = true;
+        self.view.reload();
         self.message = match result {
             Ok(m) => m,
             Err(e) => format!("error: {e:#}"),
         };
     }
 
-    /// `e`: a task without a cairn has only its title and context to
-    /// change, and the new-task form edits them. One with a cairn, or
+    /// `E`: the whole cairn in `$EDITOR`, the project's on the view's
+    /// Project tab, else the task's with its context above it.
+    fn editor(&mut self) -> Option<Away> {
+        let r = self.current()?;
+        if !(self.detail && self.project_detail) {
+            return Some(Away::Edit(r.task.clone()));
+        }
+        match r.project.clone() {
+            Some(p) => Some(Away::EditProject(p)),
+            None => {
+                self.message = "this task has no project yet: its first start picks one".into();
+                None
+            }
+        }
+    }
+
+    /// `e`: the task's title and context, in the new-task form. A task
     /// linked elsewhere, which then owns its text, goes to `$EDITOR`.
     fn edit(&mut self) -> Option<Away> {
         let row = self.current()?;
@@ -785,24 +1265,24 @@ impl<'a> App<'a> {
         if row.external.is_some() {
             return Some(Away::Edit(id));
         }
-        let result = (|| -> Result<Option<Draft>> {
+        if let Some(i) = self.kept.iter().position(|d| d.task.as_deref() == Some(id.as_str())) {
+            self.mode = Mode::New(Draft { restored: true, ..self.kept.remove(i) });
+            self.message = "your changes, as you left them".into();
+            return None;
+        }
+        let result = (|| -> Result<Draft> {
             let store = self.paths.open(BUSY)?;
-            let cairn = varde_core::memory::document(&store.conn, varde_core::memory::Owner::Task(&id))?;
-            if cairn.is_some_and(|(c, _)| !c.is_empty()) {
-                return Ok(None);
-            }
             let (title, body): (String, Option<String>) =
                 store.conn.query_row("SELECT title, body FROM task WHERE id = ?1", [&id], |r| {
                     Ok((r.get(0)?, r.get(1)?))
                 })?;
-            Ok(Some(Draft { title, body: body.unwrap_or_default(), in_body: false, task: Some(id.clone()) }))
+            Ok(Draft::of(&id, &title, &body.unwrap_or_default()))
         })();
         match result {
-            Ok(Some(draft)) => {
+            Ok(draft) => {
                 self.mode = Mode::New(draft);
                 None
             }
-            Ok(None) => Some(Away::Edit(id)),
             Err(e) => {
                 self.report(Err(e));
                 None
@@ -810,27 +1290,174 @@ impl<'a> App<'a> {
         }
     }
 
-    /// Save the title and context of the task `draft` edits.
-    fn save(&mut self, draft: &Draft) {
-        let Some(id) = &draft.task else { return };
+    /// The file the drafts wait in while no board runs: every board's,
+    /// merged.
+    fn drafts_file(&self) -> PathBuf {
+        self.paths.home.join("drafts.json")
+    }
+
+    /// Before the board ends: the new task and the edits being written,
+    /// or put away, and the cairn lines, added to what other boards of
+    /// the store left. Theirs give way to this board's where both have a
+    /// draft of the same thing.
+    fn put_draft(&mut self) {
+        match std::mem::replace(&mut self.mode, Mode::Normal) {
+            Mode::New(d) | Mode::Where(d, _) => self.keep(d),
+            _ => {}
+        }
+        let mut ours: Vec<serde_json::Value> =
+            self.kept.iter().filter(|d| !d.is_empty()).map(Draft::json).collect();
+        ours.extend(self.view.drafts());
+        if ours.is_empty() {
+            return;
+        }
+        let file = self.drafts_file();
+        let slot = |d: &serde_json::Value| (d["task"].clone(), d["project"].clone(), d["target"].clone());
+        let theirs = std::fs::read_to_string(&file).ok().and_then(|t| serde_json::from_str(&t).ok());
+        if let Some(serde_json::Value::Array(theirs)) = theirs {
+            let mine: Vec<_> = ours.iter().map(slot).collect();
+            ours.extend(theirs.into_iter().filter(|d| !mine.contains(&slot(d))));
+        }
+        let _ = std::fs::write(file, serde_json::Value::Array(ours).to_string());
+    }
+
+    /// When the board starts: the drafts the boards before it left, if
+    /// any, and those of a board that started again as a newer varde.
+    fn take_draft(&mut self) {
+        let home = &self.paths.home;
+        let mut all = Vec::new();
+        for name in ["drafts.json", "cairn-drafts.json"] {
+            if let Ok(text) = std::fs::read_to_string(home.join(name)) {
+                let _ = std::fs::remove_file(home.join(name));
+                if let Ok(serde_json::Value::Array(d)) = serde_json::from_str(&text) {
+                    all.extend(d);
+                }
+            }
+        }
+        // As varde 1.1 left a new task's.
+        if let Ok(text) = std::fs::read_to_string(home.join("draft.txt")) {
+            let _ = std::fs::remove_file(home.join("draft.txt"));
+            let mut d = Draft::default();
+            d.set_text(&text);
+            all.push(d.json());
+        }
+        let mut said = Vec::new();
+        for d in &all {
+            if let Some(draft) = Draft::of_json(d) {
+                if draft.task.is_none() && !self.kept.iter().any(|k| k.task.is_none()) {
+                    said.push(format!("your new task is kept: {} brings it back", self.keys.label(Act::New)));
+                } else if draft.task.is_some() {
+                    said.push(format!(
+                        "changes to {} are kept: e on it brings them back",
+                        self.named_task(&draft)
+                    ));
+                }
+                self.kept.push(draft);
+            }
+        }
+        // Each named by its task's title, or its project, and where in
+        // the cairn it goes: `"Fix login" (Findings, Status)`.
+        let took = self.view.take_drafts(&all);
+        let mut whose: Vec<(String, Vec<String>)> = Vec::new();
+        for (key, project, what) in took.iter().cloned() {
+            let name = match project {
+                true => format!("{}'s project cairn", crate::list::project_name(Some(&key))),
+                false => self.named(&key),
+            };
+            match whose.iter_mut().find(|(n, _)| *n == name) {
+                Some((_, w)) => w.push(what),
+                None => whose.push((name, vec![what])),
+            }
+        }
+        let whose: Vec<String> = whose.into_iter().map(|(n, w)| format!("{n} ({})", w.join(", "))).collect();
+        match took.len() {
+            0 => {}
+            1 => said.push(format!("a cairn line you typed for {} is kept: v shows it", whose[0])),
+            n => said
+                .push(format!("{n} cairn lines you typed are kept, for {}: v shows them", whose.join(", "))),
+        }
+        if !said.is_empty() {
+            self.message = said.join("; ");
+        }
+    }
+
+    /// The task a draft edits, as a message names it.
+    fn named_task(&self, draft: &Draft) -> String {
+        draft.task.as_deref().map_or_else(|| "the new task".into(), |id| self.named(id))
+    }
+
+    /// Put a draft away, to be taken up again: nothing typed is lost to
+    /// one key. One with nothing in it, or nothing changed, is dropped:
+    /// to throw a draft away, clear it (C-u) and Esc.
+    fn keep(&mut self, draft: Draft) {
+        let unchanged = draft.is_empty()
+            || draft.task.as_ref().is_some_and(|id| {
+                self.paths.open(BUSY).ok().is_some_and(|s| {
+                    s.conn
+                        .query_row("SELECT title, coalesce(body, '') FROM task WHERE id = ?1", [id], |r| {
+                            Ok(r.get::<_, String>(0)? == draft.title.text()
+                                && r.get::<_, String>(1)? == draft.body.text())
+                        })
+                        .unwrap_or(false)
+                })
+            });
+        if unchanged {
+            if draft.restored {
+                self.message = "draft dropped".into();
+            }
+            return;
+        }
+        self.message = match &draft.task {
+            None => format!("new task kept: {} brings it back", self.keys.label(Act::New)),
+            Some(_) => format!(
+                "changes to {} kept: {} on it brings them back",
+                self.named_task(&draft),
+                self.keys.label(Act::Edit)
+            ),
+        };
+        self.kept.retain(|k| k.task != draft.task);
+        self.kept.push(draft);
+    }
+
+    /// Save the title and context of the task `draft` edits. A refusal
+    /// leaves the form open, as it was.
+    fn save(&mut self, draft: Draft) {
+        let Some(id) = draft.task.clone() else { return };
         let result = (|| {
             let store = self.paths.open(BUSY)?;
-            task::set(&store, id, Some(draft.title.trim()), Some(&draft.body))?;
-            Ok(format!("saved {}", task::short(id)))
+            task::set(&store, &id, Some(draft.title.text().trim()), Some(draft.body.text()))?;
+            crate::naming::start(&store, &id);
+            Ok(format!("saved {}", task::short(&id)))
         })();
+        if result.is_err() {
+            self.mode = Mode::New(draft);
+        }
         self.report(result);
     }
 
-    /// Create the task in the project `dir` is in.
-    fn create(&mut self, draft: &Draft, dir: &str) {
+    /// Where a new task goes without asking: the project the board keeps
+    /// to. Showing every project, or opened outside one, it asks.
+    fn new_task_project(&self) -> Option<String> {
+        self.here.clone().filter(|_| self.scoped)
+    }
+
+    /// Create the task in the project `dir` is in. A failure leaves the
+    /// form open, as it was.
+    fn create(&mut self, draft: Draft, dir: &str) {
         let result = (|| {
             let store = self.paths.open(BUSY)?;
             let project = crate::start::project_of(&store, Path::new(&home_in(dir)))?.display().to_string();
-            let body = Some(draft.body.trim()).filter(|b| !b.is_empty());
-            let id = task::create(&store, draft.title.trim(), body, Some(&project), None, now_ms())?;
+            let body = Some(draft.body.text().trim()).filter(|b| !b.is_empty());
+            let id = task::create(&store, draft.title.text().trim(), body, Some(&project), None, now_ms())?;
+            crate::naming::start(&store, &id);
             self.selected = Some(id.clone());
-            Ok(format!("created {}; RET starts it", task::short(&id)))
+            self.reveal = Some(id.clone());
+            let name = crate::list::project_name(Some(&project));
+            Ok(format!("created {} in {name}; RET starts it", task::short(&id)))
         })();
+        if result.is_err() {
+            self.mode = Mode::Where(draft, Field::new(dir));
+        }
         self.report(result);
     }
 
@@ -857,6 +1484,7 @@ impl<'a> App<'a> {
     fn move_task(&mut self, task: &str, dir: &str) {
         let dir = home_in(dir);
         let result = self.paths.open(BUSY).and_then(|s| crate::tasks::move_to(&s, task, Path::new(&dir)));
+        self.reveal = Some(task.to_string());
         self.report(result);
     }
 
@@ -871,29 +1499,41 @@ impl<'a> App<'a> {
         self.step(true);
     }
 
-    /// The marked tasks, or else the one at point. Taking them clears the marks.
+    /// The marked tasks, or else the one at point. Taking them clears the
+    /// marks. In the view, the task it shows, and from the recall pane the
+    /// hit: marks are the board's.
     fn targets(&mut self) -> Vec<String> {
-        if self.marked.is_empty() {
-            self.current_id().into_iter().collect()
-        } else {
+        self.asked_marks = !self.marked.is_empty() && !self.detail && !self.on_hit;
+        if self.asked_marks {
             std::mem::take(&mut self.marked)
+        } else {
+            self.current_id().into_iter().collect()
         }
     }
 
+    /// A question about the marked tasks was not answered: they stay marked.
+    fn unasked(&mut self, ids: Vec<String>) {
+        if std::mem::take(&mut self.asked_marks) {
+            self.marked = ids;
+        }
+        self.message = "cancelled".into();
+    }
+
     /// Do `act` to each of `ids`, reporting its own message for one task
-    /// and a count for several.
+    /// and a count for several: `2 tasks done`.
     fn each(&mut self, ids: &[String], verb: &str, act: impl Fn(&Store, &str) -> Result<String>) {
         if ids.is_empty() {
             return;
         }
-        self.keep_place();
+        self.asked_marks = false;
+        self.keep_place(ids);
         let result = (|| {
             let store = self.paths.open(BUSY)?;
             let mut last = String::new();
             for id in ids {
                 last = act(&store, id)?;
             }
-            Ok(if ids.len() == 1 { last } else { format!("{verb} {} tasks", ids.len()) })
+            Ok(if ids.len() == 1 { last } else { format!("{} tasks {verb}", ids.len()) })
         })();
         self.report(result);
     }
@@ -906,7 +1546,11 @@ impl<'a> App<'a> {
             self.message = "nothing to accept: a is for Inbox tasks".into();
             return;
         }
-        self.each(&inbox, "accepted", |s, id| task::accept(s, id).map(|_| "accepted".into()));
+        self.each(&inbox, "accepted", |s, id| {
+            task::accept(s, id).map(|_| format!("accepted {}", task::short(id)))
+        });
+        // The selection follows the accepted task into Open.
+        self.keep = inbox;
     }
 
     /// Close or park the targets, asking first when that stops a session
@@ -923,18 +1567,57 @@ impl<'a> App<'a> {
     fn close_now(&mut self, how: Close, ids: Vec<String>, stop: bool) {
         match how {
             Close::Done => self
-                .each(&ids, "closed", |s, id| done::close(s, id, closing(!stop)).map(|r| done::describe(&r))),
+                .each(&ids, "done", |s, id| done::close(s, id, closing(!stop)).map(|r| done::describe(&r))),
             Close::Park => {
                 self.each(&ids, "parked", |s, id| done::shelve(s, id, !stop).map(|r| done::describe_park(&r)))
             }
         }
+        self.closed_now(ids);
     }
 
-    fn drop_task(&mut self, id: &str) {
-        self.keep_place();
-        let result =
-            self.paths.open(BUSY).and_then(|s| done::reject(&s, id)).map(|r| done::describe_drop(&r));
+    fn drop_tasks(&mut self, ids: &[String]) {
+        self.each(ids, "dropped", |s, id| done::reject(s, id).map(|r| done::describe_drop(&r)));
+        self.closed_now(ids.to_vec());
+    }
+
+    /// `ids` were closed: `u` reopens them, as it says. In the view, the
+    /// close is the last thing done, so `u` undoes it before a line.
+    fn closed_now(&mut self, ids: Vec<String>) {
+        if ids.is_empty() {
+            return;
+        }
+        if !self.message.starts_with("error:") {
+            self.message.push_str(&format!("; {} reopens", self.keys.label(Act::Reopen)));
+        }
+        if self.detail {
+            self.view.forget_undo();
+        }
+        self.closed_in_view = self.detail;
+        self.closed = ids;
+    }
+
+    /// `u` on the board: reopen the tasks last closed on it, the
+    /// selection on them.
+    fn reopen_last(&mut self) {
+        let ids = std::mem::take(&mut self.closed);
+        if ids.is_empty() {
+            self.message = "nothing closed here to reopen".into();
+            return;
+        }
+        let result = (|| {
+            let store = self.paths.open(BUSY)?;
+            for id in &ids {
+                crate::start::reopen(&store.conn, id)?;
+            }
+            Ok(match ids.as_slice() {
+                [id] => format!("reopened {}", self.named(id)),
+                _ => format!("{} tasks reopened", ids.len()),
+            })
+        })();
         self.report(result);
+        // Shown, in whichever project, and selected.
+        self.reveal = ids.first().cloned();
+        self.keep = ids;
     }
 }
 
@@ -950,6 +1633,34 @@ fn saved(what: &str, changed: bool) -> String {
 /// Mid-turn: stopping it now loses what it is doing.
 fn busy(status: &str) -> bool {
     matches!(status, "working" | "delegated" | "blocked")
+}
+
+/// The newest event, run, note and hand-off, the latest change to a
+/// cairn or a task's state, the selected task's own words and project,
+/// and the minute: what the view shows changes only with these, its ages
+/// with the minute. Reading them costs far less than reading the view.
+#[derive(Clone, PartialEq)]
+struct Seen([i64; 7], Option<String>, i64);
+
+impl Seen {
+    fn of(store: &Store, task: Option<&str>) -> Result<Seen> {
+        let mut seen = [0; 7];
+        let own = store.conn.query_row(
+            "SELECT (SELECT max(rowid) FROM event), (SELECT max(rowid) FROM run), (SELECT max(rowid) FROM note),
+                    (SELECT max(rowid) FROM shown), (SELECT max(updated) FROM cairn),
+                    (SELECT max(updated) FROM project_cairn), (SELECT max(changed) FROM task),
+                    (SELECT title || char(0) || coalesce(body, '') || char(0) || coalesce(project, '')
+                     FROM task WHERE id = ?1)",
+            [task],
+            |r| {
+                for (i, s) in seen.iter_mut().enumerate() {
+                    *s = r.get::<_, Option<i64>>(i)?.unwrap_or(0);
+                }
+                r.get(7)
+            },
+        )?;
+        Ok(Seen(seen, own, now_ms() / 60_000))
+    }
 }
 
 /// The project the board was started in, as `varde recall` takes it;
@@ -980,8 +1691,13 @@ struct Menu {
 /// Tab, or Shift-Tab when `back`, in a directory prompt: the next (or
 /// previous) directory of the `menu` the last Tab listed put in the
 /// line, or else the line completed.
-fn tab(line: &mut String, menu: Option<Menu>, back: bool) -> Option<Menu> {
-    let Some(mut menu) = menu else { return complete_dir(line) };
+fn tab(line: &mut Field, menu: Option<Menu>, back: bool) -> Option<Menu> {
+    let Some(mut menu) = menu else {
+        let mut text = line.text().to_string();
+        let menu = complete_dir(&mut text);
+        line.set(&text);
+        return menu;
+    };
     let n = menu.names.len();
     let at = match (menu.at, back) {
         (None, false) => 0,
@@ -989,7 +1705,7 @@ fn tab(line: &mut String, menu: Option<Menu>, back: bool) -> Option<Menu> {
         (Some(i), false) => (i + 1) % n,
         (Some(i), true) => (i + n - 1) % n,
     };
-    *line = format!("{}{}/", menu.parent, menu.names[at]);
+    line.set(&format!("{}{}/", menu.parent, menu.names[at]));
     menu.at = Some(at);
     Some(menu)
 }
@@ -1033,30 +1749,6 @@ fn complete_dir(line: &mut String) -> Option<Menu> {
     None
 }
 
-/// A key typed into a one-line prompt: Backspace, C-w or Alt-Backspace
-/// rubbing out the last directory, C-u clearing it, or a character.
-fn edit_line(line: &mut String, key: KeyEvent) {
-    let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-    let alt = key.modifiers.contains(KeyModifiers::ALT);
-    match key.code {
-        KeyCode::Char('w') if ctrl => rub_dir(line),
-        KeyCode::Backspace if alt || ctrl => rub_dir(line),
-        KeyCode::Backspace => {
-            line.pop();
-        }
-        KeyCode::Char('u') if ctrl => line.clear(),
-        KeyCode::Char(c) if !ctrl => line.push(c),
-        _ => {}
-    }
-}
-
-/// Rub out the last directory of a path, and the slash after it, as fish
-/// does: `~/projects/varde/` and `~/projects/va` both become `~/projects/`.
-fn rub_dir(line: &mut String) {
-    let kept = line.trim_end_matches('/').rfind(['/', ' ']).map_or(0, |i| i + 1);
-    line.truncate(kept);
-}
-
 /// Closing from the board: never merging or removing.
 fn closing(keep_running: bool) -> done::Options {
     done::Options { remove: false, force: false, discard: false, keep_running }
@@ -1064,7 +1756,7 @@ fn closing(keep_running: bool) -> done::Options {
 
 #[cfg(test)]
 mod tests {
-    use super::draw::{render, FOOTER};
+    use super::draw::render;
     use super::*;
 
     fn screen(app: &mut App, w: u16, h: u16) -> String {
@@ -1135,7 +1827,7 @@ mod tests {
         app.paste("qqq");
         assert!(!app.quit);
         key(&mut app, KeyCode::Char('?'));
-        assert!(screen(&mut app, 80, 24).contains("start a fresh conversation"));
+        assert!(screen(&mut app, 80, 24).contains("fresh start / fork"));
         key(&mut app, KeyCode::Char('q'));
         assert!(!app.quit, "a key closes the help, and only that");
         key(&mut app, KeyCode::Char('v'));
@@ -1146,7 +1838,22 @@ mod tests {
     }
 
     #[test]
-    fn accept_is_for_the_inbox_and_the_selection_keeps_its_place() {
+    fn esc_bound_to_quit_unmarks_and_closes_the_view_first() {
+        let (_dir, paths) = temp_paths();
+        let mut app = board(&paths, &["One"]);
+        app.keys = Keys::of(&[("quit".to_string(), "esc".to_string())].into());
+        key(&mut app, KeyCode::Char(' '));
+        key(&mut app, KeyCode::Esc);
+        assert!(app.marked.is_empty() && !app.quit, "unmarked first");
+        key(&mut app, KeyCode::Char('v'));
+        key(&mut app, KeyCode::Esc);
+        assert!(!app.detail && !app.quit, "the view closed first");
+        key(&mut app, KeyCode::Esc);
+        assert!(app.quit);
+    }
+
+    #[test]
+    fn accept_is_for_the_inbox_and_the_selection_follows_the_task() {
         let (_dir, paths) = temp_paths();
         let mut app = board(&paths, &["Open one"]);
         key(&mut app, KeyCode::Char('a'));
@@ -1164,9 +1871,16 @@ mod tests {
         }
         let first = app.current_id().unwrap();
         key(&mut app, KeyCode::Char('a'));
-        assert_eq!(app.message, "accepted");
+        assert_eq!(app.message, format!("accepted {}", task::short(&first)));
         let now = app.current().unwrap();
-        assert!(now.task != first && now.inbox, "on the next Inbox row, not the accepted task");
+        assert!(now.task == first && !now.inbox, "on the accepted task, in Open");
+    }
+
+    /// Every task in a project of its own, not a repository: a start
+    /// asks nothing.
+    fn in_a_project(paths: &Paths) {
+        let store = paths.open(BUSY).unwrap();
+        store.conn.execute("UPDATE task SET project = ?1", [paths.home.to_string_lossy()]).unwrap();
     }
 
     fn state(paths: &Paths, id: &str) -> String {
@@ -1181,13 +1895,52 @@ mod tests {
         let id = app.current_id().unwrap();
         app.mode = Mode::Stop(Close::Park, vec![id.clone()]);
         let s = screen(&mut app, 120, 10);
-        assert!(s.contains("Park it: [s]top it, [k]eep it running, Esc cancels"), "{s}");
-        key(&mut app, KeyCode::Char('n'));
+        assert!(s.contains("Park \"Busy\"? It is working.  y stop · n leave running · Esc cancel"), "{s}");
+        key(&mut app, KeyCode::Esc);
         assert_eq!((app.message.as_str(), state(&paths, &id).as_str()), ("cancelled", "open"));
         app.mode = Mode::Stop(Close::Done, vec![id.clone()]);
-        assert!(screen(&mut app, 120, 10).contains("Close it: [s]top"));
-        key(&mut app, KeyCode::Char('k'));
+        assert!(screen(&mut app, 120, 10).contains("Done \"Busy\"? It is working.  y stop"));
+        // Worded by what it is doing: a question is not work.
+        app.groups.iter_mut().flat_map(|g| g.rows.iter_mut()).for_each(|r| r.status = "blocked");
+        assert!(screen(&mut app, 120, 10).contains("\"Busy\"? It is waiting for your answer.  y stop"));
+        // A turn over, with what it left running.
+        app.groups.iter_mut().flat_map(|g| g.rows.iter_mut()).for_each(|r| {
+            (r.status, r.agents, r.shells) = ("waiting", 3, 1);
+        });
+        assert!(screen(&mut app, 120, 10).contains("\"Busy\"? It has 3 agents and a shell running.  y stop"));
+        key(&mut app, KeyCode::Char('n'));
         assert_eq!(state(&paths, &id), "done");
+    }
+
+    #[test]
+    fn closing_a_task_selects_the_open_task_nearest_it() {
+        let (_dir, paths) = temp_paths();
+        let mut app = board(&paths, &["Three", "Two", "One"]);
+        key(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.current().unwrap().title, "Two");
+        key(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.current().unwrap().title, "Three", "the one after it");
+        key(&mut app, KeyCode::Char('P'));
+        assert_eq!(app.current().unwrap().title, "One", "the last: the one before it");
+        key(&mut app, KeyCode::Char('d'));
+        assert_ne!(app.current().map(|r| r.title.as_str()), Some("One"), "never the task just closed");
+    }
+
+    #[test]
+    fn a_recall_hit_says_how_many_more_lines_of_its_task_matched() {
+        let (_dir, paths) = temp_paths();
+        let mut app = board(&paths, &["Cache"]);
+        let id = app.current_id().unwrap();
+        let text = "Status: s\nFindings:\n- The locale matters.\n- The locale is cached.\n- The locale is read twice.\n";
+        let cairn = varde_core::cairn::Cairn::from_edit(text, &Default::default());
+        let store = paths.open(BUSY).unwrap();
+        varde_core::memory::put_cairn(&store.conn, &id, &cairn, 0, "user", None, now_ms()).unwrap();
+        app.recall("locale", true);
+        assert!(
+            screen(&mut app, 100, 24).contains("(+2 more in this task)"),
+            "{}",
+            screen(&mut app, 100, 24)
+        );
     }
 
     #[test]
@@ -1230,8 +1983,8 @@ mod tests {
         key(&mut app, KeyCode::Char('d'));
         assert!(matches!(app.mode, Mode::Stop(Close::Done, _)), "d asks first");
         key(&mut app, KeyCode::Esc);
-        key(&mut app, KeyCode::Char('p'));
-        assert!(matches!(app.mode, Mode::Stop(Close::Park, _)), "p asks first");
+        key(&mut app, KeyCode::Char('P'));
+        assert!(matches!(app.mode, Mode::Stop(Close::Park, _)), "P asks first");
         key(&mut app, KeyCode::Esc);
         assert_eq!(state(&paths, &id), "open");
         sleeper.kill().unwrap();
@@ -1245,10 +1998,20 @@ mod tests {
         let ids: Vec<String> = app.rows().map(|r| r.task.clone()).collect();
         app.mode = Mode::Stop(Close::Park, ids);
         let s = screen(&mut app, 80, 24);
-        assert!(s.contains("[k]eep them running, Esc cancels"), "{s}");
-        app.mode = Mode::Drop(app.current_id().unwrap());
+        assert!(
+            s.contains("Park the 2 marked tasks? Some are working.")
+                && s.contains("\ny stop · n leave running · Esc cancel"),
+            "{s}"
+        );
+        app.mode = Mode::Drop(vec![app.current_id().unwrap()]);
         let s = screen(&mut app, 80, 24);
-        assert!(s.contains("Throw") && s.contains("brings it back.  [y/N]"), "{s}");
+        assert!(s.contains("? Starting it again brings it back.  y/N"), "no worktree, nothing kept:\n{s}");
+        app.groups.iter_mut().flat_map(|g| g.rows.iter_mut()).for_each(|r| r.worktree = true);
+        let s = screen(&mut app, 80, 24);
+        assert!(
+            s.contains("refs/varde/discarded/") && s.contains("brings it back.") && s.contains("\ny/N"),
+            "{s}"
+        );
         app.mode = Mode::Normal;
         app.message = "another session of this task is live in /srv/work/repos/alpha; started abcdef in a window of its own".into();
         let s = screen(&mut app, 80, 24);
@@ -1263,16 +2026,17 @@ mod tests {
     fn starting_a_closed_task_asks_first() {
         let (_dir, paths) = temp_paths();
         let mut app = board(&paths, &["Finished"]);
+        in_a_project(&paths);
         let id = app.current_id().unwrap();
         done::close(&paths.open(BUSY).unwrap(), &id, closing(true)).unwrap();
         app.refresh().unwrap();
         assert_eq!(app.current_id().as_deref(), Some(id.as_str()));
         assert!(key(&mut app, KeyCode::Enter).is_none());
-        assert!(screen(&mut app, 100, 10).contains("is done: reopen and start it?  [y/N]"));
+        assert!(screen(&mut app, 100, 10).contains("is done: reopen and start it?  y/N"));
         key(&mut app, KeyCode::Char('n'));
         assert_eq!((app.message.as_str(), state(&paths, &id).as_str()), ("cancelled", "done"));
         key(&mut app, KeyCode::Enter);
-        assert!(matches!(key(&mut app, KeyCode::Char('y')), Some(Away::Attach(_))), "y starts it");
+        assert!(matches!(key(&mut app, KeyCode::Char('y')), Some(Away::Attach { .. })), "y starts it");
     }
 
     #[test]
@@ -1305,18 +2069,138 @@ mod tests {
         let f = app.found.as_mut().unwrap();
         (f.query, f.all) = ("CacheKey region".into(), false);
         let s = screen(&mut app, 80, 24);
-        assert!(s.lines().any(|l| l.contains("recall: CacheKey region") && l.contains("s start")), "{s}");
+        assert!(s.lines().any(|l| l.contains("Recall: CacheKey region")), "{s}");
+        assert!(s.lines().any(|l| l.contains("RET view  s start  d done") && l.contains("Esc close")), "{s}");
         key(&mut app, KeyCode::Char('j'));
         assert_eq!(app.current_id(), before, "j picks a hit, not a board row");
         assert!(key(&mut app, KeyCode::Enter).is_none(), "RET on a hit starts nothing");
-        assert!(app.found.is_none());
+        assert!(app.found.is_none() && app.detail && !app.project_detail, "the view, on the hit");
         assert_eq!(app.current_id(), Some(second));
+    }
+
+    #[test]
+    fn keys_in_the_recall_pane_act_on_the_hit_never_the_row_it_hides() {
+        let (_dir, paths) = temp_paths();
+        let mut app = board(&paths, &["Cache by locale", "Something else"]);
+        let store = paths.open(BUSY).unwrap();
+        store.conn.execute("UPDATE task SET project = '/p'", []).unwrap();
+        let id = |title: &str| -> String {
+            store.conn.query_row("SELECT id FROM task WHERE title = ?1", [title], |r| r.get(0)).unwrap()
+        };
+        let (hit, other) = (id("Cache by locale"), id("Something else"));
+        let cairn = varde_core::cairn::Cairn::from_edit(
+            "Status: s\nFindings:\n- The locale matters.\n",
+            &Default::default(),
+        );
+        varde_core::memory::put_cairn(&store.conn, &hit, &cairn, 0, "user", None, now_ms()).unwrap();
+        let gotcha = varde_core::memory::Change::Add(
+            varde_core::cairn::Section::Gotchas,
+            "The locale cache is per host.",
+        );
+        let owner = varde_core::memory::Owner::Project("/p");
+        varde_core::memory::change(&mut paths.open(BUSY).unwrap(), owner, gotcha, now_ms()).unwrap();
+        app.refresh().unwrap();
+        // The other task selected and marked, under the pane.
+        while app.current_id().as_deref() != Some(other.as_str()) {
+            app.step(true);
+        }
+        key(&mut app, KeyCode::Char(' '));
+        app.recall("locale", true);
+        let hits = &app.found.as_ref().unwrap().hits;
+        let at = hits.iter().position(|h| h.task == hit).unwrap();
+        let project = hits.iter().position(|h| h.task.is_empty()).unwrap();
+
+        // A project's cairn has no task: its footer has no `s` or `d`,
+        // `d` does nothing, RET views it.
+        app.found.as_mut().unwrap().at = project;
+        let s = screen(&mut app, 100, 24);
+        assert!(s.lines().any(|l| l.contains("RET view  . ") && !l.contains("s start")), "{s}");
+        key(&mut app, KeyCode::Char('d'));
+        assert!(
+            app.message.starts_with("a project cairn has no task") && app.found.is_some(),
+            "{}",
+            app.message
+        );
+        key(&mut app, KeyCode::Char('v'));
+        assert!(app.found.is_none() && app.detail && app.project_detail, "v is RET");
+        assert!(screen(&mut app, 80, 24).contains("╭ p ─"), "the project's name in the border");
+        key(&mut app, KeyCode::Char('q'));
+
+        app.recall("locale", true);
+        app.found.as_mut().unwrap().at = at;
+        key(&mut app, KeyCode::Char('d'));
+        assert_eq!((state(&paths, &hit), state(&paths, &other)), ("done".into(), "open".into()));
+        assert_eq!(app.marked, [other], "marks are the board's");
+    }
+
+    #[test]
+    fn esc_quits_a_popup_once_nothing_is_open() {
+        let (_dir, paths) = temp_paths();
+        let mut app = board(&paths, &["One"]);
+        app.popup = true;
+        key(&mut app, KeyCode::Char(' '));
+        key(&mut app, KeyCode::Char('v'));
+        key(&mut app, KeyCode::Esc);
+        key(&mut app, KeyCode::Esc);
+        assert!(app.marked.is_empty() && !app.detail && !app.quit, "unmarked and closed first");
+        key(&mut app, KeyCode::Esc);
+        assert!(app.quit);
+    }
+
+    #[test]
+    fn a_recall_hit_in_another_project_is_shown_on_the_board() {
+        let (_dir, paths) = temp_paths();
+        let store = paths.open(BUSY).unwrap();
+        task::create(&store, "Here", None, Some("/src/app"), None, 1).unwrap();
+        let there = task::create(&store, "Locale over there", None, Some("/src/lib"), None, 2).unwrap();
+        let cairn = varde_core::cairn::Cairn::from_edit(
+            "Status: s\nFindings:\n- The locale matters.\n",
+            &Default::default(),
+        );
+        varde_core::memory::put_cairn(&store.conn, &there, &cairn, 0, "user", None, now_ms()).unwrap();
+        let mut app = App::new(&paths, None);
+        app.here = Some("/src/app".into());
+        app.refresh().unwrap();
+        assert!(app.row_of(&there).is_none(), "kept to its project");
+        app.recall("locale", true);
+        assert!(key(&mut app, KeyCode::Enter).is_none());
+        assert_eq!(app.current_id().as_deref(), Some(there.as_str()), "{}", app.message);
+        assert!(app.message.contains("every project"), "{}", app.message);
+    }
+
+    #[test]
+    fn a_project_cairn_hit_opens_on_a_task_of_its_own_project() {
+        let (_dir, paths) = temp_paths();
+        let store = paths.open(BUSY).unwrap();
+        let here = task::create(&store, "Here", None, Some("/src/app"), None, 2).unwrap();
+        let there = task::create(&store, "Over there", None, Some("/src/lib"), None, 1).unwrap();
+        let gotcha = varde_core::memory::Change::Add(
+            varde_core::cairn::Section::Gotchas,
+            "The locale cache is per host.",
+        );
+        let owner = varde_core::memory::Owner::Project("/src/lib");
+        varde_core::memory::change(&mut paths.open(BUSY).unwrap(), owner, gotcha, now_ms()).unwrap();
+        let mut app = App::new(&paths, None);
+        app.refresh().unwrap();
+        assert_eq!(app.current_id(), Some(here));
+        app.recall("locale", true);
+        assert!(app.found.as_ref().unwrap().hits[0].task.is_empty(), "the project's cairn");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.current_id(), Some(there), "{}", app.message);
+        assert!(app.detail && app.project_detail);
+        // A project with no task on the board says so.
+        store.conn.execute("UPDATE task SET project = '/src/app'", []).unwrap();
+        app.refresh().unwrap();
+        app.recall("locale", true);
+        key(&mut app, KeyCode::Enter);
+        assert!(app.message.starts_with("no task of lib on the board"), "{}", app.message);
     }
 
     #[test]
     fn s_on_a_recall_hit_starts_its_task_even_one_gone_from_the_board() {
         let (_dir, paths) = temp_paths();
         let mut app = board(&paths, &["Cache by locale", "Something else"]);
+        in_a_project(&paths);
         let ids: Vec<String> = app.rows().map(|r| r.task.clone()).collect();
         {
             let store = paths.open(BUSY).unwrap();
@@ -1345,11 +2229,11 @@ mod tests {
         let at = app.found.as_ref().unwrap().hits.iter().position(|h| h.task == old).unwrap();
         app.found.as_mut().unwrap().at = at;
         assert!(key(&mut app, KeyCode::Char('s')).is_none(), "a closed one asks first");
-        assert!(screen(&mut app, 100, 10).contains("reopen and start it?  [y/N]"));
+        assert!(screen(&mut app, 100, 10).contains("reopen and start it?  y/N"));
         key(&mut app, KeyCode::Char('n'));
         assert_eq!(state(&paths, &old), "done");
         assert!(key(&mut app, KeyCode::Char('s')).is_none());
-        assert!(matches!(key(&mut app, KeyCode::Char('y')), Some(Away::Attach(_))), "y starts it");
+        assert!(matches!(key(&mut app, KeyCode::Char('y')), Some(Away::Attach { .. })), "y starts it");
         assert_eq!(state(&paths, &old), "open");
         assert!(app.found.is_none());
         assert_eq!(app.current_id().as_deref(), Some(old.as_str()), "the start is of the hit");
@@ -1359,7 +2243,7 @@ mod tests {
         app.recall("locale", true);
         let at = app.found.as_ref().unwrap().hits.iter().position(|h| h.task == other).unwrap();
         app.found.as_mut().unwrap().at = at;
-        assert!(matches!(key(&mut app, KeyCode::Char('s')), Some(Away::Attach(_))));
+        assert!(matches!(key(&mut app, KeyCode::Char('s')), Some(Away::Attach { .. })));
         assert_eq!(app.current_id(), Some(other));
     }
 
@@ -1402,25 +2286,6 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_w_rubs_out_a_directory_and_ctrl_u_the_line() {
-        let mut line = "~/projects/varde/".to_string();
-        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
-        edit_line(&mut line, ctrl('w'));
-        assert_eq!(line, "~/projects/");
-        line.push_str("va");
-        edit_line(&mut line, KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
-        assert_eq!(line, "~/projects/");
-        edit_line(&mut line, ctrl('w'));
-        edit_line(&mut line, ctrl('w'));
-        assert_eq!(line, "");
-        edit_line(&mut line, ctrl('w'));
-        assert_eq!(line, "", "nothing left to rub out");
-        line.push_str("/srv/p");
-        edit_line(&mut line, ctrl('u'));
-        assert_eq!(line, "");
-    }
-
-    #[test]
     fn tab_in_the_new_tasks_project_line_completes_lists_and_picks() {
         let (dir, paths) = temp_paths();
         for d in ["alpha", "alps", "alto"] {
@@ -1431,9 +2296,9 @@ mod tests {
         key(&mut app, KeyCode::Char('T'));
         key(&mut app, KeyCode::Enter);
         let Mode::Where(_, line) = &mut app.mode else { panic!("not asking the project") };
-        *line = format!("{}/a", dir.path().display());
+        line.set(&format!("{}/a", dir.path().display()));
         let line = |app: &App| match &app.mode {
-            Mode::Where(_, l) => l.rsplit_terminator('/').next().unwrap().to_string(),
+            Mode::Where(_, l) => l.text().rsplit_terminator('/').next().unwrap().to_string(),
             _ => panic!("left the prompt"),
         };
         key(&mut app, KeyCode::Tab);
@@ -1450,7 +2315,7 @@ mod tests {
         assert!(screen(&mut app, 120, 10).contains("alpha  alps  alto"), "listed while picking");
         key(&mut app, KeyCode::Char('x'));
         assert!(!screen(&mut app, 120, 10).contains("alpha  alps"), "gone at another key");
-        assert!(matches!(&app.mode, Mode::Where(_, l) if l.ends_with("/alto/x")), "the pick kept");
+        assert!(matches!(&app.mode, Mode::Where(_, l) if l.text().ends_with("/alto/x")), "the pick kept");
     }
 
     #[test]
@@ -1461,12 +2326,12 @@ mod tests {
             std::fs::create_dir(dir.path().join(n)).unwrap();
         }
         let mut app = board(&paths, &[]);
-        app.mode = Mode::Where(Draft::default(), format!("{}/", dir.path().display()));
+        app.mode = Mode::Where(Draft::default(), Field::new(&format!("{}/", dir.path().display())));
         key(&mut app, KeyCode::Tab);
         for _ in 0..16 {
             key(&mut app, KeyCode::Tab);
         }
-        assert!(matches!(&app.mode, Mode::Where(_, l) if l.ends_with("/dir14/")));
+        assert!(matches!(&app.mode, Mode::Where(_, l) if l.text().ends_with("/dir14/")));
         let s = screen(&mut app, 80, 10);
         assert!(s.contains("dir14") && !s.contains("dir00") && s.contains("…"), "{s}");
     }
@@ -1482,7 +2347,7 @@ mod tests {
     }
 
     #[test]
-    fn g_and_home_jump_to_the_ends() {
+    fn gg_g_and_home_jump_to_the_ends() {
         let (_dir, paths) = temp_paths();
         let mut app = board(&paths, &["One", "Two", "Three"]);
         let first = app.current_id();
@@ -1490,6 +2355,122 @@ mod tests {
         assert_eq!(app.current().unwrap().title, "One", "the oldest is last");
         key(&mut app, KeyCode::Home);
         assert_eq!(app.current_id(), first);
+        key(&mut app, KeyCode::Char('G'));
+        key(&mut app, KeyCode::Char('g'));
+        assert_eq!(app.current().unwrap().title, "One", "one g waits");
+        key(&mut app, KeyCode::Char('g'));
+        assert_eq!(app.current_id(), first);
+        // A g then another key is that key.
+        key(&mut app, KeyCode::Char('g'));
+        key(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.current().unwrap().title, "Two");
+    }
+
+    /// Put `title` in the group a board shows it in.
+    fn put(paths: &Paths, title: &str, group: &str) {
+        let store = paths.open(BUSY).unwrap();
+        let id = task::create(&store, title, None, None, None, 1).unwrap();
+        let sql = match group {
+            "inbox" => "UPDATE task SET inbox = 1 WHERE id = ?1",
+            "done" => "UPDATE task SET state = 'done', closed = 9e15 WHERE id = ?1",
+            "parked" => "UPDATE task SET state = 'parked' WHERE id = ?1",
+            _ => return,
+        };
+        store.conn.execute(sql, [&id]).unwrap();
+    }
+
+    #[test]
+    fn every_group_is_always_there_and_z_folds_any() {
+        let (_dir, paths) = temp_paths();
+        let mut app = board(&paths, &["Open one"]);
+        put(&paths, "Later", "parked");
+        app.refresh().unwrap();
+        let s = screen(&mut app, 80, 12);
+        for g in ["Needs you  0", "Working  0", "Open  1", "Inbox  0", "Done  0", "Parked  1 ▸"] {
+            assert!(s.contains(g), "{g}:\n{s}");
+        }
+        assert!(!s.contains("Later") && !s.contains("Dropped"), "{s}");
+        // The folded group is a stop on the way down; RET opens it.
+        key(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.group_at, Some("parked"));
+        assert!(key(&mut app, KeyCode::Enter).is_none());
+        assert_eq!(app.current().unwrap().title, "Later");
+        // z folds the group at point, any group, and opens it again.
+        key(&mut app, KeyCode::Char('k'));
+        key(&mut app, KeyCode::Char('z'));
+        let s = screen(&mut app, 80, 12);
+        assert!(s.contains("Open  1 ▸") && !s.contains("Open one"), "{s}");
+        key(&mut app, KeyCode::Char('z'));
+        assert_eq!(app.current().unwrap().title, "Open one");
+    }
+
+    #[test]
+    fn tab_cycles_what_needs_you_and_braces_move_by_group() {
+        let (_dir, paths) = temp_paths();
+        let mut app = board(&paths, &["Open one", "Open two"]);
+        put(&paths, "In", "inbox");
+        app.refresh().unwrap();
+        key(&mut app, KeyCode::Tab);
+        assert_eq!(app.message, "nothing needs you");
+        // Needs you is what varde says: rows put there by hand stand in.
+        let needs = app.groups.iter().position(|g| g.key == "needs_you").unwrap();
+        let open = app.groups.iter().position(|g| g.key == "open").unwrap();
+        let moved: Vec<Row> = app.groups[open].rows.drain(..).collect();
+        app.groups[needs].rows = moved;
+        app.layout();
+        // Where the board opened, on the first that needs you, the first
+        // Tab stays there.
+        assert_eq!(app.current().unwrap().title, "Open two");
+        key_only(&mut app, KeyCode::Tab);
+        assert_eq!(
+            (app.current().unwrap().title.as_str(), app.message.as_str()),
+            ("Open two", "needs you: 1 of 2")
+        );
+        key_only(&mut app, KeyCode::Tab);
+        assert_eq!(app.current().unwrap().title, "Open one");
+        app.select(app.items.len() - 1);
+        key_only(&mut app, KeyCode::Tab);
+        assert_eq!(
+            (app.current().unwrap().title.as_str(), app.message.as_str()),
+            ("Open two", "needs you: 1 of 2")
+        );
+        key_only(&mut app, KeyCode::Tab);
+        key_only(&mut app, KeyCode::Tab);
+        assert_eq!(app.current().unwrap().title, "Open two", "round again");
+        key_only(&mut app, KeyCode::BackTab);
+        assert_eq!(app.current().unwrap().title, "Open one");
+        key_only(&mut app, KeyCode::Char('}'));
+        assert_eq!(app.current().unwrap().title, "In", "past the empty groups");
+        key_only(&mut app, KeyCode::Char('{'));
+        assert_eq!(app.current().unwrap().title, "Open two", "the top of the one before");
+        key_only(&mut app, KeyCode::Char('j'));
+        key_only(&mut app, KeyCode::Char('{'));
+        assert_eq!(app.current().unwrap().title, "Open two", "the top of its own first");
+    }
+
+    #[test]
+    fn half_a_page_moves_the_list_or_scrolls_the_pane() {
+        let (_dir, paths) = temp_paths();
+        let titles: Vec<String> = (0..30).map(|i| format!("Task {i}")).collect();
+        let mut app = board(&paths, &titles.iter().map(String::as_str).collect::<Vec<_>>());
+        screen(&mut app, 80, 24);
+        let ctrl = |app: &mut App, c| app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
+        ctrl(&mut app, 'd');
+        assert_eq!(app.current().unwrap().title, "Task 18", "11 rows down");
+        ctrl(&mut app, 'u');
+        assert_eq!(app.current().unwrap().title, "Task 29");
+        let body: Vec<String> = (0..40).map(|i| format!("line {i}")).collect();
+        let store = paths.open(BUSY).unwrap();
+        store.conn.execute("UPDATE task SET body = ?1", [body.join("\n")]).unwrap();
+        key(&mut app, KeyCode::Char('v'));
+        screen(&mut app, 80, 24);
+        ctrl(&mut app, 'd');
+        assert!(app.view.scroll > 0 && app.current().unwrap().title == "Task 29");
+    }
+
+    /// A key, without reading the board again.
+    fn key_only(app: &mut App, code: KeyCode) {
+        app.key(KeyEvent::new(code, KeyModifiers::NONE));
     }
 
     #[test]
@@ -1497,8 +2478,8 @@ mod tests {
         let (_dir, paths) = temp_paths();
         let titles: Vec<String> = (0..30).map(|i| format!("Task {i}")).collect();
         let mut app = board(&paths, &titles.iter().map(String::as_str).collect::<Vec<_>>());
-        let Item::Header { label, .. } = &app.items[0] else { panic!("a header first") };
-        let header = format!("{label} (");
+        assert!(matches!(app.items[0], Item::Header(_)), "a header first");
+        let header = format!("{}  ", app.group(0).label);
         // The detail pane shrinks the list, which scrolls; closing it
         // must not leave the top scrolled off.
         for code in [KeyCode::End, KeyCode::Char('v'), KeyCode::Char('v'), KeyCode::Home] {
@@ -1605,15 +2586,55 @@ mod tests {
     fn a_wide_title_keeps_the_columns_in_place() {
         let (_dir, paths) = temp_paths();
         let mut app = board(&paths, &["Plain title", "Ünïcødé 日本語のタイトル 🚀 and a long tail of words"]);
-        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(100, 10)).unwrap();
+        let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(60, 10)).unwrap();
         term.draw(|f| app.draw(f)).unwrap();
         let buf = term.backend().buffer().clone();
-        // The project column, `-` here, is at the same place on every row.
-        let project_at = |y: u16| (0..100).rev().find(|&x| buf[(x, y)].symbol() == "-");
-        let rows: Vec<u16> = (0..10).filter(|&y| (0..100).any(|x| buf[(x, y)].symbol() == "…")).collect();
-        let plain = (0..10).find(|&y| (0..100).any(|x| buf[(x, y)].symbol() == "P")).unwrap();
+        // What follows the title ends at the same place on every row.
+        let end = |y: u16| (0..60).rev().find(|&x| buf[(x, y)].symbol() != " ");
+        let rows: Vec<u16> = (0..10).filter(|&y| (0..60).any(|x| buf[(x, y)].symbol() == "…")).collect();
+        let plain = (0..10).find(|&y| (0..60).any(|x| buf[(x, y)].symbol() == "P")).unwrap();
         assert_eq!(rows.len(), 1);
-        assert_eq!(project_at(rows[0]), project_at(plain));
+        assert_eq!(end(rows[0]), end(plain));
+    }
+
+    #[test]
+    fn needs_you_rows_leave_out_your_turn_and_say_needs_input() {
+        let (_dir, paths) = temp_paths();
+        let mut app = board(&paths, &["Waiting", "Asking"]);
+        let needs = app.groups.iter().position(|g| g.key == "needs_you").unwrap();
+        let open = app.groups.iter().position(|g| g.key == "open").unwrap();
+        let mut moved: Vec<Row> = app.groups[open].rows.drain(..).collect();
+        moved[0].status = "waiting";
+        moved[1].status = "blocked";
+        app.groups[needs].rows = moved;
+        app.layout();
+        let s = screen(&mut app, 80, 12);
+        assert!(!s.contains("your turn") && s.contains("needs input"), "{s}");
+    }
+
+    #[test]
+    fn the_board_dims_under_an_open_pane() {
+        let (_dir, paths) = temp_paths();
+        let mut app = board(&paths, &["One", "Two"]);
+        let colour = |app: &mut App| {
+            let mut term = ratatui::Terminal::new(ratatui::backend::TestBackend::new(80, 24)).unwrap();
+            term.draw(|f| app.draw(f)).unwrap();
+            let buf = term.backend().buffer().clone();
+            // The title of the row not selected: "One", under "Two".
+            let y = (0..24).find(|&y| buf[(3, y)].symbol() == "O" && buf[(4, y)].symbol() == "n").unwrap();
+            buf[(3, y)].fg
+        };
+        assert_ne!(colour(&mut app), ratatui::style::Color::DarkGray);
+        key(&mut app, KeyCode::Char('v'));
+        assert_eq!(colour(&mut app), ratatui::style::Color::DarkGray);
+        assert!(screen(&mut app, 80, 24).contains("╭ Two  "), "the view's title in its border");
+        // The form is a pane too, and so is the help, over the rows.
+        key(&mut app, KeyCode::Char('q'));
+        key(&mut app, KeyCode::Char('n'));
+        assert_eq!(colour(&mut app), ratatui::style::Color::DarkGray);
+        assert!(screen(&mut app, 80, 24).contains("╭ New task "));
+        app.mode = Mode::Help;
+        assert!(screen(&mut app, 80, 24).contains("╭ varde "));
     }
 
     #[test]
@@ -1693,6 +2714,44 @@ mod tests {
     }
 
     #[test]
+    #[cfg_attr(not(target_os = "linux"), ignore = "uses util-linux script")]
+    fn in_a_popup_going_to_a_session_quits_the_board_and_starting_one_does_not() {
+        let (dir, paths) = temp_paths();
+        let mut app = board(&paths, &["One", "Two"]);
+        in_a_project(&paths);
+        app.refresh().unwrap();
+        let Some(server) = Server::start(dir.path()) else { return eprintln!("no tmux; skipped") };
+        app.tmux = Some(tmux::at(dir.path().join("tmux.sock")));
+        app.popup = true;
+        // switch-client needs a client attached, as a popup's is.
+        let attach = format!("tmux -S {} attach -t board", server.0.display());
+        let mut client = std::process::Command::new("script")
+            .args(["-qfc", &attach, "/dev/null"])
+            .env("TERM", "xterm-256color")
+            .env_remove("TMUX")
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .spawn()
+            .unwrap();
+        let attached = (0..100).any(|_| {
+            std::thread::sleep(Duration::from_millis(20));
+            let out =
+                std::process::Command::new("tmux").arg("-S").arg(&server.0).arg("list-clients").output();
+            out.is_ok_and(|o| !o.stdout.is_empty())
+        });
+        if attached {
+            key(&mut app, KeyCode::Char('s'));
+            assert!(app.message.contains("in a window of its own") && !app.quit, "{}", app.message);
+            key(&mut app, KeyCode::Char('j'));
+            key(&mut app, KeyCode::Enter);
+            assert!(app.quit, "went to it: {}", app.message);
+        }
+        let _ = client.kill();
+        let _ = client.wait();
+        assert!(attached, "no tmux client attached");
+    }
+
+    #[test]
     fn the_board_closes_only_its_stores_windows_of_tasks_it_knows_closed() {
         let (dir, paths) = temp_paths();
         let mut app = board(&paths, &["Parked"]);
@@ -1738,11 +2797,12 @@ mod tests {
     fn a_key_reads_the_board_again_only_when_it_changed_it() {
         let (_dir, paths) = temp_paths();
         let mut app = board(&paths, &["One", "Two"]);
-        for code in [KeyCode::Char('j'), KeyCode::Char('k'), KeyCode::Char('v'), KeyCode::Char(' ')] {
+        let keys = ['j', 'k', 'v', 'j', 'v', ' '].map(KeyCode::Char);
+        for code in keys {
             app.key(KeyEvent::new(code, KeyModifiers::NONE));
             assert!(!app.stale, "{code:?}");
         }
-        app.key(KeyEvent::new(KeyCode::Char('p'), KeyModifiers::NONE));
+        app.key(KeyEvent::new(KeyCode::Char('P'), KeyModifiers::NONE));
         assert!(app.stale);
     }
 
@@ -1767,7 +2827,6 @@ mod tests {
 
     #[test]
     fn the_footer_and_help_fit_80_columns_and_the_cairn_shows_at_80x24() {
-        assert!(FOOTER.chars().count() <= 80);
         let (_dir, paths) = temp_paths();
         let mut app = board(&paths, &["One", "Two"]);
         {
@@ -1795,17 +2854,56 @@ mod tests {
         key(&mut app, KeyCode::Char('v'));
         let s = screen(&mut app, 80, 24);
         assert!(s.contains("The cache key omits the locale."), "the cairn is in view:\n{s}");
+        key(&mut app, KeyCode::Char('q'));
         key(&mut app, KeyCode::Char('?'));
         let help = screen(&mut app, 80, 24);
-        assert!(help.contains("diff of its work") && help.contains("redraw the screen"), "{help}");
+        assert!(help.contains("diff of its work") && help.contains("redraw and refresh"), "{help}");
         assert!(help.contains("move to another project"), "{help}");
+        // It opens with what each group holds.
+        for group in ["Needs you", "Working", "Open", "Inbox  ", "Done", "Parked"] {
+            assert!(help.contains(group), "{group}:\n{help}");
+        }
+        assert!(
+            help.contains("a       accept an Inbox task") && help.contains("next / previous task"),
+            "{help}"
+        );
+        assert!(
+            help.contains("Groups   ● working or unread") && help.contains("closed today or not landed"),
+            "{help}"
+        );
+        // What a cairn is, in the body under Groups, not the border.
+        let cairn = help.lines().position(|l| l.contains("Cairn    what sessions learned")).unwrap();
+        assert!(help.lines().nth(cairn - 1).unwrap().contains("Groups"), "{help}");
+        assert!(help.lines().nth(cairn).unwrap().contains("› yours  ? stale: its code is gone"), "{help}");
+        // Taller than 80x24, it scrolls to its end; any other key closes it.
+        assert!(help.contains("↓ j more") && !help.contains("u undoes"), "{help}");
+        key(&mut app, KeyCode::Char('j'));
+        key(&mut app, KeyCode::Char('j'));
+        let end = screen(&mut app, 80, 24);
+        assert!(
+            end.contains("u undoes the last x, d, P or X in the view") && !end.contains("j more"),
+            "{end}"
+        );
+        key(&mut app, KeyCode::Char('j'));
+        assert!(matches!(app.mode, Mode::Help));
+        key(&mut app, KeyCode::Char('x'));
+        assert!(matches!(app.mode, Mode::Normal));
+        // In a 90%x85% popup of an 80x24 terminal, too, nothing collides.
+        key(&mut app, KeyCode::Char('?'));
+        let popup = screen(&mut app, 72, 20);
+        assert!(
+            popup.contains("Tab/S-Tab cycle what needs you") && popup.contains("d/P/x   done"),
+            "{popup}"
+        );
+        assert!(popup.contains("? stale: its code is gone"), "{popup}");
     }
 
     #[test]
-    fn v_shows_the_project_cairn_and_e_edits_it() {
+    fn the_views_project_tab_shows_the_project_cairn_and_e_then_edits_it() {
         let (_dir, paths) = temp_paths();
         let mut app = board(&paths, &["One"]);
-        key(&mut app, KeyCode::Char('V'));
+        key(&mut app, KeyCode::Char('v'));
+        key(&mut app, KeyCode::Char(']'));
         assert!(screen(&mut app, 80, 24).contains("no project yet"));
         assert!(key(&mut app, KeyCode::Char('E')).is_none(), "nothing to edit without a project");
         {
@@ -1827,16 +2925,27 @@ mod tests {
         }
         app.refresh().unwrap();
         let s = screen(&mut app, 80, 24);
-        assert!(s.contains("project cairn") && s.contains("tests fail on macOS"), "{s}");
+        assert!(s.contains(" Task   Project ") && s.contains("what p's tasks learned"), "{s}");
+        assert!(s.contains("Gotchas") && s.contains("tests fail on macOS"), "{s}");
+        key(&mut app, KeyCode::Char('['));
+        assert!(!screen(&mut app, 80, 24).contains("tests fail on macOS"), "[ shows the task again");
+        key(&mut app, KeyCode::Char(']'));
         key(&mut app, KeyCode::Char('v'));
-        assert!(!screen(&mut app, 80, 24).contains("tests fail on macOS"), "v shows the task again");
+        assert!(!app.detail, "v closes it, on either tab");
+        assert!(matches!(key(&mut app, KeyCode::Char('E')), Some(Away::Edit(_))), "the task's cairn");
         key(&mut app, KeyCode::Char('v'));
-        assert!(!app.detail, "the same key closes it");
+        assert!(!app.project_detail, "v opens on the task");
+        key(&mut app, KeyCode::Char(']'));
         assert!(matches!(key(&mut app, KeyCode::Char('E')), Some(Away::EditProject(p)) if p == "/p"));
+        // `cairn` in [keys] opens the view on the Project tab.
+        app.keys = Keys::of(&[("cairn".to_string(), "C".to_string())].into());
+        key(&mut app, KeyCode::Char('q'));
+        key(&mut app, KeyCode::Char('C'));
+        assert!(app.detail && app.project_detail);
     }
 
     #[test]
-    fn e_edits_title_and_context_in_the_form_until_there_is_a_cairn() {
+    fn e_edits_title_and_context_in_the_form() {
         let (_dir, paths) = temp_paths();
         let mut app = board(&paths, &["One"]);
         let id = app.current_id().unwrap();
@@ -1847,9 +2956,11 @@ mod tests {
         };
 
         assert!(key(&mut app, KeyCode::Char('e')).is_none(), "no editor");
-        assert!(matches!(&app.mode, Mode::New(d) if d.title == "One" && d.body == "Old context."));
+        assert!(
+            matches!(&app.mode, Mode::New(d) if d.title.text() == "One" && d.body.text() == "Old context.")
+        );
         let s = screen(&mut app, 100, 24);
-        assert!(s.contains("Edit task") && s.contains("on title save"), "{s}");
+        assert!(s.contains("Edit task") && s.contains("RET save"), "{s}");
         app.paste(" more");
         key(&mut app, KeyCode::Tab);
         key(&mut app, KeyCode::Enter);
@@ -1860,21 +2971,59 @@ mod tests {
         assert_eq!(text("body").as_deref(), Some("Old context.\nNew line."));
         assert_eq!(app.rows().count(), 1, "nothing created");
 
-        // Esc changes nothing.
+        // A cleared title is cut from the context, as a new task's is; with
+        // no context either, the refusal shows over the form, which stays.
+        key(&mut app, KeyCode::Char('e'));
+        app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(app.message.starts_with("saved "), "{}", app.message);
+        assert_eq!(text("title").as_deref(), Some("Old context"));
+        assert_eq!(text("prompt_title").as_deref(), Some("Old context"), "the model may name it");
+        key(&mut app, KeyCode::Char('e'));
+        app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        key(&mut app, KeyCode::Tab);
+        for _ in 0..3 {
+            app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        }
+        app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(matches!(app.mode, Mode::New(_)), "the form stays");
+        assert!(screen(&mut app, 100, 24).contains("a task needs a title or a context"));
+        key(&mut app, KeyCode::Char('x'));
+        assert!(!screen(&mut app, 100, 24).contains("needs a title"), "gone at the next key");
+        app.mode = Mode::Normal;
+        store.conn.execute("UPDATE task SET title = 'One more', prompt_title = NULL", []).unwrap();
+        app.refresh().unwrap();
+
+        // Esc changes nothing, and keeps what was typed for the next e,
+        // as often as it is pressed; nothing changed, it keeps nothing.
         key(&mut app, KeyCode::Char('e'));
         app.paste("!");
         key(&mut app, KeyCode::Esc);
         assert_eq!(text("title").as_deref(), Some("One more"));
+        assert_eq!(app.message, "changes to \"One more\" kept: e on it brings them back");
+        for _ in 0..2 {
+            key(&mut app, KeyCode::Char('e'));
+            assert!(matches!(&app.mode, Mode::New(d) if d.title.text() == "One more!"));
+            key(&mut app, KeyCode::Esc);
+        }
+        key(&mut app, KeyCode::Char('e'));
+        key(&mut app, KeyCode::Backspace);
+        key(&mut app, KeyCode::Esc);
+        assert_eq!(app.message, "draft dropped");
+        key(&mut app, KeyCode::Char('e'));
+        assert!(matches!(&app.mode, Mode::New(d) if d.title.text() == "One more"));
+        key(&mut app, KeyCode::Esc);
 
+        // A cairn changes nothing: `e` is the form, `E` the whole cairn in $EDITOR.
         let cairn =
             varde_core::cairn::Cairn::from_edit("Status: Looked.\nFindings:\n- A.\n", &Default::default());
         varde_core::memory::put_cairn(&store.conn, &id, &cairn, 0, "user", None, now_ms()).unwrap();
-        assert!(
-            matches!(key(&mut app, KeyCode::Char('e')), Some(Away::Edit(t)) if t == id),
-            "a cairn: $EDITOR"
-        );
+        assert!(key(&mut app, KeyCode::Char('e')).is_none() && matches!(app.mode, Mode::New(_)));
+        key(&mut app, KeyCode::Esc);
+        assert!(matches!(key(&mut app, KeyCode::Char('E')), Some(Away::Edit(t)) if t == id));
 
         store.conn.execute("UPDATE task SET external = 'org'", []).unwrap();
+        app.refresh().unwrap();
         assert!(matches!(key(&mut app, KeyCode::Char('e')), Some(Away::Edit(_))), "linked: $EDITOR");
     }
 
@@ -1897,7 +3046,26 @@ mod tests {
         // A blank title is refused before the project is asked.
         key(&mut app, KeyCode::Char('n'));
         key(&mut app, KeyCode::Enter);
-        assert!(matches!(app.mode, Mode::Normal) && app.message == "a task needs a title", "{}", app.message);
+        let refused = "a task needs a title or a context";
+        assert!(matches!(app.mode, Mode::New(_)) && app.message == refused, "{}", app.message);
+        key(&mut app, KeyCode::Esc);
+        assert!(app.kept.is_empty(), "nothing typed, nothing kept");
+
+        // Only a context: the title is cut from it, as from a first prompt.
+        key(&mut app, KeyCode::Char('n'));
+        key(&mut app, KeyCode::Tab);
+        app.paste("why does the cache key ignore the region in the locale cache");
+        app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        key(&mut app, KeyCode::Enter);
+        let titled: (String, String) = store
+            .conn
+            .query_row("SELECT title, prompt_title FROM task WHERE body LIKE 'why%'", [], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap();
+        assert_eq!(titled.0, "why does the cache key ignore the region…");
+        assert_eq!(titled.1, titled.0, "the model may name it");
+        store.conn.execute("DELETE FROM task WHERE body LIKE 'why%'", []).unwrap();
 
         key(&mut app, KeyCode::Char('n'));
         app.paste("Two");
@@ -1905,7 +3073,7 @@ mod tests {
         assert!(screen(&mut app, 200, 24).contains(&format!("Project for this task: {}", old.display())));
         // Esc goes back to the form, the title kept.
         key(&mut app, KeyCode::Esc);
-        assert!(matches!(&app.mode, Mode::New(d) if d.title == "Two"));
+        assert!(matches!(&app.mode, Mode::New(d) if d.title.text() == "Two"));
         key(&mut app, KeyCode::Enter);
         app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         app.paste(&new.to_string_lossy());
@@ -1922,6 +3090,75 @@ mod tests {
         key(&mut app, KeyCode::Enter);
         assert!(app.message.contains("no directory"), "{}", app.message);
         assert_eq!(store.conn.query_row("SELECT count(*) FROM task", [], |r| r.get::<_, i64>(0)).unwrap(), 2);
+        assert!(matches!(&app.mode, Mode::Where(d, _) if d.title.text() == "Three"), "the draft is kept");
+
+        // Esc twice puts it away, and n takes it up again, as often as
+        // that; cleared, Esc drops it.
+        key(&mut app, KeyCode::Esc);
+        key(&mut app, KeyCode::Esc);
+        assert_eq!(app.message, "new task kept: n brings it back");
+        key(&mut app, KeyCode::Char('n'));
+        assert!(matches!(&app.mode, Mode::New(d) if d.title.text() == "Three"));
+        key(&mut app, KeyCode::Esc);
+        key(&mut app, KeyCode::Char('n'));
+        assert!(matches!(&app.mode, Mode::New(d) if d.title.text() == "Three"));
+        app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        key(&mut app, KeyCode::Esc);
+        assert_eq!(app.message, "draft dropped");
+        key(&mut app, KeyCode::Char('n'));
+        assert!(matches!(&app.mode, Mode::New(d) if d.is_empty()));
+    }
+
+    #[test]
+    fn a_draft_outlives_the_board_quitting_or_starting_again_as_a_newer_varde() {
+        let (_dir, paths) = temp_paths();
+        let mut app = board(&paths, &[]);
+        key(&mut app, KeyCode::Char('n'));
+        app.paste("Half written\nwith context");
+        app.put_draft();
+        let mut again = board(&paths, &[]);
+        again.take_draft();
+        assert_eq!(again.message, "your new task is kept: n brings it back");
+        key(&mut again, KeyCode::Char('n'));
+        assert!(
+            matches!(&again.mode, Mode::New(d) if d.title.text() == "Half written" && d.body.text() == "with context")
+        );
+        assert!(!again.drafts_file().exists());
+    }
+
+    #[test]
+    fn a_board_kept_to_its_project_makes_new_tasks_there_and_shows_one_made_elsewhere() {
+        let (dir, paths) = temp_paths();
+        let dir = dir.path().canonicalize().unwrap();
+        let (here, there) = (dir.join("here"), dir.join("there"));
+        for d in [&here, &there] {
+            std::fs::create_dir(d).unwrap();
+        }
+        let here_s = here.to_string_lossy().to_string();
+        task::create(&paths.open(BUSY).unwrap(), "Old", None, Some(&here_s), None, 1).unwrap();
+        let mut app = App::new(&paths, None);
+        app.here = Some(here_s.clone());
+        app.refresh().unwrap();
+        key(&mut app, KeyCode::Char('n'));
+        app.paste("No question asked");
+        key(&mut app, KeyCode::Enter);
+        assert!(matches!(app.mode, Mode::Normal) && app.message.starts_with("created "), "{}", app.message);
+        assert_eq!(app.current().unwrap().title, "No question asked");
+
+        // Showing every project, it asks; a task made in another project
+        // is shown, and selected, so RET starts it.
+        key(&mut app, KeyCode::Char('.'));
+        key(&mut app, KeyCode::Char('.'));
+        app.scoped = false;
+        key(&mut app, KeyCode::Char('n'));
+        app.paste("Over there");
+        key(&mut app, KeyCode::Enter);
+        app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        app.paste(&there.to_string_lossy());
+        app.scoped = true;
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(app.current().unwrap().title, "Over there", "{}", app.message);
+        assert!(!app.scoped && app.message.contains("showing every project"), "{}", app.message);
     }
 
     #[test]
@@ -1965,5 +3202,100 @@ mod tests {
         assert_eq!(project(), new.to_string_lossy());
         assert!(app.message.contains("has an active worktree"), "{}", app.message);
         assert!(screen(&mut app, 80, 24).contains("has an active worktree"));
+    }
+
+    #[test]
+    fn z_opens_a_group_on_the_task_it_was_folded_from() {
+        let (_dir, paths) = temp_paths();
+        let mut app = board(&paths, &["One", "Two", "Three"]);
+        key(&mut app, KeyCode::Char('j'));
+        assert_eq!(app.current().unwrap().title, "Two");
+        key(&mut app, KeyCode::Char('z'));
+        assert!(app.current().is_none());
+        key(&mut app, KeyCode::Char('z'));
+        assert_eq!(app.current().unwrap().title, "Two");
+    }
+
+    #[test]
+    fn marked_tasks_are_counted_and_acted_on_together() {
+        let (_dir, paths) = temp_paths();
+        let mut app = board(&paths, &["One", "Two", "Three"]);
+        key(&mut app, KeyCode::Char(' '));
+        key(&mut app, KeyCode::Char(' '));
+        let s = screen(&mut app, 80, 12);
+        assert!(s.contains("2 marked  space mark") && s.contains("x drop"), "{s}");
+        // x asks about them all, naming how many; Esc keeps them marked.
+        key(&mut app, KeyCode::Char('x'));
+        let s = screen(&mut app, 80, 12);
+        assert!(s.contains("Drop the 2 marked tasks?") && s.matches('*').count() == 2, "{s}");
+        key(&mut app, KeyCode::Esc);
+        assert_eq!(app.marked.len(), 2);
+        key(&mut app, KeyCode::Char('d'));
+        assert_eq!(app.message, "2 tasks done; u reopens");
+        assert_eq!(app.rows().filter(|r| r.state == "done").count(), 2);
+        // u reopens them, the selection on them; once.
+        key(&mut app, KeyCode::Char('u'));
+        assert_eq!(app.message, "2 tasks reopened");
+        assert_eq!(app.rows().filter(|r| r.state == "done").count(), 0);
+        assert_eq!(app.current().unwrap().title, "Three");
+        key(&mut app, KeyCode::Char('u'));
+        assert_eq!(app.message, "nothing closed here to reopen");
+        key(&mut app, KeyCode::Char(' '));
+        key(&mut app, KeyCode::Char(' '));
+        key(&mut app, KeyCode::Char('d'));
+        // One mark is a mark too.
+        key(&mut app, KeyCode::Char(' '));
+        key(&mut app, KeyCode::Char('x'));
+        key(&mut app, KeyCode::Esc);
+        assert_eq!(app.marked.len(), 1);
+    }
+
+    #[test]
+    fn the_view_reads_the_store_again_only_when_it_changed() {
+        let (_dir, paths) = temp_paths();
+        let mut app = board(&paths, &["One"]);
+        key(&mut app, KeyCode::Char('v'));
+        screen(&mut app, 80, 24);
+        app.refresh().unwrap();
+        assert!(app.view.loaded(), "nothing changed");
+        let store = paths.open(BUSY).unwrap();
+        store.conn.execute("UPDATE cairn SET updated = 1", []).unwrap();
+        task::set(&store, &app.current_id().unwrap(), Some("One more"), None).unwrap();
+        app.refresh().unwrap();
+        assert!(!app.view.loaded(), "the task changed");
+    }
+
+    #[test]
+    fn a_first_start_in_this_terminal_asks_on_the_board_before_leaving_it() {
+        let (dir, paths) = temp_paths();
+        let repo = dir.path().join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        let git = |args: &[&str]| {
+            let ok = std::process::Command::new("git")
+                .env("GIT_CONFIG_GLOBAL", "/dev/null")
+                .env("GIT_CONFIG_NOSYSTEM", "1")
+                .arg("-C")
+                .arg(&repo)
+                .args(args)
+                .status()
+                .unwrap();
+            assert!(ok.success());
+        };
+        git(&["init", "-q"]);
+        std::fs::write(repo.join("a"), "1").unwrap();
+        git(&["add", "a"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "a"]);
+        let mut app = board(&paths, &["Start me"]);
+        let store = paths.open(BUSY).unwrap();
+        store.conn.execute("UPDATE task SET project = ?1", [repo.to_string_lossy()]).unwrap();
+        app.refresh().unwrap();
+        assert!(key(&mut app, KeyCode::Enter).is_none(), "the screen is the board's still");
+        if !matches!(app.mode, Mode::Worktree(..)) {
+            // A config of the user's that settles it asks nothing.
+            return eprintln!("worktree settled by the config; skipped");
+        }
+        let s = screen(&mut app, 80, 10);
+        assert!(s.contains("Start \"Start me\" in a worktree of its own (repo)?  Y/n · Esc cancel"), "{s}");
+        assert!(matches!(key(&mut app, KeyCode::Char('n')), Some(Away::Attach { .. })), "n starts it");
     }
 }

@@ -317,7 +317,7 @@ impl Store {
                 let id = ulid::Ulid::new().to_string();
                 let project = norm.cwd.as_deref().map(|c| project::of(&tx, Path::new(c)));
                 tx.execute(
-                    "INSERT INTO task (id, title, project, inbox, created) VALUES (?1,?2,?3,1,?4)",
+                    "INSERT INTO task (id, title, prompt_title, project, inbox, created) VALUES (?1,?2,?2,?3,1,?4)",
                     params![id, t, project.map(|p| p.display().to_string()), now],
                 )?;
                 tx.execute("UPDATE run SET task=?1 WHERE id=?2", params![id, run])?;
@@ -663,7 +663,8 @@ pub const KEEP_LOG_MS: i64 = KEEP_EVENTS_MS;
 pub const TIDY_BATCH: usize = 5000;
 
 /// Age out old events, finished jobs, what runs were shown and the recall
-/// log, so the store does not grow with every hook ever fired. A run keeps every event from the last one that
+/// log, so the store does not grow with every hook ever fired, and merge
+/// recall's index a step (`memory::merge_index`). A run keeps every event from the last one that
 /// set its status on, which is all its status, unread mark and `why` are
 /// read from. Called from detached work, never from a hook. One bounded
 /// batch per call, so the write lock is never held for long and a hook
@@ -699,6 +700,9 @@ pub fn tidy(conn: &Connection, now: i64) -> Result<usize> {
         ),
         [now - KEEP_LOG_MS],
     )?;
+    // And keep recall's index from fragmenting, which slows every hook
+    // that offers related work.
+    crate::memory::merge_index(conn)?;
     Ok(events)
 }
 

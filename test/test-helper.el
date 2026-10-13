@@ -14,14 +14,20 @@
 
 (defvar org-varde--timer)
 (defvar org-varde--listing)
-(defvar org-varde--pending)
-(defvar org-varde--closed)
-(defvar org-varde--scans)
-(defvar org-varde--trees)
+(defvar org-varde--agent)
 (defvar org-varde-board-data)
-(defvar org-varde--said)
 (defvar org-varde--too-new)
 (defvar org-varde--due)
+(defvar org-varde--last-needed)
+(defvar org-varde--outside)
+(defvar org-varde-board--closed)
+(defvar org-varde--listed)
+(defvar org-varde--kept)
+(defvar org-varde--drafts)
+(defvar org-varde--rows)
+(defvar org-varde--all)
+(defvar org-varde--all-due)
+(defvar org-varde--all-listing)
 
 ;; No test may read the user's org tree or call the real varde, even one
 ;; that forgets the macro below or leaves a timer behind.
@@ -70,14 +76,20 @@ from `<subcommand>.once-err', and a one-time answer from `<subcommand>.once-out'
           (org-varde-send-function (lambda (cmd) (push cmd org-varde-test-sent)))
           (org-agenda-files nil)
           (org-directory org-varde-test-dir)
-          (org-varde--pending nil)
-          (org-varde--closed nil)
-          (org-varde--scans (make-hash-table :test #'equal))
-          (org-varde--trees nil)
+          (org-varde--agent nil)
           (org-varde-board-data nil)
-          (org-varde--said nil)
+          (org-varde--rows nil)
+          (org-varde--all nil)
+          (org-varde--all-due nil)
+          (org-varde--all-listing nil)
           (org-varde--too-new nil)
           (org-varde--due nil)
+          (org-varde--last-needed nil)
+          (org-varde--outside nil)
+          (org-varde-board--closed nil)
+          (org-varde--listed nil)
+          (org-varde--kept nil)
+          (org-varde--drafts nil)
           (process-environment (cons (concat "VARDE_HOME=" org-varde-test-dir)
                                      process-environment)))
      (with-temp-file fake (insert org-varde-test--fake-varde))
@@ -94,9 +106,11 @@ from `<subcommand>.once-err', and a one-time answer from `<subcommand>.once-out'
        ;; the next test's sentinels.
        (when org-varde-mode (org-varde-mode -1))
        (when (timerp org-varde--timer) (cancel-timer org-varde--timer))
-       (dolist (p org-varde--pending) (when (timerp (nth 1 p)) (cancel-timer (nth 1 p))))
+       (when (timerp org-varde--all-due) (cancel-timer org-varde--all-due))
        (dolist (b (buffer-list))
          (when (string-prefix-p "*varde" (buffer-name b))
+           ;; A draft asks before it goes, from a hook of its own.
+           (with-current-buffer b (set-buffer-modified-p nil))
            (let ((kill-buffer-query-functions nil)) (kill-buffer b))))
        (delete-directory org-varde-test-dir t))))
 
@@ -139,10 +153,9 @@ from `<subcommand>.once-err', and a one-time answer from `<subcommand>.once-out'
     (buffer-string)))
 
 (defmacro org-varde-test-with-org (text &rest body)
-  "Visit TEXT as an org file that is the only agenda file, then run BODY."
+  "Visit TEXT as an org file, named FILE, then run BODY."
   (declare (indent 1))
-  `(let* ((file (make-temp-file "org-varde-test-" nil ".org" ,text))
-          (org-agenda-files (list file)))
+  `(let ((file (make-temp-file "org-varde-test-" nil ".org" ,text)))
      (unwind-protect
          (with-current-buffer (find-file-noselect file)
            (goto-char (point-min))

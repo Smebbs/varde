@@ -21,31 +21,17 @@
 (require 'text-property-search)
 (require 'transient)
 
-(defface org-varde-board-group '((t :inherit (bold font-lock-function-name-face)))
+(declare-function +workspace-list-names "ext:workspaces" ())
+
+(defface org-varde-board-group '((t :inherit bold))
   "Group headings on the board."
   :group 'org-varde)
 (defface org-varde-board-empty '((t :inherit shadow))
   "Empty groups and quiet columns."
   :group 'org-varde)
-(defface org-varde-board-blocked '((t :inherit error))
-  "A session waiting on a permission decision."
-  :group 'org-varde)
-(defface org-varde-board-waiting '((t :inherit warning))
-  "A session waiting for you."
-  :group 'org-varde)
-(defface org-varde-board-working '((t :inherit success))
-  "A session at work."
-  :group 'org-varde)
-(defface org-varde-board-delegated '((t :inherit font-lock-constant-face))
-  "A session whose sub-agents are at work."
-  :group 'org-varde)
-
 (defface org-varde-board-git '((t :inherit shadow))
   "Where a task's git work stands."
   :group 'org-varde)
-
-(defconst org-varde-board-buffer "*varde*"
-  "The board's buffer name.")
 
 (defcustom org-varde-board-scope 'project
   "Whether the board opens kept to the project you open it from.
@@ -77,106 +63,148 @@ every project.  \\<org-varde-board-mode-map>\\[org-varde-board-toggle-project] o
                         (plist-get group :rows)))
             (plist-get org-varde-board-data :groups)))
 
-(defun org-varde-board--scope-line (kept hidden need-you)
-  "What the board keeps to, for the header line.
+(defun org-varde-board--scope-line (kept hidden need-you room)
+  "What the board keeps to, for the header line, in ROOM columns.
 KEPT is whether it keeps to its project, leaving out HIDDEN tasks, of
-which NEED-YOU need you."
+which NEED-YOU need you.  Said shorter where it must be; else nothing."
   (let* ((project org-varde-board--project)
          (name (and project (propertize (file-name-nondirectory (directory-file-name project))
                                         'face 'bold)))
-         (key (propertize "." 'face 'help-key-binding)))
-    (cond
-     ((not project) "")
-     ((and kept (> hidden 0))
-      (concat name " · " (format "%d in other projects" hidden)
-              (if (> need-you 0)
-                  (propertize (format ", %d need%s you" need-you (if (= need-you 1) "s" ""))
-                              'face 'org-varde-board-waiting)
-                "")
-              " (" key " all)"))
-     (kept name)
-     ((not org-varde-board--scoped) (concat "every project (" key " only " name ")"))
-     (t (concat "every project (none in " name " yet)")))))
+         (key (propertize "." 'face 'help-key-binding))
+         (needs (and (> need-you 0)
+                     (propertize (format "%d need%s you" need-you (if (= need-you 1) "s" ""))
+                                 'face 'org-varde-board-waiting))))
+    (or (seq-find (lambda (s) (<= (string-width s) room))
+                  (cond
+                   ((not project) nil)
+                   ((and kept (> hidden 0))
+                    (list (concat name " · " (format "%d in other projects" hidden)
+                                  (if needs (concat ", " needs) "") " (" key " all)")
+                          (concat name " · " (format "%d elsewhere" hidden) (if needs (concat ", " needs) ""))
+                          (if needs (concat name " · " needs " elsewhere") (concat name " · +" (number-to-string hidden)))
+                          name))
+                   (kept (list name))
+                   ((not org-varde-board--scoped)
+                    (list (concat "every project (" key " only " name ")") "every project"))
+                   (t (list (concat "every project (none in " name " yet)") "every project"))))
+        "")))
 
-(defun org-varde-board--age (ms)
-  "MS milliseconds as a short age."
-  (let ((s (/ (max 0 ms) 1000)))
-    (cond ((< s 60) (format "%ds" s))
-          ((< s 3600) (format "%dm" (/ s 60)))
-          ((< s 86400) (format "%dh" (/ s 3600)))
-          (t (format "%dd" (/ s 86400))))))
-
-(defun org-varde-board--background (row)
-  "What ROW's session left running, e.g. \"  2 agents · 1 shell\"."
-  (let ((parts (delq nil (mapcar (lambda (k)
-                                   (let ((n (or (plist-get row (car k)) 0)))
-                                     (and (> n 0) (format "%d %s%s" n (cdr k) (if (= n 1) "" "s")))))
-                                 '((:agents . "agent") (:shells . "shell"))))))
-    (if parts
-        (propertize (concat "  " (string-join parts " · ")) 'face 'org-varde-board-empty)
-      "")))
-
-(defun org-varde-board--git (row)
-  "ROW's git label, as varde worded it, padded to its column."
+(defun org-varde-board--meta (row now kept group)
+  "What follows ROW's title at time NOW in ms, as the terminal board shows it:
+a live session's status, what it left running, where deferred work came
+from, git, the project unless KEPT to one, how long ago, and its short
+id.  In Needs you, GROUP says it is your turn: the row does not again."
   (let* ((git (plist-get row :git))
-         (face (cond ((equal (plist-get git :checks) "failing") 'org-varde-board-blocked)
-                     ((equal (plist-get git :stage) "edited") 'org-varde-board-waiting)
-                     ((equal (plist-get git :stage) "landed") 'org-varde-board-working)
-                     (t 'org-varde-board-git))))
-    (propertize (truncate-string-to-width (or (plist-get git :label) "") 10 nil ?\s "…") 'face face)))
-
-(defun org-varde-board--row (row now group)
-  "Insert one board ROW of GROUP, at time NOW in ms."
-  (let* ((status (plist-get row :status))
-         (face (pcase status
-                 ("blocked" 'org-varde-board-blocked)
-                 ("waiting" 'org-varde-board-waiting)
-                 ("working" 'org-varde-board-working)
-                 ("delegated" 'org-varde-board-delegated)
-                 (_ 'org-varde-board-empty)))
-         (glyph (pcase status
-                  ;; Hollow once you have looked and left it.
-                  ((or "blocked" "waiting") (if (plist-get row :unread) "●" "○"))
-                  ((or "working" "delegated") "●")
-                  ("done" "✓")
-                  ("parked" "‖")
-                  (_ "○")))
+         (label (plist-get git :label))
          (project (plist-get row :project))
+         (count (lambda (k what)
+                  (let ((n (or (plist-get row k) 0)))
+                    (and (> n 0) (format "%d %s%s" n what (if (= n 1) "" "s"))))))
+         (parts
+          (delq nil
+                (list (pcase (plist-get row :status)
+                        ((or "working" "delegated") (propertize "working" 'face 'org-varde-board-working))
+                        ("waiting" (unless (equal group "needs_you")
+                                     (propertize "your turn" 'face 'org-varde-board-waiting)))
+                        ("blocked" (propertize "needs input" 'face 'org-varde-board-blocked)))
+                      (funcall count :agents "agent")
+                      (funcall count :shells "shell")
+                      (let ((origin (plist-get row :origin)))
+                        (and origin (concat "← " (plist-get origin :short))))
+                      (and label (not (string-empty-p label))
+                           (propertize label 'face
+                                       (cond ((equal (plist-get git :checks) "failing") 'org-varde-board-blocked)
+                                             ((equal (plist-get git :stage) "edited") 'org-varde-board-waiting)
+                                             ((equal (plist-get git :stage) "landed") 'org-varde-board-working)
+                                             (t 'org-varde-board-git))))
+                      (and project (not kept) (file-name-nondirectory (directory-file-name project)))
+                      (org-varde--age (- now (plist-get row :last)))))))
+    (concat (mapconcat (lambda (p) (if (get-text-property 0 'face p) p (propertize p 'face 'org-varde-board-empty)))
+                       parts (propertize " · " 'face 'org-varde-board-empty))
+            (propertize (concat "  " (plist-get row :short)) 'face 'org-varde-board-empty))))
+
+(defvar org-varde-board--width 100
+  "The width of the board's window, while it is drawn.")
+
+(defun org-varde-board--row (row now group &optional kept)
+  "Insert one board ROW of GROUP, at time NOW in ms: a glyph for where it
+stands, its title, and on the right what else there is to know.  KEPT
+says the board keeps to one project, which its header line names, so
+the row leaves it out."
+  (let* ((glyph (org-varde--status-mark row))
+         (closed (member (plist-get row :state) '("done" "parked" "dropped")))
+         (meta (org-varde-board--meta row now kept group))
+         (room (- org-varde-board--width 6 (string-width meta)))
          (start (point)))
-    ;; The title goes last so it has the rest of the window and never
-    ;; pushes a column out of line.
-    (insert "  " (propertize glyph 'face face)
-            " " (propertize (format "%-9s" status) 'face face)
-            " " (org-varde-board--git row)
-            " " (propertize (format "%4s" (org-varde-board--age (- now (plist-get row :last))))
-                            'face 'org-varde-board-empty)
-            "  " (propertize (truncate-string-to-width
-                              (if project (file-name-nondirectory (directory-file-name project)) "-")
-                              14 nil ?\s "…")
-                             'face 'org-varde-board-empty)
-            ;; Marks a task without a heading, so `f' and `l' are found
-            ;; where it waits on you too; the Inbox group needs no mark.
-            (if (or (plist-get row :external) (equal group "inbox"))
-                "   "
-              (propertize " ◇ " 'face 'org-varde-board-empty))
-            (plist-get row :title)
-            (let ((origin (plist-get row :origin)))
-              (if origin (propertize (concat "  ← " (plist-get origin :short)) 'face 'org-varde-board-empty) ""))
-            (org-varde-board--background row)
+    (insert " " glyph " "
+            (propertize (truncate-string-to-width (plist-get row :title) (max 12 room) nil nil "…")
+                        'face (if closed 'org-varde-board-empty 'default))
+            ;; What follows the title keeps to the right edge, however wide
+            ;; the window.
+            (propertize " " 'display `(space :align-to (- right ,(1+ (string-width meta)))))
+            meta
             "\n")
     (add-text-properties start (point) (list 'org-varde-task (plist-get row :task)
-                                             'org-varde-row row))))
+                                             'org-varde-row row
+                                             'org-varde-in group))))
+
+(defvar-local org-varde-board--keep nil
+  "Where the board keeps its place: (TASK GROUP TIME) after an action on
+TASK, there in GROUP.  When TASK leaves GROUP, point stays on its line,
+as the terminal board's does, and is on the task that took its place.")
+
+(defvar-local org-varde-board--select nil
+  "A task to put point on once the board shows it, such as one just made.")
+
+(defun org-varde-board--keep-place ()
+  "Keep the board's place after an action on the task at point."
+  (when (derived-mode-p 'org-varde-board-mode)
+    (setq org-varde-board--keep (list (get-text-property (point) 'org-varde-task)
+                                      (get-text-property (point) 'org-varde-in)
+                                      (float-time)))))
+
+(defun org-varde-board--snap ()
+  "Move to the nearest line a move stops at: this one, or else below,
+or else above."
+  (beginning-of-line)
+  (unless (org-varde-board--stop-p 'org-varde-task)
+    (let ((here (point)))
+      (or (ignore-error user-error (org-varde-board--next 'org-varde-task 1) t)
+          (progn (goto-char here)
+                 (ignore-error user-error (org-varde-board--next 'org-varde-task -1)))))))
 
 (defun org-varde-board--goto-task (task line)
-  "Move to TASK's row, or to LINE when it is gone."
+  "Move to TASK's row, or to LINE when it is gone or left the group the
+board keeps its place in."
   (goto-char (point-min))
-  (let ((match (and task (text-property-search-forward 'org-varde-task task t))))
-    (if match
+  (let* ((select (and org-varde-board--select
+                      (text-property-search-forward 'org-varde-task org-varde-board--select t)))
+         (match (or select
+                    (and task (progn (goto-char (point-min))
+                                     (text-property-search-forward 'org-varde-task task t)))))
+         (keep org-varde-board--keep))
+    (if (and match
+             (or select
+                 (not (equal (car keep) task))
+                 (equal (get-text-property (prop-match-beginning match) 'org-varde-in) (nth 1 keep))))
         (goto-char (prop-match-beginning match))
-      (forward-line (1- line)))))
+      (goto-char (point-min))
+      (forward-line (1- line))
+      (org-varde-board--snap))))
+
+(defvar-local org-varde-board--placed nil
+  "Whether point was put on the board's first task, as it opened.")
 
 (defvar-local org-varde-board--toggled nil
   "Keys of the groups opened or closed here, against how varde shows them.")
+
+(defvar-local org-varde-board--drawn nil
+  "What the board was last drawn from: the data, and the window's width.")
+
+(defun org-varde-board--folded-p (group)
+  "Whether GROUP shows only its heading: as varde has it, unless toggled."
+  (xor (plist-get group :collapsed)
+       (member (plist-get group :key) org-varde-board--toggled)))
 
 (defun org-varde-board--render ()
   "Redraw the board from `org-varde-board-data'.
@@ -191,12 +219,16 @@ Every window showing it stays on the task it was on."
                               (get-buffer-window-list buffer nil t)))
              (here (funcall spot (point)))
              (now (truncate (* 1000 (float-time))))
+             (org-varde-board--width (if windows (window-width (caar windows)) 100))
              (project (and org-varde-board--scoped org-varde-board--project))
              ;; A project with no task on the board yet keeps to nothing.
              (kept (and project (org-varde-board--has project)))
              (hidden 0)
              (need-you 0)
+             (any nil)
              (inhibit-read-only t))
+        (setq org-varde-board--drawn (cons org-varde-board-data org-varde-board--width)
+              org-varde--kept (and kept project))
         (erase-buffer)
         (cond
          (org-varde--too-new
@@ -211,50 +243,111 @@ Every window showing it stays on the task it was on."
                    (rows (if kept
                              (seq-filter (lambda (row) (equal (plist-get row :project) project)) all)
                            all))
-                   (key (plist-get group :key))
-                   (closed (xor (plist-get group :collapsed)
-                                (member key org-varde-board--toggled))))
-              (unless (bobp) (insert "\n"))
-              (insert (propertize (plist-get group :label)
-                                  'face (if (and rows (not closed)) 'org-varde-board-group 'org-varde-board-empty))
-                      (propertize (format "  %d%s" (length rows) (if (and rows closed) " …" ""))
-                                  'face 'org-varde-board-empty)
-                      "\n")
-              (put-text-property (line-beginning-position 0) (point) 'org-varde-group key)
-              (setq hidden (+ hidden (- (length all) (length rows))))
-              (when (equal key "needs_you")
-                (setq need-you (- (length all) (length rows))))
-              (unless closed
-                (dolist (row rows) (org-varde-board--row row now key)))))))
+                   (key (plist-get group :key)))
+              ;; An empty group has nothing to fold: once tasks come back,
+              ;; they show as varde has them.
+              (unless rows
+                (setq org-varde-board--toggled (delete key org-varde-board--toggled)))
+              (let ((closed (org-varde-board--folded-p group)))
+                (if rows
+                    (progn
+                      (setq any t)
+                      (insert (propertize (plist-get group :label) 'face 'org-varde-board-group)
+                              (propertize (format "  %d%s" (length rows) (if closed " ▸" ""))
+                                          'face 'org-varde-board-empty)
+                              "\n")
+                      (put-text-property (line-beginning-position 0) (point) 'org-varde-group key)
+                      ;; Folded, its heading stands in for its rows.
+                      (when closed
+                        (put-text-property (line-beginning-position 0) (point) 'org-varde-folded t)))
+                  ;; An empty group is one quiet line, no stop: the board
+                  ;; never jumps.
+                  (insert (propertize (format "%s  0\n" (plist-get group :label)) 'face 'org-varde-board-empty)))
+                (setq hidden (+ hidden (- (length all) (length rows))))
+                (when (equal key "needs_you")
+                  (setq need-you (- (length all) (length rows))))
+                (unless closed
+                  (dolist (row rows) (org-varde-board--row row now key kept))))))
+          (unless any
+            (insert (propertize "\nNo tasks here yet.  n writes one, or start an agent in a repository:\nits session shows up here once you ask it something.\n"
+                                'face 'org-varde-board-empty)))))
+        ;; The keys first, so `? help' is never cut; what it keeps to after.
         (setq header-line-format
-              (let ((scope (org-varde-board--scope-line kept hidden need-you)))
-                (concat " " (if (string-empty-p scope) "" (concat scope "   ")) (org-varde-board--header))))
+              (let* ((keys (concat " " (org-varde-board--header)))
+                     (scope (org-varde-board--scope-line
+                             kept hidden need-you (- org-varde-board--width (string-width keys) 4))))
+                (concat keys (if (string-empty-p scope) "" (concat "   " scope)))))
         (org-varde-board--goto-task (car here) (cdr here))
         (dolist (w windows)
           (save-excursion
             (org-varde-board--goto-task (cadr w) (cddr w))
-            (set-window-point (car w) (point))))))))
+            (set-window-point (car w) (point))))
+        ;; A task to select is selected once it shows.
+        (when (and org-varde-board--select
+                   (equal (get-text-property (point) 'org-varde-task) org-varde-board--select))
+          (setq org-varde-board--select nil))
+        ;; A place kept for a task that has moved on, or long ago, is done.
+        (let ((keep org-varde-board--keep))
+          (when (and keep (or (< (+ (nth 2 keep) 10) (float-time))
+                              (not (equal (nth 1 keep)
+                                          (save-excursion
+                                            (goto-char (point-min))
+                                            (let ((m (and (car keep) (text-property-search-forward
+                                                                      'org-varde-task (car keep) t))))
+                                              (and m (get-text-property (prop-match-beginning m) 'org-varde-in))))))))
+            (setq org-varde-board--keep nil)))
+        ;; It opens on the first task, from where TAB goes round what needs you.
+        (when (and org-varde-board-data (not org-varde-board--placed))
+          (setq org-varde-board--placed t)
+          (ignore-error user-error (org-varde-board-first-task))
+          (dolist (w windows) (set-window-point (car w) (point))))
+        (org-varde--highlight)))))
+
+(defun org-varde-board--refreshed ()
+  "Redraw the board after a refresh, when a window shows it and it changed.
+Hidden, it is drawn as it comes into view."
+  (when-let* ((buffer (get-buffer org-varde-board-buffer))
+              (window (get-buffer-window buffer t)))
+    (unless (equal (buffer-local-value 'org-varde-board--drawn buffer)
+                   (cons org-varde-board-data (window-width window)))
+      (org-varde-board--render))))
+
+(defvar org-varde-board--ticking nil
+  "The timer that keeps the board's ages current while it is in sight.")
+
+(defun org-varde-board--tick ()
+  "Draw the board again, its ages a minute on, when it is in sight.
+Not while a region is active there: drawing would lose it."
+  (let ((buffer (get-buffer org-varde-board-buffer)))
+    (cond ((not buffer)
+           (cancel-timer org-varde-board--ticking)
+           (setq org-varde-board--ticking nil))
+          ((and (get-buffer-window buffer t) (not (buffer-local-value 'mark-active buffer)))
+           (org-varde-board--render)))))
 
 (defun org-varde-board-toggle-project ()
-  "Keep the board to the project it was opened from, or show every one."
+  "Keep the board to the project it was opened from, or show every one.
+From a view too: what TAB and J go through follows."
   (interactive)
-  (let* ((project (or org-varde-board--project
-                      (user-error "The board was opened outside a project, so it shows every one")))
-         (name (file-name-nondirectory (directory-file-name project))))
-    (unless (org-varde-board--has project)
-      (user-error "No tasks in %s yet, so the board shows every project" name))
-    (setq org-varde-board--scoped (not org-varde-board--scoped))
-    (org-varde-board--render)
-    (message (if org-varde-board--scoped "Only %s" "Every project") name)))
+  (with-current-buffer (or (get-buffer org-varde-board-buffer) (user-error "The board is not open"))
+    (let* ((project (or org-varde-board--project
+                        (user-error "The board was opened outside a project, so it shows every one")))
+           (name (file-name-nondirectory (directory-file-name project))))
+      (unless (org-varde-board--has project)
+        (user-error "No tasks in %s yet, so the board shows every project" name))
+      (setq org-varde-board--scoped (not org-varde-board--scoped))
+      (org-varde-board--render)
+      (message (if org-varde-board--scoped "Only %s" "Every project") name))))
 
 (defun org-varde-board--row-at-point ()
-  "The board row at point."
+  "The board row at point; in a task's view, the task it shows."
   (or (get-text-property (point) 'org-varde-row)
+      (org-varde--view-row)
       (user-error "No task on this line")))
 
 (defun org-varde-board--rows ()
-  "The rows in the active region, or else the row at point."
-  (if (use-region-p)
+  "The rows in the board's active region, or else the row at point."
+  (if (and (use-region-p) (derived-mode-p 'org-varde-board-mode))
       (let ((end (region-end)) rows)
         (save-excursion
           (goto-char (region-beginning))
@@ -267,16 +360,22 @@ Every window showing it stays on the task it was on."
         (or (nreverse rows) (user-error "No tasks in the region")))
     (list (org-varde-board--row-at-point))))
 
+(defun org-varde-board--stop-p (prop)
+  "Whether this line is one PROP moves to: a task, or a folded group
+standing in for its tasks, for `org-varde-task'; else a group heading."
+  (or (get-text-property (point) prop)
+      (and (eq prop 'org-varde-task) (get-text-property (point) 'org-varde-folded))))
+
 (defun org-varde-board--next (prop n)
-  "Move to the Nth line after this one that carries PROP.
+  "Move to the Nth line after this one that `org-varde-board--stop-p' PROP.
 Negative N moves back."
   (let ((step (if (< n 0) -1 1))
         (left (abs n))
         found)
     (save-excursion
       (beginning-of-line)
-      (while (and (> left 0) (zerop (forward-line step)))
-        (when (get-text-property (point) prop)
+      (while (and (> left 0) (zerop (forward-line step)) (not (eobp)))
+        (when (org-varde-board--stop-p prop)
           (setq found (point) left (1- left)))))
     (if found (goto-char found) (user-error "No more %s" (if (eq prop 'org-varde-task) "tasks" "groups")))))
 
@@ -300,18 +399,80 @@ Negative N moves back."
   (interactive "p")
   (org-varde-board--next 'org-varde-group (- (or n 1))))
 
+(defun org-varde-board-first-task ()
+  "Move to the first task."
+  (interactive)
+  (goto-char (point-min))
+  (unless (org-varde-board--stop-p 'org-varde-task) (org-varde-board-next-task)))
+
+(defun org-varde-board-last-task ()
+  "Move to the last task."
+  (interactive)
+  (goto-char (point-max))
+  (org-varde-board-previous-task))
+
+(defun org-varde-board--unfold (key)
+  "Open the group KEY, if it is folded, and draw the board."
+  (let ((group (seq-find (lambda (g) (equal (plist-get g :key) key))
+                         (plist-get org-varde-board-data :groups))))
+    (when (and group (org-varde-board--folded-p group))
+      (setq org-varde-board--toggled (if (member key org-varde-board--toggled)
+                                         (delete key org-varde-board--toggled)
+                                       (cons key org-varde-board--toggled)))
+      (org-varde-board--render))))
+
+(defun org-varde-board-next-needs-you (&optional n)
+  "Move to the Nth next task that needs you, round to the first.
+Negative N moves back, round to the last.  Its group opens if it was
+folded."
+  (interactive "p")
+  (let* ((n (or n 1))
+         (tasks (mapcar (lambda (r) (plist-get r :task)) (org-varde--needs-you-here)))
+         (len (length tasks))
+         (i (seq-position tasks (get-text-property (point) 'org-varde-task))))
+    (if (zerop len)
+        (message "%s" (org-varde--nothing-needs-you))
+      (let ((to (mod (cond (i (+ i n)) ((> n 0) (1- n)) (t n)) len)))
+        (org-varde-board--unfold "needs_you")
+        (org-varde--board-select (nth to tasks))
+        (when (> len 1) (message "Needs you: %d of %d" (1+ to) len))))))
+
+(defun org-varde-board-previous-needs-you (&optional n)
+  "Move to the Nth previous task that needs you, round to the last."
+  (interactive "p")
+  (org-varde-board-next-needs-you (- (or n 1))))
+
+(defun org-varde-board-tab ()
+  "On a task, move to the next that needs you; on a group's heading, fold
+or unfold it.  Elsewhere, nothing."
+  (interactive)
+  (cond ((get-text-property (point) 'org-varde-row) (org-varde-board-next-needs-you))
+        ((get-text-property (point) 'org-varde-group) (org-varde-board-toggle-group))))
+
 (defun org-varde-board-start (&optional arg)
-  "Start, resume or go to the task at point.  Prefix ARG as `org-varde-start'.
-Starting an Inbox task takes it out of the Inbox; it is not filed.
+  "Go to the session of the task at point, starting or resuming it first
+if needed.  Prefix ARG as `org-varde-start-task'.  On a group's heading, fold
+or unfold it.
+Starting an Inbox task takes it out of the Inbox.  A
+done, parked or dropped task is reopened once you confirm.
 With a region, start every task in it in the background, going to no
 terminal; one that cannot start is skipped, and a quit stops the rest.
 Done, parked and dropped tasks are skipped, so none is reopened.
 The worktree question is asked once for them all, and each project
 question offers the last answer."
   (interactive "P")
-  (if (not (use-region-p))
-      (let ((row (org-varde-board--row-at-point)))
-        (org-varde-start-task (plist-get row :task) (plist-get row :title) arg))
+  (cond
+   ((and (not (use-region-p)) (not (get-text-property (point) 'org-varde-row))
+         (get-text-property (point) 'org-varde-group))
+    (org-varde-board-toggle-group))
+   ((not (and (use-region-p) (derived-mode-p 'org-varde-board-mode)))
+    (let ((row (org-varde-board--row-at-point)))
+      (org-varde--confirm-reopen (plist-get row :task) (plist-get row :title) (plist-get row :state))
+      (if org-varde--background
+          (progn (org-varde-board--keep-place)
+                 (org-varde-start-task (plist-get row :task) (plist-get row :title) arg))
+        (org-varde-go-task (plist-get row :task) (plist-get row :title) arg))))
+   (t
     (let* ((all (org-varde-board--rows))
            (rows (seq-remove (lambda (r) (member (plist-get r :state) '("done" "parked" "dropped")))
                              all))
@@ -342,75 +503,167 @@ question offers the last answer."
                          (error (funcall fail (error-message-string err))
                                 (funcall next (cdr left))))))))
       (let ((org-varde--background t)
-            (org-varde--answers nil))
-        (funcall next rows)))))
+            (org-varde--answers (list :region t)))
+        (funcall next rows))))))
+
+(defun org-varde-board-start-background (&optional arg)
+  "Start or resume the task at point, or each task in the region, and stay
+on the board.  Prefix ARG as `org-varde-start-task'."
+  (interactive "P")
+  (let ((org-varde--background t))
+    (org-varde-board-start arg)))
+
+(defun org-varde-board-start-fresh ()
+  "Start a fresh conversation of the task at point, as \\[universal-argument] RET does."
+  (interactive)
+  (org-varde-board-start '(4)))
+
+(defun org-varde-board-start-fork ()
+  "Fork the conversation of the task at point, as \\[universal-argument] \\[universal-argument] RET does."
+  (interactive)
+  (org-varde-board-start '(16)))
+
+(defvar org-varde-board--closed nil
+  "The rows of the tasks d, P or x last closed, on the board or in a view,
+for \\<org-varde-board-mode-map>\\[org-varde-board-reopen] to reopen.")
+
+(defun org-varde-board--note-closed (closed)
+  "Keep CLOSED, the rows closed last first, for u to reopen.
+In a view, u then reopens it, rather than bring back a line removed
+before."
+  (when closed
+    (setq org-varde-board--closed (nreverse closed))
+    (when (derived-mode-p 'org-varde-show-mode) (setq org-varde--removed nil))))
 
 (defun org-varde-board-done ()
   "Close the task at point, or every task in the region."
   (interactive)
-  (dolist (row (org-varde-board--rows))
-    (org-varde-done-task (plist-get row :task) (plist-get row :title))))
+  (let ((rows (org-varde-board--rows))
+        (closed nil))
+    (org-varde-board--keep-place)
+    (unwind-protect
+        (let ((org-varde--on-board t))
+          (dolist (row rows)
+            (org-varde--finish (plist-get row :task) (plist-get row :title))
+            (push row closed)))
+      (org-varde-board--note-closed closed))))
 
 (defun org-varde-board-park ()
   "Park the task at point, or every task in the region.
-That puts it aside, its worktree left as it is."
+That puts it aside, its worktree left as it is.  A done or dropped task
+is parked once you confirm, as starting it is."
   (interactive)
-  (dolist (row (org-varde-board--rows))
-    (org-varde-park-task (plist-get row :task) (plist-get row :title))))
+  (let ((rows (org-varde-board--rows))
+        (closed nil))
+    (org-varde-board--keep-place)
+    (unwind-protect
+        (let ((org-varde--on-board t))
+          (dolist (row rows)
+            (unless (equal (plist-get row :state) "parked")
+              (org-varde--confirm-reopen (plist-get row :task) (plist-get row :title) (plist-get row :state)
+                                         "park it instead"))
+            (org-varde--park (plist-get row :task) (plist-get row :title))
+            (push row closed)))
+      (org-varde-board--note-closed closed))))
+
+(defun org-varde-board-reopen ()
+  "Reopen the tasks d, P or x last closed, back to Open, starting none.
+The board is then on the first of them."
+  (interactive)
+  (let ((rows (or org-varde-board--closed
+                  (user-error "Nothing closed here to reopen"))))
+    (dolist (row rows)
+      (condition-case e
+          (org-varde--varde "reopen" (plist-get row :task))
+        (org-varde-varde-error (user-error "varde: %s" (cadr e)))))
+    (setq org-varde-board--closed nil)
+    (when-let* ((board (get-buffer org-varde-board-buffer)))
+      (with-current-buffer board
+        (setq org-varde-board--select (plist-get (car rows) :task))))
+    (message "Reopened %s" (if (cdr rows)
+                               (format "%d tasks" (length rows))
+                             (org-varde--named (plist-get (car rows) :task) (plist-get (car rows) :title)))))
+  (org-varde-refresh))
 
 (defun org-varde-board-accept ()
-  "Move the Inbox task at point, or every task in the region, into Open."
+  "Move the Inbox task at point, or every Inbox task in the region, into
+Open.  Others in the region are left as they are."
   (interactive)
-  (apply #'org-varde--varde "accept" (mapcar (lambda (r) (plist-get r :task)) (org-varde-board--rows)))
+  (let* ((rows (org-varde-board--rows))
+         (inbox (seq-filter (lambda (r) (plist-get r :inbox)) rows))
+         (left (- (length rows) (length inbox))))
+    (unless inbox
+      (user-error "%s in the Inbox: a accepts Inbox tasks"
+                  (if (cdr rows) "None of them is"
+                    (concat (org-varde--named (plist-get (car rows) :task) (plist-get (car rows) :title))
+                            " is not"))))
+    (org-varde-board--keep-place)
+    (condition-case e
+        (apply #'org-varde--varde "accept" (mapcar (lambda (r) (plist-get r :task)) inbox))
+      (org-varde-varde-error (user-error "varde: %s" (cadr e))))
+    (message "Accepted %s%s"
+             (if (cdr inbox)
+                 (format "%d tasks" (length inbox))
+               (org-varde--named (plist-get (car inbox) :task) (plist-get (car inbox) :title)))
+             (cond ((= left 1) "; 1 not in the Inbox is left as it is")
+                   ((> left 1) (format "; %d not in the Inbox are left as they are" left))
+                   (t ""))))
   (org-varde-refresh))
 
 (defun org-varde-board-toggle-group ()
-  "Open or close the group at point, such as Parked, which starts closed."
+  "Open or close the group of the line at point, such as Parked, which
+starts closed.  An empty group has nothing to fold."
   (interactive)
-  (let ((key (save-excursion
-               (end-of-line)
-               (let ((match (text-property-search-backward 'org-varde-group nil nil)))
-                 (if match (prop-match-value match) (user-error "Not in a group"))))))
+  (let ((key (or (get-text-property (point) 'org-varde-group)
+                 (get-text-property (point) 'org-varde-in)
+                 (user-error "Not on a group with tasks"))))
     (setq org-varde-board--toggled
           (if (member key org-varde-board--toggled)
               (delete key org-varde-board--toggled)
             (cons key org-varde-board--toggled)))
     (org-varde-board--render)
-    (goto-char (text-property-any (point-min) (point-max) 'org-varde-group key))))
+    (goto-char (or (text-property-any (point-min) (point-max) 'org-varde-group key) (point)))
+    (org-varde--highlight)))
 
-(defun org-varde-board--headless ()
-  "The row at point, refused when it already has a heading."
-  (let ((row (org-varde-board--row-at-point)))
-    (when (org-varde--find-heading (plist-get row :task))
-      (user-error "This task has a heading; o goes to it"))
-    row))
+(define-obsolete-function-alias 'org-varde-board-throw-away #'org-varde-board-drop "1.0.4")
 
-(defun org-varde-board-file ()
-  "Give the task at point an org heading.
-Beside the one it was deferred from, else where you choose.  It leaves
-the Inbox."
+(defun org-varde-board-drop ()
+  "Drop the task at point, or every task in the region, once you confirm.
+Asked once for them all.  Work in a worktree is kept under
+refs/varde/discarded/."
   (interactive)
-  (let* ((row (org-varde-board--headless))
-         (at (org-varde--place (plist-get row :task))))
-    (message "Filed in %s" (buffer-name (marker-buffer at))))
-  (org-varde-refresh))
+  (let* ((rows (org-varde-board--rows))
+         (org-varde--on-board t)
+         (asked (and (cdr rows)
+                     (let ((work (seq-some (lambda (r) (org-varde--has-work-p (plist-get r :task))) rows)))
+                       (funcall (if work #'yes-or-no-p #'y-or-n-p)
+                                (format "Drop %d tasks%s? " (length rows)
+                                        (if work " and the work in their worktrees (kept under refs/varde/discarded/)" ""))))))
+         (closed nil))
+    (org-varde-board--keep-place)
+    (when (or asked (not (cdr rows)))
+      (dolist (row rows)
+        (when (org-varde-drop-task (plist-get row :task) (plist-get row :title) asked)
+          (push row closed))))
+    (org-varde-board--note-closed closed)))
 
-(defun org-varde-board-link ()
-  "Link the task at point to an existing heading you pick."
-  (interactive)
-  (org-varde-link-task (plist-get (org-varde-board--headless) :task)))
+(declare-function magit-status-setup-buffer "ext:magit-status" (&optional directory))
 
-(defun org-varde-board-throw-away ()
-  "Throw the task at point away, once you confirm.
-Its work is kept under refs/varde/discarded/."
+(defun org-varde-board-diff ()
+  "Show what changed in the task's work, in Emacs's own way: magit's
+status where magit is, else `vc-dir'.  In its worktree, while it has
+one; else in its project."
   (interactive)
-  (let ((row (org-varde-board--row-at-point)))
-    (org-varde-throw-away-task (plist-get row :task) (plist-get row :title))))
-
-(defun org-varde-board-visit ()
-  "Go to the org heading of the task at point."
-  (interactive)
-  (org-varde--visit (plist-get (org-varde-board--row-at-point) :task)))
+  (let* ((row (org-varde-board--row-at-point))
+         (d (org-varde--details (plist-get row :task)))
+         (worktree (plist-get d :worktree))
+         (dir (or (and (equal (plist-get worktree :state) "active") (plist-get worktree :path))
+                  (plist-get d :project)
+                  (user-error "This task has no project yet: its first start picks one"))))
+    (unless (file-directory-p dir) (user-error "%s is gone" (abbreviate-file-name dir)))
+    (if (require 'magit nil t)
+        (magit-status-setup-buffer dir)
+      (vc-dir dir))))
 
 (defun org-varde-board-new (directory)
   "Start a session of your own in DIRECTORY.
@@ -423,54 +676,286 @@ Asked for, offering the project of the task at point."
 
 (defvar-keymap org-varde-new-mode-map
   "C-c C-c" #'org-varde-new-create
-  "C-c C-k" #'kill-current-buffer)
+  "<remap> <save-buffer>" #'org-varde-new-create
+  "C-c C-k" #'org-varde-new-cancel
+  ;; evil's :w, :wq, :x and ZZ create; :q and ZQ put it away.
+  "<remap> <evil-write>" #'org-varde-new-create
+  "<remap> <evil-save-and-close>" #'org-varde-new-create
+  "<remap> <evil-save-modified-and-close>" #'org-varde-new-create
+  "<remap> <evil-quit>" #'org-varde-new-cancel)
 
 (define-derived-mode org-varde-new-mode text-mode "varde new"
   "Write a new task: its title on the first line, and below it the
-context for the agent.  \\[org-varde-new-create] creates it.")
+context for the agent; left empty, varde makes the title from the
+context.  \\[org-varde-new-create] creates it, and
+\\[org-varde-new-cancel] puts it away, for `n' on the board to bring
+back; cleared first, it is dropped."
+  (add-hook 'kill-buffer-query-functions #'org-varde--keep-edit-p nil t))
 
 (defvar-local org-varde--new-offer nil
   "The project offered when the task being written is created.")
 
-(defun org-varde-board-create ()
-  "Write a new task in a buffer of its own, and start nothing.
-Its project is asked for when it is created, offering that of the task
-at point."
+(defvar-local org-varde--new-project nil
+  "The project the task being written goes to without asking: the one
+the board keeps to.")
+
+(defvar-local org-varde--new-task nil
+  "The task whose title and context this buffer edits, or nil for a new one.")
+
+(defvar-local org-varde--new-then nil
+  "What to do once the task being written is made, or nil: a function of
+its short id and title that returns what to add to the message.")
+
+(defun org-varde-board-edit ()
+  "Edit the title and context of the task at point, in a buffer of its own."
   (interactive)
-  (let ((project (plist-get (get-text-property (point) 'org-varde-row) :project))
-        (buffer (get-buffer-create "*varde new*")))
+  (let* ((row (org-varde-board--row-at-point))
+         (d (org-varde--details (plist-get row :task)))
+         (buffer (get-buffer-create (format "*varde edit %s*" (plist-get row :short)))))
     (with-current-buffer buffer
-      ;; A task being written is kept.
+      ;; An edit in progress is kept.
       (unless (buffer-modified-p)
         (erase-buffer)
         (org-varde-new-mode)
-        (setq header-line-format
-              "First line: the title.  Below it: context for the agent.  C-c C-c create, C-c C-k cancel"))
-      (setq org-varde--new-offer project))
+        (insert (or (plist-get d :title) "") "\n\n" (or (plist-get d :body) ""))
+        (set-buffer-modified-p nil)
+        (goto-char (point-min)))
+      (setq org-varde--new-task (plist-get row :task)
+            header-line-format
+            (concat " First line: the title.  Below it: context.  " (org-varde--edit-keys "save" "cancel"))))
     (pop-to-buffer buffer)))
 
+(defun org-varde-board-create ()
+  "Write a new task in a buffer of its own, and start nothing.
+On a board kept to a project, it goes there; else its project is asked
+for when it is created, offering that of the task at point.  A draft put
+away with \\<org-varde-new-mode-map>\\[org-varde-new-cancel] comes back."
+  (interactive)
+  (org-varde--new (plist-get (get-text-property (point) 'org-varde-row) :project)
+                  ;; Kept to a project only once it has tasks: a repository
+                  ;; of notes, say, is no place for one unasked.
+                  (and org-varde-board--scoped org-varde-board--project
+                       (org-varde-board--has org-varde-board--project)
+                       org-varde-board--project)))
+
+;;;###autoload
+(defun org-varde-new-here ()
+  "Write a new task from the heading at point, or the region, and start nothing.
+The board's new-task buffer opens with the heading's title, or the
+region's first line, and below it the heading's text, or the rest of the
+region, and a From line: a link back here, in a buffer with a file.  The
+task goes to the heading's VARDE_PROJECT, inherited, or else to this
+file's repository once that has tasks; otherwise its project is asked
+for.  Once it is made, a varde: link to it goes into the heading's text,
+or below the region, unsaved; outside org, into the kill ring.  On a
+heading that links an open task already, it offers to go to that."
+  (interactive)
+  (let* ((file (buffer-file-name (buffer-base-buffer)))
+         (region (use-region-p))
+         (heading (and (not region) (org-varde--heading-p)))
+         (line (and region (line-number-at-pos (region-beginning))))
+         (text (cond (region (org-varde-board--region-text (region-beginning) (region-end)))
+                     (heading
+                      (when-let* ((task (org-entry-get nil org-varde-property)))
+                        (user-error "This heading is linked to %s already; M-x org-varde-convert-links makes it a link"
+                                    (org-varde--short task)))
+                      (concat (org-varde--title) "\n\n" (org-varde--body)))
+                     (t (user-error "Not on a heading: mark the text to make a task from"))))
+         (linked (and heading (car (org-varde--entry-rows))))
+         (from (and file
+                    (org-link-make-string
+                     (concat "file:" file "::" (if region (number-to-string line) (org-link-heading-search-string)))
+                     (if region
+                         (format "%s:%d" (file-name-nondirectory file) line)
+                       (string-join (cons (file-name-nondirectory file) (org-get-outline-path t)) " › ")))))
+         (at (copy-marker (if region (region-end) (save-excursion (org-back-to-heading t) (point)))))
+         (org (derived-mode-p 'org-mode))
+         (dir (and org (org-entry-get nil "VARDE_PROJECT" t)))
+         (repo (unless dir (org-varde-board--project-of default-directory))))
+    (if (and linked (y-or-n-p (format "This heading links %s: go to it? (n makes a new task) "
+                                      (org-varde--named (plist-get linked :task) (plist-get linked :title)))))
+        (org-varde-go-task (plist-get linked :task) (plist-get linked :title))
+      (deactivate-mark)
+      (org-varde--new
+       repo (cond (dir (expand-file-name dir)) ((and repo (org-varde-board--has repo)) repo))
+       (concat (string-trim-right text) (if from (concat "\n\nFrom: " from) ""))
+       (lambda (short title)
+         (let ((buffer (marker-buffer at)))
+           (if (not (and org buffer))
+               (progn (kill-new (with-current-buffer (or buffer (current-buffer))
+                                  (org-varde--link-text (concat "varde:" short) title)))
+                      "; its link is in the kill ring")
+             (with-current-buffer buffer
+               (save-excursion
+                 (goto-char at)
+                 (set-marker at nil)
+                 (if region (org-varde--link-below-region short title) (org-varde--insert-link short title)))
+               (format "; linked in %s" (buffer-name))))))))))
+
+(defun org-varde-board--region-text (beg end)
+  "The text between BEG and END, as a task: its first line, the title, as
+org shows a heading's when it starts before the heading's own words, and
+without a list item's bullet, number or checkbox."
+  (let* ((text (string-trim (buffer-substring-no-properties beg end)))
+         (nl (string-search "\n" text))
+         (first (substring text 0 nl))
+         (title (save-excursion
+                  (goto-char beg)
+                  (if (and (derived-mode-p 'org-mode) (org-at-heading-p)
+                           (progn (beginning-of-line)
+                                  (looking-at org-complex-heading-regexp)
+                                  (<= beg (or (match-beginning 4) (line-end-position)))))
+                      (org-varde--title)
+                    (replace-regexp-in-string
+                     "\\`\\(?:[-+*]\\|[0-9]+[.)]\\)[ \t]+\\(?:\\[[ xX-]\\][ \t]+\\)?" "" first)))))
+    (concat (if (string-empty-p title) first title) (if nl (substring text nl) ""))))
+
+(defun org-varde--link-below-region (short title)
+  "Insert a varde: link to SHORT, described by TITLE, below a region of
+org text that ends at point.  Below its line in a paragraph; below the
+table, block, drawer or list it ends in, never inside; in a heading's
+text when it ends on the heading or among its planning and drawers."
+  ;; A region of whole lines ends at the start of the next.
+  (when (and (bolp) (not (bobp))) (backward-char))
+  (if (or (org-at-heading-p)
+          (and (not (org-before-first-heading-p))
+               (< (point) (save-excursion (org-back-to-heading t) (org-end-of-meta-data t) (point)))))
+      (org-varde--insert-link short title)
+    (let ((el (org-element-at-point)))
+      ;; The outermost element of the section it is in.
+      (while (not (memq (org-element-type (org-element-property :parent el)) '(nil section org-data)))
+        (setq el (org-element-property :parent el)))
+      (if (eq (org-element-type el) 'paragraph)
+          (forward-line 1)
+        (goto-char (org-element-property :end el))
+        (forward-line (- (org-element-property :post-blank el))))
+      (unless (bolp) (insert "\n"))
+      (insert (org-varde--link-text (concat "varde:" short) title) "\n"))))
+
+(defun org-varde--new (offer here &optional text then)
+  "Open the buffer that writes a new task.  OFFER is the project offered
+when it is asked for, and HERE the one it goes to without asking.  TEXT,
+when given, is what it starts with: a draft there goes to the kill ring.
+THEN is as `org-varde--new-then'."
+  (let ((buffer (get-buffer-create "*varde new*")))
+    (with-current-buffer buffer
+      (cond ((and (buffer-modified-p) (not text))
+             (message "Your draft, as you left it"))
+            (t (when (and (buffer-modified-p) (not (string-blank-p (buffer-string))))
+                 (kill-new (buffer-string))
+                 (message "Your draft is in the kill ring"))
+               (erase-buffer)
+               (org-varde-new-mode)
+               (when text
+                 (insert (substring-no-properties text))
+                 ;; Unchanged, C-c C-k drops it.
+                 (set-buffer-modified-p nil)
+                 (goto-char (point-min))
+                 (end-of-line))
+               (setq org-varde--new-then then)))
+      (setq org-varde--new-offer offer
+            org-varde--new-project here
+            header-line-format
+            (let ((keys (concat " " (org-varde--edit-keys
+                                     (if here
+                                         (format "create in %s%s" (file-name-nondirectory (directory-file-name here))
+                                                 (if (org-varde--evil-p) "" " (C-u: elsewhere)"))
+                                       "create")
+                                     "later"))))
+              ;; The keys first, and what the lines are where it fits.
+              `(:eval (concat ,keys (or (seq-find (lambda (s) (<= (+ ,(string-width keys) (length s)) (window-width)))
+                                                  '("   line 1: title, then context" "   line 1: title"))
+                                        ""))))))
+    (pop-to-buffer buffer)))
+
+(defun org-varde-new-cancel ()
+  "Put the task being written away, for `n' on the board to bring back.
+Nothing written, all of it cleared, or left as it was filled in, it is
+dropped: so a draft is dropped by clearing it first."
+  (interactive)
+  (cond (org-varde--new-task (org-varde--close-edit))
+        ((or (not (buffer-modified-p)) (string-blank-p (buffer-string)))
+         (let ((said (if (string-blank-p (buffer-string)) "Nothing written" "Left as it was filled in")))
+           (set-buffer-modified-p nil)
+           (org-varde--close-edit)
+           (message "%s, nothing kept" said)))
+        ;; Brought back by n on the board, it is a task of the board's:
+        ;; nowhere to link it.
+        (t (setq org-varde--new-then nil)
+           (org-varde--close-edit t)
+           (message "Draft kept: n on the board brings it back; cleared, it is dropped"))))
+
 (defun org-varde-new-create (directory)
-  "Create the task written in this buffer in the project DIRECTORY is in."
+  "Create the task written in this buffer in the project DIRECTORY is in.
+On a board kept to a project, that one, unless a prefix asks.  A
+buffer that edits a task saves its title and context instead."
   (interactive
-   (let ((title (car (org-varde--new-text))))
-     (when (string-blank-p title) (user-error "A task needs a title"))
-     (list (read-directory-name "Project directory for this task: "
-                                (and org-varde--new-offer
-                                     (file-name-as-directory org-varde--new-offer))))))
+   (pcase-let ((`(,title . ,body) (org-varde--new-text)))
+     (when (and (string-blank-p title) (or org-varde--new-task (string-blank-p body)))
+       (user-error (if org-varde--new-task "A task needs a title"
+                     "A task needs a title, or context to make one from")))
+     (list (cond (org-varde--new-task nil)
+                 ((and org-varde--new-project (not current-prefix-arg)) org-varde--new-project)
+                 (t (read-directory-name "Project directory for this task: "
+                                         (and org-varde--new-offer
+                                              (file-name-as-directory org-varde--new-offer))))))))
+  (if org-varde--new-task
+      (org-varde--save-task)
+    (org-varde--create-task directory)))
+
+(defun org-varde--save-task ()
+  "Save the title and context written in this buffer to its task."
+  (pcase-let ((`(,title . ,body) (org-varde--new-text)))
+    (org-varde--call body (list "set" org-varde--new-task (concat "--title=" title) "--body" "-"))
+    (set-buffer-modified-p nil)
+    (org-varde--close-edit)
+    (message "Saved \"%s\"" title))
+  (org-varde-refresh))
+
+(defun org-varde--create-task (directory)
+  "Create the task written in this buffer in the project DIRECTORY is in."
   (pcase-let* ((`(,title . ,body) (org-varde--new-text))
                (project (expand-file-name directory))
                (body (and (not (string-blank-p body)) body))
-               (new (org-varde--json
-                     (org-varde--call body (append (list "new" "--json" "--project" project)
-                                                   (and body (list "--body" "-"))
-                                                   (list "--" title))))))
-    (kill-current-buffer)
-    (message "Created %s; RET starts it" (plist-get new :short)))
+               (then org-varde--new-then)
+         (new (org-varde--json
+                     (condition-case e
+                         (org-varde--call body (append (list "new" "--json" "--project" project)
+                                                       (and body (list "--context" "-"))
+                                                       ;; None: varde makes one from the context.
+                                                       (and (not (string-empty-p title)) (list "--" title))))
+                       (org-varde-varde-error
+                        ;; One older than titles made from the context.
+                        (if (and (string-empty-p title) (string-search "<TITLE>" (cadr e)))
+                            (user-error "This varde needs a title: write one on the first line, or update varde")
+                          (signal (car e) (cdr e))))))))
+    (set-buffer-modified-p nil)
+    (org-varde--close-edit)
+    ;; The board puts point on it once it shows it.
+    (when-let* ((board (get-buffer org-varde-board-buffer)))
+      (with-current-buffer board (setq org-varde-board--select (plist-get new :id))))
+    (org-varde-board--reveal project)
+    (message "Created %s in %s%s; RET on the board starts it"
+             (if (string-empty-p title) (format "task %s" (plist-get new :short)) (format "\"%s\"" title))
+             (file-name-nondirectory (directory-file-name project))
+             (if then (funcall then (plist-get new :short) title) "")))
   (org-varde-refresh))
 
+(defun org-varde-board--reveal (project)
+  "Show every project on the board when it keeps to one other than PROJECT:
+a task just made or moved there is in view."
+  (when-let* ((board (get-buffer org-varde-board-buffer)))
+    (with-current-buffer board
+      (when (and org-varde-board--scoped org-varde-board--project
+                 (not (equal (file-truename (file-name-as-directory project))
+                             (file-truename (file-name-as-directory org-varde-board--project)))))
+        (setq org-varde-board--scoped nil)
+        (org-varde-board--render)))))
+
 (defun org-varde--new-text ()
-  "The task written in this buffer, as (TITLE . BODY)."
-  (let* ((text (string-trim-left (buffer-string)))
+  "The task written in this buffer, as (TITLE . BODY).
+TITLE is its first line, and may be empty."
+  (let* ((text (buffer-string))
          (split (string-search "\n" text)))
     (cons (string-trim (substring text 0 split))
           (string-trim (if split (substring text split) "")))))
@@ -478,9 +963,7 @@ at point."
 (defun org-varde-board-move (directory)
   "Move the task at point to the project DIRECTORY is in.
 Asked for, offering its project.  varde refuses while the task has an
-active worktree or a live session.  A heading of the task that names a
-VARDE_PROJECT, its own or inherited, gets the new one, so that its next
-start does not move the task back."
+active worktree or a live session."
   (interactive
    (let ((project (plist-get (org-varde-board--row-at-point) :project)))
      (list (read-directory-name "Move to project: " (and project (file-name-as-directory project))))))
@@ -489,71 +972,139 @@ start does not move the task back."
          (said (condition-case e
                    (string-trim (org-varde--varde "set" task "--project" dir))
                  (org-varde-varde-error (user-error "varde: %s" (cadr e))))))
-    (org-varde--at-heading
-     task (lambda ()
-            (when (org-entry-get nil "VARDE_PROJECT" t)
-              (org-varde--saving-if-clean
-                (org-entry-put nil "VARDE_PROJECT" (abbreviate-file-name dir))))))
+    (org-varde-board--reveal dir)
     (message "%s" (if (string-empty-p said) "Already in that project" said)))
   (org-varde-refresh))
+
+(defun org-varde-board--legend ()
+  "What the board's groups hold, for its menu: in two columns, worded as
+the terminal board's help has it."
+  (let ((say (lambda (g) (concat (propertize (string-pad (car g) 11) 'face 'org-varde-board-group) (cdr g))))
+        (groups '(("Needs you" . "turn ended, or it asks")
+                  ("Working" . "a session at work")
+                  ("Open" . "no session running")
+                  ("Inbox" . "not made by you; a accepts")
+                  ("Done" . "closed today, or work not landed")
+                  ("Parked" . "put aside for later, folded"))))
+    (mapconcat (lambda (i)
+                 (concat (string-pad (funcall say (nth i groups)) 36) (funcall say (nth (+ i 3) groups))))
+               '(0 1 2) "\n")))
+
+(defun org-varde-board--menu-head ()
+  "The head of the board's menu: what its groups hold, and what done and
+park ask of a busy session."
+  (concat (org-varde-board--legend) "\n"
+          (propertize "d and P on a busy session ask: y stops it, n leaves it running" 'face 'org-varde-quiet) "\n"
+          (propertize "u reopens what d, P or x closed; in a view, u first undoes a removal" 'face 'org-varde-quiet)))
 
 (transient-define-prefix org-varde-board-menu ()
   "Everything the board does.  Start, done, park and accept act on every
 task in the region."
-  [["Start"
-    ("RET" "start, or go to it (C-u fresh, C-u C-u fork)" org-varde-board-start)
-    ("n" "new task" org-varde-board-create)
-    ("N" "session of your own" org-varde-board-new)
-    ("m" "move to another project" org-varde-board-move)]
+  [:description org-varde-board--menu-head
+   ["Go"
+    ("RET" "go to it" org-varde-board-start)
+    ("s" "start, stay" org-varde-board-start-background)
+    ("R" "fresh" org-varde-board-start-fresh)
+    ("F" "fork" org-varde-board-start-fork)]
+   ["Task"
+    ("n" "new" org-varde-board-create)
+    ("e" "edit" org-varde-board-edit)
+    ("m" "move" org-varde-board-move)
+    ("N" "own session" org-varde-board-new)]
    ["Close"
-    ("d" "done" org-varde-board-done)
-    ("P" "park" org-varde-board-park)
-    ("x" "throw away" org-varde-board-throw-away)]
-   ["Inbox"
-    ("a" "accept" org-varde-board-accept)
-    ("f" "file in org" org-varde-board-file)
-    ("l" "link to a heading" org-varde-board-link)]
-   ["Look"
-    ("o" "heading" org-varde-board-visit)
-    ("s" "show (e there edits the cairn)" org-varde-show)
-    ("S" "its project cairn" org-varde-show-project)
-    ("E" "edit the project cairn" org-varde-edit-project-cairn)
+    ("d" "done" org-varde-board-done :if org-varde--can-done-p)
+    ("P" "park" org-varde-board-park :if org-varde--can-park-p)
+    ("x" "drop" org-varde-board-drop)
+    ("u" "reopen last" org-varde-board-reopen)
+    ("a" "accept (Inbox)" org-varde-board-accept)]]
+  [["Look"
+    ("v" "view, cairns" org-varde-show :if-not org-varde--evil-p)
+    ("K" "view, cairns" org-varde-show :if org-varde--evil-p)
+    ("E" "cairn as text" org-varde-edit-cairn)
+    ("=" "changes" org-varde-board-diff)
     ("/" "recall" org-varde-recall)
-    ("." "this project, or every one" org-varde-board-toggle-project)]])
+    ("y" "copy a link" org-varde-copy-link)]
+   ;; Evil's keys in columns of their own: transient binds the keys of
+   ;; a hidden suffix, but not those of a hidden column, and g cannot be
+   ;; both a key and the start of gr.
+   ["Move"
+    :if-not org-varde--evil-p
+    ("TAB" "needs you, S-TAB back" org-varde-board-next-needs-you)
+    ("j" "next" org-varde-board-next-task)
+    ("k" "previous" org-varde-board-previous-task)
+    ("}" "next group" org-varde-board-next-group)
+    ("{" "prev. group" org-varde-board-previous-group)]
+   ["Board"
+    :if-not org-varde--evil-p
+    ("." "project/all" org-varde-board-toggle-project)
+    ("z" "fold, TAB too" org-varde-board-toggle-group)
+    ("g" "refresh" org-varde-refresh)
+    ("q" "quit" quit-window)]
+   ["Move"
+    :if org-varde--evil-p
+    ("TAB" "needs you, S-TAB back" org-varde-board-next-needs-you)
+    ("j" "next" org-varde-board-next-task)
+    ("k" "previous" org-varde-board-previous-task)
+    ("gg" "first" org-varde-board-first-task)
+    ("G" "last" org-varde-board-last-task)
+    ("}" "next group" org-varde-board-next-group)
+    ("{" "prev. group" org-varde-board-previous-group)]
+   ["Board"
+    :if org-varde--evil-p
+    ("." "project/all" org-varde-board-toggle-project)
+    ("za" "fold, TAB too" org-varde-board-toggle-group)
+    ("gr" "refresh" org-varde-refresh)
+    ("q" "quit" quit-window)]])
 
 (defvar-keymap org-varde-board-mode-map
+  :doc "The board's keys: the terminal board's wherever Emacs allows.
+Rebind them here; under evil, its normal state takes them from here too."
   :parent special-mode-map
   "RET" #'org-varde-board-start
-  "d" #'org-varde-board-done
-  "f" #'org-varde-board-file
-  "x" #'org-varde-board-throw-away
-  "/" #'org-varde-recall
-  "?" #'org-varde-board-menu
-  "P" #'org-varde-board-park
-  "a" #'org-varde-board-accept
-  "l" #'org-varde-board-link
-  "o" #'org-varde-board-visit
-  "s" #'org-varde-show
-  "S" #'org-varde-show-project
-  "E" #'org-varde-edit-project-cairn
+  "s" #'org-varde-board-start-background
+  "R" #'org-varde-board-start-fresh
+  "F" #'org-varde-board-start-fork
   "n" #'org-varde-board-create
+  "e" #'org-varde-board-edit
   "N" #'org-varde-board-new
   "m" #'org-varde-board-move
-  "TAB" #'org-varde-board-toggle-group
+  "d" #'org-varde-board-done
+  "P" #'org-varde-board-park
+  "x" #'org-varde-board-drop
+  "u" #'org-varde-board-reopen
+  "a" #'org-varde-board-accept
+  "v" #'org-varde-show
+  "K" #'org-varde-show
+  "E" #'org-varde-edit-cairn
+  "y" #'org-varde-copy-link
+  "=" #'org-varde-board-diff
+  "/" #'org-varde-recall
   "." #'org-varde-board-toggle-project
+  "?" #'org-varde-board-menu
   "g" #'org-varde-refresh
+  "j" #'org-varde-board-next-task
+  "k" #'org-varde-board-previous-task
   "C-n" #'org-varde-board-next-task
   "C-p" #'org-varde-board-previous-task
+  "<down>" #'org-varde-board-next-task
+  "<up>" #'org-varde-board-previous-task
+  "}" #'org-varde-board-next-group
+  "{" #'org-varde-board-previous-group
   "M-n" #'org-varde-board-next-group
-  "M-p" #'org-varde-board-previous-group)
+  "M-p" #'org-varde-board-previous-group
+  "M-<" #'org-varde-board-first-task
+  "M->" #'org-varde-board-last-task
+  "TAB" #'org-varde-board-tab
+  "<backtab>" #'org-varde-board-previous-needs-you
+  "z" #'org-varde-board-toggle-group)
 
 (defun org-varde-board--header ()
   "The key hints for the header line.
 What is used most, and where the rest is."
   (mapconcat (lambda (pair)
                (concat (propertize (car pair) 'face 'help-key-binding) " " (cdr pair)))
-             '(("RET" . "start") ("n" . "new") ("d" . "done") ("f" . "file in org") ("x" . "throw away")
-               ("?" . "more"))
+             `(("RET" . "go") ("TAB" . "needs you") (,(if (org-varde--evil-p) "K" "v") . "view")
+               ("n" . "new") ("d" . "done") ("?" . "help"))
              "  "))
 
 (define-derived-mode org-varde-board-mode special-mode "varde"
@@ -563,46 +1114,80 @@ What is used most, and where the rest is."
   (setq header-line-format (concat " " (org-varde-board--header)))
   (org-varde--evil-keys org-varde-board-mode-map
                         "gr" #'org-varde-refresh
-                        "gj" #'org-varde-board-next-group
-                        "gk" #'org-varde-board-previous-group
-                        (kbd "C-j") #'org-varde-board-next-task
-                        (kbd "C-k") #'org-varde-board-previous-task)
+                        "gg" #'org-varde-board-first-task
+                        "G" #'org-varde-board-last-task
+                        "za" #'org-varde-board-toggle-group)
   (when (fboundp 'evil-define-key*)
     ;; What acts on the region acts on the selected lines.
     (evil-define-key* 'visual org-varde-board-mode-map
-      (kbd "RET") #'org-varde-board-start
-      "d" #'org-varde-board-done
-      "P" #'org-varde-board-park
-      "a" #'org-varde-board-accept))
+                      (kbd "RET") #'org-varde-board-start
+                      "s" #'org-varde-board-start-background
+                      "d" #'org-varde-board-done
+                      "P" #'org-varde-board-park
+                      "x" #'org-varde-board-drop
+                      "a" #'org-varde-board-accept))
   ;; Git work changes outside varde's sight; showing the board looks again.
   (add-hook 'window-buffer-change-functions #'org-varde-board--shown nil t)
+  ;; Titles are cut to the window, and what follows them kept to its edge.
+  (add-hook 'window-size-change-functions #'org-varde-board--resized nil t)
   (hl-line-mode 1))
 
+(defun org-varde-board--resized (window)
+  "Fit the board to WINDOW's new size.  One that fits it shows from its
+top, as when a view below it closes."
+  (org-varde-board--refreshed)
+  (when (and (window-live-p window)
+             (with-current-buffer (window-buffer window)
+               (<= (count-lines (point-min) (point-max)) (window-body-height window))))
+    (set-window-start window 1)))
+
 (defun org-varde-board--shown (_window)
-  "Refresh the board as it comes into view."
+  "Draw the board as it comes into view, and refresh it."
+  (org-varde-board--render)
   (org-varde-refresh))
+
+(defvar org-varde-board--home nil
+  "The workspace the board lives in, under Doom's: where it was opened
+while it had none.")
 
 ;;;###autoload
 (defun org-varde-board ()
-  "Show the varde board.
+  "Show the varde board: where it already is, else in this window.
 It keeps to the project of the buffer it is called from, as
-`org-varde-board-scope' says."
+`org-varde-board-scope' says: in org, the VARDE_PROJECT of the entry at
+point, inherited, else the buffer's repository.  Come back to from a
+task's terminal or view, it is as you left it, on that task."
   (interactive)
   (unless org-varde-mode (org-varde-mode 1))
-  (let* ((opened (not (equal (buffer-name) org-varde-board-buffer)))
-         (project (and opened (org-varde-board--project-of default-directory))))
+  (let* ((board (get-buffer org-varde-board-buffer))
+         (left (and board (or org-varde--task
+                              (derived-mode-p 'org-varde-show-mode 'org-varde-recall-mode))))
+         (opened (not (or left (equal (buffer-name) org-varde-board-buffer))))
+         (dir (and opened (derived-mode-p 'org-mode) (org-entry-get nil "VARDE_PROJECT" t)))
+         (project (and opened (org-varde-board--project-of (if dir (expand-file-name dir) default-directory)))))
     (with-current-buffer (get-buffer-create org-varde-board-buffer)
       (unless (derived-mode-p 'org-varde-board-mode) (org-varde-board-mode))
+      (when (and (stringp left) (org-varde--row left))
+        (setq org-varde-board--select left))
       (when opened
         (setq org-varde-board--project project
-              org-varde-board--scoped (eq org-varde-board-scope 'project)))
-      (org-varde-board--render)))
-  (pop-to-buffer-same-window org-varde-board-buffer)
-  ;; Headings and tasks changed while Emacs was away come into step now.
-  (org-varde-reconcile)
+              org-varde-board--scoped (eq org-varde-board-scope 'project)))))
+  (unless org-varde-board--ticking
+    (setq org-varde-board--ticking (run-at-time 60 60 #'org-varde-board--tick)))
+  ;; Under Doom, in its own workspace, whichever it is shown in too.
+  (when (org-varde--workspaces-p)
+    (if (member org-varde-board--home (+workspace-list-names))
+        (unless (equal org-varde-board--home (org-varde--workspace-current))
+          (org-varde--workspace-return org-varde-board--home))
+      (setq org-varde-board--home (org-varde--workspace-current))))
+  (let ((window (get-buffer-window org-varde-board-buffer)))
+    (if window (select-window window) (pop-to-buffer-same-window org-varde-board-buffer)))
+  ;; Drawn once in sight: in a workspace come back to, its window then
+  ;; keeps its place.
+  (org-varde-board--render)
   (org-varde-refresh))
 
-(add-hook 'org-varde-after-refresh-hook #'org-varde-board--render)
+(add-hook 'org-varde-after-refresh-hook #'org-varde-board--refreshed)
 
 (provide 'org-varde-board)
 ;;; org-varde-board.el ends here

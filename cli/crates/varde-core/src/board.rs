@@ -45,6 +45,10 @@ pub struct Row {
     /// running; 0 unless it is `delegated` or `waiting`.
     pub agents: u32,
     pub shells: u32,
+    /// A live session of the task is at work: mid-turn (`working`,
+    /// `delegated` or `blocked`), or waiting with sub-agents or background
+    /// shells its last turn left running, which done or park would stop.
+    pub busy: bool,
     /// In Needs you: its session finished a turn, or asked for a decision,
     /// that nobody has looked at yet. These come first.
     pub unread: bool,
@@ -57,6 +61,12 @@ pub struct Row {
     pub origin: Option<Origin>,
     /// Unix ms of the latest thing that happened to the task.
     pub last: i64,
+    /// Unix ms of when it was done, parked or dropped, while it is.
+    pub closed: Option<i64>,
+    /// Its cairn's Status line, when it has one; only with `all`, for a
+    /// review: the board does without it.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cairn_status: Option<String>,
     pub run: Option<RunRef>,
     /// Where its git work stands, as last checked; `null` before the first
     /// check or outside a repository.
@@ -65,6 +75,10 @@ pub struct Row {
     /// in a project checkout and has been started.
     #[serde(skip)]
     pub tracked: bool,
+    /// Whether it has a worktree of its own, whose work dropping it keeps
+    /// under `refs/varde/discarded/`.
+    #[serde(skip)]
+    pub worktree: bool,
     /// When its git work was last checked, unix ms.
     #[serde(skip)]
     pub git_checked: Option<i64>,
@@ -124,7 +138,8 @@ pub fn build(
                 r.id, r.native_id, r.cwd, r.started, r.pid, r.pid_start, t.external,
                 EXISTS (SELECT 1 FROM worktree w WHERE w.task = t.id AND w.state = 'active'),
                 g.stage, g.label, g.checks, g.checked, o.id, o.title,
-                coalesce(t.changed, t.created), r.tty, r.tty_ctime
+                coalesce(t.changed, t.created), r.tty, r.tty_ctime,
+                CASE WHEN ?1 THEN (SELECT nullif(status, '') FROM cairn WHERE task = t.id) END
          FROM task t
          LEFT JOIN task o ON o.id = t.origin
          LEFT JOIN git_state g ON g.task = t.id
@@ -136,7 +151,7 @@ pub fn build(
     // A task can have more than one live run: a session varde did not
     // start keeps running beside the fork `start` made of it. The row
     // shows whichever run is most urgent, not just the newest.
-    let others = urgent_older_runs(store, now, alive)?;
+    let (others, busy_older) = urgent_older_runs(store, now, alive)?;
 
     let mut stmt = store.conn.prepare_cached(sql)?;
     let mut rows = stmt.query(params![all, day_start])?;
@@ -183,6 +198,7 @@ pub fn build(
                 run = Some(other.run.clone());
             }
         }
+        let busy = at_work(status, counts) || busy_older.contains(&task);
         let worktree: bool = r.get(14)?;
         let (group, label) = if state == "done" {
             (4, "done")
@@ -221,14 +237,18 @@ pub fn build(
             state,
             agents,
             shells,
+            busy,
             unread: unread && group == 0,
             inbox,
             external: r.get(13)?,
             origin,
             last,
+            closed,
+            cairn_status: r.get(24)?,
             run,
             git,
             tracked,
+            worktree,
             git_checked: r.get(18)?,
         });
     }
@@ -283,6 +303,16 @@ fn urgency(status: Option<Status>) -> u8 {
     }
 }
 
+/// Whether a session is at work: mid-turn, or waiting with what its last
+/// turn left running in the background.
+fn at_work(status: Option<Status>, (agents, shells): (u32, u32)) -> bool {
+    match status {
+        Some(Status::Waiting) => agents > 0 || shells > 0,
+        Some(s) => s.mid_turn(),
+        None => false,
+    }
+}
+
 struct Other {
     status: Status,
     counts: (u32, u32),
@@ -291,12 +321,14 @@ struct Other {
 }
 
 /// For each open task, its most urgent live run other than the newest,
-/// among runs active in the last week.
+/// among runs active in the last week; and the tasks one of those runs
+/// is mid-turn in.
+#[allow(clippy::type_complexity)]
 fn urgent_older_runs(
     store: &Store,
     now: i64,
     alive: &dyn Fn(i64, i64) -> bool,
-) -> Result<std::collections::HashMap<String, Other>> {
+) -> Result<(std::collections::HashMap<String, Other>, std::collections::HashSet<String>)> {
     // From the few open tasks to their runs (CROSS JOIN keeps that order),
     // and a run's newest event straight from the index.
     let mut stmt = store.conn.prepare_cached(
@@ -308,6 +340,7 @@ fn urgent_older_runs(
     )?;
     let mut rows = stmt.query([now - RECENT_MS])?;
     let mut out: std::collections::HashMap<String, Other> = Default::default();
+    let mut busy = std::collections::HashSet::new();
     while let Some(r) = rows.next()? {
         let id: String = r.get(1)?;
         let view = store::view(&store.conn, &id)?;
@@ -320,12 +353,15 @@ fn urgent_older_runs(
         let status = store::effective_status(view.status, r.get(4)?, r.get(5)?, tty, alive);
         let Some(status) = status.filter(|s| urgency(Some(*s)) < 2) else { continue };
         let task: String = r.get(0)?;
+        if at_work(Some(status), (view.agents, view.shells)) {
+            busy.insert(task.clone());
+        }
         if out.get(&task).is_none_or(|o| urgency(Some(status)) < urgency(Some(o.status))) {
             let run = RunRef { id, native_id: r.get(2)?, cwd: r.get(3)? };
             out.insert(task, Other { status, counts: (view.agents, view.shells), unread: view.unread, run });
         }
     }
-    Ok(out)
+    Ok((out, busy))
 }
 
 #[cfg(test)]
@@ -504,6 +540,46 @@ mod tests {
     }
 
     #[test]
+    fn a_row_is_busy_while_any_of_its_sessions_is_at_work() {
+        let (_d, mut s) = store();
+        ingest(&mut s, "a", Kind::Prompt, Some("working"), 10);
+        ingest(&mut s, "b", Kind::Prompt, Some("blocked"), 10);
+        ingest(&mut s, "b", Kind::Blocked, None, 11);
+        ingest(&mut s, "c", Kind::Prompt, Some("waiting"), 10);
+        ingest(&mut s, "c", Kind::TurnEnd { agents: 0, shells: 0 }, None, 11);
+        // Waiting, but a server it started still runs.
+        ingest(&mut s, "e", Kind::Prompt, Some("shell left"), 10);
+        ingest(&mut s, "e", Kind::TurnEnd { agents: 0, shells: 1 }, None, 11);
+        ingest(&mut s, "d", Kind::Prompt, Some("two sessions"), 10);
+        // A newer run of it waits; the older one is still at work.
+        let task: String =
+            s.conn.query_row("SELECT id FROM task WHERE title = 'two sessions'", [], |r| r.get(0)).unwrap();
+        s.conn
+            .execute(
+                "INSERT INTO run (id, task, agent, native_id, relation, started, launch)
+                 VALUES ('F', ?1, 'claude', 'f', 'fork', 12, 'managed')",
+                [&task],
+            )
+            .unwrap();
+        ingest(&mut s, "f", Kind::Prompt, None, 13);
+        ingest(&mut s, "f", Kind::TurnEnd { agents: 0, shells: 0 }, None, 14);
+        let b = build(&s, 20, 0, false, &|_, _| true).unwrap();
+        let mut busy: Vec<(&str, &str, bool)> =
+            b.groups.iter().flat_map(|g| &g.rows).map(|r| (r.title.as_str(), r.status, r.busy)).collect();
+        busy.sort();
+        assert_eq!(
+            busy,
+            [
+                ("blocked", "blocked", true),
+                ("shell left", "waiting", true),
+                ("two sessions", "waiting", true),
+                ("waiting", "waiting", false),
+                ("working", "working", true)
+            ]
+        );
+    }
+
+    #[test]
     fn a_live_run_needing_you_is_not_hidden_by_a_newer_one() {
         let (_d, mut s) = store();
         ingest(&mut s, "a", Kind::Prompt, Some("alpha"), 10);
@@ -554,6 +630,21 @@ mod tests {
         let row = &done.rows[0];
         assert_eq!(row.title, "landing");
         assert!(row.tracked);
+        // When it closed, and its cairn's Status, for a review.
+        assert_eq!((row.closed, row.cairn_status.as_deref()), (Some(3), None));
+        s.conn
+            .execute(
+                "INSERT INTO cairn (task, version, updated, status) VALUES (?1, 1, 3, 'PR open, waiting on review.')",
+                [&landing],
+            )
+            .unwrap();
+        let b = build(&s, now, now - 1000, false, &|_, _| true).unwrap();
+        assert_eq!(b.groups.iter().find(|g| g.key == "done").unwrap().rows[0].cairn_status, None);
+        let b = build(&s, now, now - 1000, true, &|_, _| true).unwrap();
+        // Both closed at 3: with --all, "landed" is there too, in either order.
+        let done = b.groups.iter().find(|g| g.key == "done").unwrap();
+        let row = done.rows.iter().find(|r| r.title == "landing").unwrap();
+        assert_eq!(row.cairn_status.as_deref(), Some("PR open, waiting on review."));
         let git = row.git.as_ref().unwrap();
         assert_eq!(
             (git.stage.as_str(), git.label.as_str(), git.checks.as_deref()),

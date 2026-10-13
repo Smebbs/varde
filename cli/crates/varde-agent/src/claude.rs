@@ -119,6 +119,10 @@ impl Agent for Claude {
         Some(uuid::Uuid::new_v4().to_string())
     }
 
+    fn program(&self) -> String {
+        bin()
+    }
+
     fn launch(&self, how: Launch) -> (Vec<String>, Vec<(String, String)>) {
         let mut argv = vec![bin()];
         let s = |x: &str| x.to_string();
