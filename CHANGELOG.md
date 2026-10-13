@@ -4,6 +4,15 @@ Notable changes to varde and org-varde. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions
 follow [Semantic Versioning](https://semver.org).
 
+## Unreleased
+
+### Fixed
+
+- Two starts of one task at once no longer plan two runs when one
+  records its run just as the other looks for one to take.
+- org-varde loads `org-element` itself, which Emacs 29 and 30 do not
+  load with org.
+
 ## 1.1.0 - 2026-10-13
 
 ### Highlights

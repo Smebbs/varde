@@ -218,6 +218,18 @@ pub fn prepare(store: &mut Store, task_id: &str, opts: Options, interactive: boo
         .query_row("SELECT title, body, project, origin FROM task WHERE id = ?1", [task_id], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?))
         })?;
+    // The newest run as this start found it, read before anything else:
+    // another start that records one after this is seen at the insert.
+    // Read later, a run recorded just after the check below would pass
+    // for an old one, and two runs be planned.
+    let seen: Option<String> = store
+        .conn
+        .query_row(
+            "SELECT id FROM run WHERE task = ?1 ORDER BY started DESC, rowid DESC LIMIT 1",
+            [task_id],
+            |r| r.get(0),
+        )
+        .optional()?;
     // A run recorded moments ago and not launched yet is what a second
     // start is after too: a double RET, or Emacs and a terminal at once.
     // Planning another would put two agents on one tree, so it gets the
@@ -254,19 +266,6 @@ pub fn prepare(store: &mut Store, task_id: &str, opts: Options, interactive: boo
             }
         }
     }
-    // The newest run as this start found it: another start that records
-    // one meanwhile is seen at the insert.
-    let newest = || -> Result<Option<String>> {
-        Ok(store
-            .conn
-            .query_row(
-                "SELECT id FROM run WHERE task = ?1 ORDER BY started DESC, rowid DESC LIMIT 1",
-                [task_id],
-                |r| r.get(0),
-            )
-            .optional()?)
-    };
-    let seen = newest()?;
     // Two starts at once (Emacs and a terminal, two `attach`es) both plan
     // from what they read: the one that finds a run the other recorded
     // since takes it, as a start moments later would, and says so.
