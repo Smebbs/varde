@@ -40,12 +40,13 @@ the contract. What org-varde does beyond it is Emacs's own business.
 | Command | Returns |
 |---|---|
 | `varde list --json [--all] [--project [DIR]]` | The board: groups, already ordered and labelled. `--all` adds old done tasks and a Dropped group. `--project` keeps only the rows of the project DIR (default: here) is in. |
-| `varde new --json [--project DIR] [--context -] [--external REF] -- TITLE` | `{"id", "short"}` of the new task. `--context -` reads its context (the task's `body`) from stdin. `--body` is a hidden alias of `--context`, kept for clients written against 1.0; org-varde still passes it. With no TITLE (nothing after `--`), the title is cut from the context's first words and a model, started detached, names the task, as an ad-hoc session's: the next `list --json` shows the new title; with neither, it exits 1 (`a task needs a title, or --context TEXT to cut one from`). |
+| `varde new --json [--project DIR] [--context -] [--external REF] [--when RULE [--worktree always\|never]] -- TITLE` | `{"id", "short"}` of the new task. `--when` schedules it, as `varde schedule` does (below); a rule varde cannot read, or a first start that would ask about a worktree with no `--worktree`, is refused before anything is made. `--context -` reads its context (the task's `body`) from stdin. `--body` is a hidden alias of `--context`, kept for clients written against 1.0; org-varde still passes it. With no TITLE (nothing after `--`), the title is cut from the context's first words and a model, started detached, names the task, as an ad-hoc session's: the next `list --json` shows the new title; with neither, it exits 1 (`a task needs a title, or --context TEXT to cut one from`). |
+| `varde schedule TASK [--worktree always\|never] -- RULE`, `varde schedule TASK --off` | Gives the task a schedule, or changes or removes it, and says so (`k2f0g3 repeats (every weekday 09:00); first Thu 09:00`). RULE is `at [DAY\|DATE] [HH:MM]`, `every day\|weekday\|weekend\|mon,thu [HH:MM]`, `every 30m\|4h\|2d\|1w`, or an org timestamp (`<2026-10-19 Mon 09:00 ++1w>`). Nobody is there when it fires, so what a first start would ask is settled now: with no `--worktree` where the first start would ask, it exits 1 with a message naming `--worktree`; ask the user and call again. A task whose project is unsure is refused until `set --project`. See "Scheduled tasks". |
 | `varde set TASK [--title=T] [--context -] [--project DIR]` | Refreshes the title or context (`body`) from where the client keeps them (`--body` works too, as for `new`), and says what changed: `<short>: title and context changed` (or `title changed`, `context changed`); the same text again changes nothing and prints nothing. A title changed this way is the user's: no model names the task after it. An empty `--title=` cuts the title from the context again, and a model names the task once more. `--project` moves the task to the project DIR is in (its repository root, as `new` takes it) and prints `moved <short> to <project>` (followed by `; title changed` and the like when the text changed too); already there, it does nothing and prints nothing. A move is refused (exit 1, nothing changed, the title and body included) while the task has an active worktree or a live session, which belong to the old checkout; show the message. Past runs keep their directories and the cairn stays with the task; the next start is a fresh conversation in the new project, given that project's cairn. |
 | `varde accept TASK…` | Moves Inbox tasks into Open, printing `accepted <short>` for each. When none of the tasks named is in the Inbox it exits 1 (`<short> is not in the Inbox: accept is for Inbox tasks`, or for several `none of them is in the Inbox: …`); beside ones that are, the others are named on a last line (`not in the Inbox, so left as they are: …`). |
 | `varde link TASK SOURCE`, `varde unlink TASK` | Records or forgets where the task lives in your client. Linking takes the task out of the Inbox. |
 | `varde drop TASK [--json]` | Drops a task. Work in its worktree is kept under `refs/varde/discarded/`, and starting the task again brings it back. |
-| `varde show TASK --json [--no-git]` | The task, its cairn, its runs, its worktree and its git status. `--no-git` skips git and `gh`, which can take a second. `prompt_title`, present only on a task a model has named, is the title varde cut from its first prompt or context (or the agent wrote, for deferred work). |
+| `varde show TASK --json [--no-git]` | The task, its cairn, its runs, its worktree and its git status. `--no-git` skips git and `gh`, which can take a second. `prompt_title`, present only on a task a model has named, is the title varde cut from its first prompt or context (or the agent wrote, for deferred work). `schedule` is `{"rule", "due", "error"}`, or `null` for a task with none: the rule as typed, when it is next due (Unix ms), and why its last try to start failed. |
 | `varde agent --json` | `{"v": 1, "agent", "command"}`: the agent a new conversation uses (`$VARDE_AGENT`, else `agent` in the config, else `claude`) and the argv that runs it (`$VARDE_CLAUDE` or `$VARDE_PI`, else `[agents.NAME] command`, else its name). Run `command` in a terminal for a session of the user's own, which becomes an Inbox task on its first prompt; never hardcode `claude`. Exit 1 for an agent varde does not know. Without `--json`, the command line, quoted for a shell. |
 | `varde start TASK --json [--fresh\|--fork] [--worktree always\|never] [--project DIR] [--context-file F] [--agent A]` | A plan: see below. |
 | `varde done TASK --json [--remove [--force]] [--keep-running]` | What happened to the worktree and which sessions were stopped. |
@@ -90,7 +91,7 @@ names the task it came from: put it next to that one if you can.
      "run": {"id": "01M3CARHTABHFFZDKTDRRB0R2D",
              "native_id": "0d48ec9c-…", "cwd": "/home/me/src/app/.worktrees/…"},
      "git": {"stage": "pr", "label": "PR #12 ✓", "checks": "passing"}}]},
-  {"key": "working", …}, {"key": "open", …}, {"key": "inbox", …},
+  {"key": "working", …}, {"key": "open", …}, {"key": "scheduled", …}, {"key": "inbox", …},
   {"key": "done", …}, {"key": "parked", "collapsed": true, …}]}
 ```
 
@@ -138,6 +139,11 @@ names the task it came from: put it next to that one if you can.
 - `done` holds tasks closed today, and older ones whose worktree is
   still there because their work has not landed.
 - `run` is the task's latest run, or `null` for a task that never ran.
+- `schedule` is `null`, or for an open task with a schedule
+  `{"rule", "due", "label", "repeats", "late", "error"}`. Such a task is
+  in `scheduled`, soonest first, unless a session of it is in Needs you
+  or Working. Show `label` (`↻ Mon 09:00`, `◷ Thu 06:00`, with `late`
+  when it should have started by now) where a row shows its age.
 - `origin` is `{"task", "short", "title"}` of the task deferred work
   came from, or `null`.
 - `inbox` holds tasks that arrived without the user creating them:
@@ -146,7 +152,7 @@ names the task it came from: put it next to that one if you can.
   parks or drops them. Offer `accept` and your own way to link them.
   Dropped tasks are not on the board.
 - `--all` adds old done tasks, which the board otherwise leaves out,
-  and a seventh group, `dropped` (collapsed), with the dropped tasks.
+  and an eighth group, `dropped` (collapsed), with the dropped tasks.
   Nothing else leaves the board by itself.
 
 ## Starting a task
@@ -186,6 +192,7 @@ parked or dropped task is reopened first, as any start reopens it.
 ```json
 {"v": 1, "action": "ask", "ask": "worktree"}
 {"v": 1, "action": "ask", "ask": "project", "choices": ["/home/me/src/app", "/home/me/src/api"]}
+{"v": 1, "action": "ask", "ask": "takeover", "run": "01M3…"}
 ```
 
 A first run needs an answer only the user can give. Nothing was started
@@ -202,6 +209,10 @@ or changed. Ask, then call `start` again with the answer added.
   again with `--project DIR`. It comes before the worktree question.
   `start --project` is for a first run only: a started task moves with
   `varde set TASK --project DIR`.
+- `takeover`: the task's session is at work in the background, started
+  by its schedule, with no terminal to go to. Ask whether to take it
+  over; yes calls again with `--take-over`, which stops it and answers
+  `run`, resuming its conversation in your terminal. No leaves it be.
 
 `start` writes anything else the user should know to stderr, one line
 each, starting `varde: `: a worktree restored, dropped work brought
@@ -213,6 +224,23 @@ plan still follows on stdout.
 surroundings the task has in your client. Keep it short. org-varde no
 longer passes it: a task made from a note carries a `From:` line in its
 context instead.
+
+## Scheduled tasks
+
+A schedule makes varde start a task in the background: `start --fresh`
+and `varde run` with no terminal, the agent in its print mode. It is
+tracked as any session, with its hooks, status and row; once it has
+ended, its row is in Needs you, unread, until `seen`, and starting the
+task resumes it, as any task's. While it works, `start` asks
+`takeover` (above). In `show`, its runs have `"background": true`. A
+repeating task starts a fresh conversation each time, given its cairn.
+
+Nothing runs in the background but `varde tick`, which the heartbeat
+(`varde schedule --install`: a systemd user timer or a LaunchAgent)
+runs every minute, and `list` starts when a row it returns is due. A
+client does nothing to make schedules fire. `done`, `park` and `drop`
+stop a schedule, since it fires only for open tasks; `reopen` lets it
+fire again, at once if it was due meanwhile.
 
 ## Closing and parking
 

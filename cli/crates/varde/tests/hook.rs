@@ -160,7 +160,7 @@ fn a_session_varde_did_not_launch_ends_with_its_process() {
     // It went without a SessionEnd: a closed terminal, a crash, a reboot.
     assert_eq!(rows(&e.board(), "working"), Vec::<String>::new());
     assert_eq!(rows(&e.board(), "inbox"), ["Run ls once with the Bash tool…"]);
-    let task = e.board()["groups"][3]["rows"][0]["task"].as_str().unwrap().to_string();
+    let task = e.board()["groups"][4]["rows"][0]["task"].as_str().unwrap().to_string();
     let show: Value = serde_json::from_slice(&e.run(&["show", &task, "--json", "--no-git"]).stdout).unwrap();
     assert_eq!(show["runs"][0]["status"], "exited");
     assert_eq!(show["runs"][0]["launch"], "adopted");

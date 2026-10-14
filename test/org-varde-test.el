@@ -1350,6 +1350,21 @@ They start in insert state, and :w, ZZ and ZQ do what they say."
           (should (equal asked "\"Fix the login bug\" is done: reopen and start it? "))
           (should-not went))))))
 
+(ert-deftest org-varde-a-session-at-work-in-the-background-is-taken-over-when-asked ()
+  "A session its schedule started has no terminal: going to it asks
+whether to take it over, and starts it again with that answer."
+  (org-varde-test-with-varde
+    (org-varde-test-reply-once "start" "{\"v\":1,\"action\":\"ask\",\"ask\":\"takeover\",\"run\":\"R1\"}")
+    (org-varde-test--run-plan)
+    (let (asked)
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (q) (setq asked q) t)))
+        (save-window-excursion
+          (org-varde-go-task org-varde-test--id "Triage")
+          (org-varde-test-wait)))
+      (should (string-match-p "is working in the background" asked)))
+    (should (seq-find (lambda (c) (string-suffix-p "--take-over" c)) (org-varde-test-calls)))
+    (should (equal org-varde-test-sent '("varde run R1")))))
+
 (ert-deftest org-varde-next-needs-you-goes-on-from-a-task-outside-emacs ()
   "A task running in a terminal outside Emacs is not gone to: the next
 press goes on from it, not back to it."

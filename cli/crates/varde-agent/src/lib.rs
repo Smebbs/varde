@@ -53,6 +53,14 @@ pub trait Agent {
     /// The command line and extra environment that start a run.
     fn launch(&self, how: Launch) -> (Vec<String>, Vec<(String, String)>);
 
+    /// `argv`, a launch's, made to run with nobody at it, in the
+    /// background: to the end of its reply, then exit, its conversation
+    /// kept to resume. Claude's and pi's print mode.
+    fn background(&self, mut argv: Vec<String>) -> Vec<String> {
+        argv.insert(1, "-p".into());
+        argv
+    }
+
     /// What identifies the conversation a transcript belongs to: a key
     /// every fork of it copies. `None` if the transcript cannot say.
     fn family_key(&self, transcript: &Path) -> Option<String>;

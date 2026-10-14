@@ -18,8 +18,11 @@ use super::field::{Field, Words};
 #[derive(Default, Clone)]
 pub(super) struct Draft {
     pub(super) title: Field,
+    /// When varde starts it, if at all: a schedule's rule.
+    pub(super) when: Field,
     pub(super) body: Field,
     pub(super) in_body: bool,
+    pub(super) in_when: bool,
     /// The task this changes; a new one when `None`.
     pub(super) task: Option<String>,
     /// C-x was pressed: C-e next opens the editor, as in a shell.
@@ -42,9 +45,10 @@ const HINT: &str = "#: ";
 
 impl Draft {
     /// A task's title and context, to change.
-    pub(super) fn of(task: &str, title: &str, body: &str) -> Draft {
+    pub(super) fn of(task: &str, title: &str, body: &str, when: &str) -> Draft {
         Draft {
             title: Field::new(title),
+            when: Field::new(when),
             body: Field::new(body),
             task: Some(task.to_string()),
             ..Draft::default()
@@ -59,7 +63,8 @@ impl Draft {
     /// The draft as the drafts file keeps it.
     pub(super) fn json(&self) -> Value {
         let target = if self.task.is_some() { "edit task" } else { "new task" };
-        json!({ "task": self.task, "target": target, "title": self.title.text(), "text": self.body.text() })
+        json!({ "task": self.task, "target": target, "title": self.title.text(), "text": self.body.text(),
+                "when": self.when.text() })
     }
 
     /// A draft [`json`](Self::json) wrote; `None` for another kind.
@@ -70,13 +75,14 @@ impl Draft {
             _ => return None,
         };
         let (title, body) = (d["title"].as_str()?, d["text"].as_str()?);
-        let mut draft = Draft { task, ..Draft::of("", title, body) };
+        let mut draft = Draft { task, ..Draft::of("", title, body, d["when"].as_str().unwrap_or_default()) };
         draft.in_body = !body.is_empty();
         Some(draft)
     }
 
-    /// Tab, or Down and Up across the rule, move between title and body.
-    /// Enter creates from the title and starts a new line in the body;
+    /// Tab moves between title and body; Down and Up go through When,
+    /// the line between them.
+    /// Enter creates from the title or the when and starts a new line in the body;
     /// C-s creates from either. Esc and C-g put the form away, and C-x C-e
     /// or Alt-e opens the draft in `$EDITOR`. The rest edits the text as
     /// every prompt of the board does.
@@ -94,15 +100,39 @@ impl Draft {
             KeyCode::Char('e') if alt => return Edit::Editor,
             KeyCode::Enter if !self.in_body => return Edit::Create,
             KeyCode::Enter => self.body.insert("\n"),
-            KeyCode::Tab | KeyCode::BackTab => self.in_body = !self.in_body,
-            KeyCode::Down if !self.in_body => self.in_body = true,
-            KeyCode::Up if self.in_body && self.body.on_first_line() => self.in_body = false,
+            // Tab goes between title and body, as before there was a When.
+            KeyCode::Tab | KeyCode::BackTab => self.go(if self.in_body { 0 } else { 2 }),
+            KeyCode::Down if !self.in_body => self.go(self.at() + 1),
+            KeyCode::Up if self.in_when || (self.in_body && self.body.on_first_line()) => {
+                self.go(self.at() - 1)
+            }
             _ => {
-                let field = if self.in_body { &mut self.body } else { &mut self.title };
+                let field = if self.in_body {
+                    &mut self.body
+                } else if self.in_when {
+                    &mut self.when
+                } else {
+                    &mut self.title
+                };
                 field.key(key, Words::Prose);
             }
         }
         Edit::Typing
+    }
+
+    /// Which field is being typed in: 0 the title, 1 when, 2 the body.
+    fn at(&self) -> usize {
+        if self.in_body {
+            2
+        } else {
+            usize::from(self.in_when)
+        }
+    }
+
+    /// Go to field `i`.
+    fn go(&mut self, i: usize) {
+        self.in_when = i == 1;
+        self.in_body = i == 2;
     }
 
     /// Pasted text is typed, never run as keys. Lines after the first of a
@@ -111,6 +141,10 @@ impl Draft {
         let text = text.replace("\r\n", "\n").replace('\r', "\n");
         if self.in_body {
             self.body.insert(&text);
+            return;
+        }
+        if self.in_when {
+            self.when.insert(text.lines().next().unwrap_or_default());
             return;
         }
         let (first, rest) = text.split_once('\n').unwrap_or((&text, ""));
@@ -142,6 +176,7 @@ impl Draft {
         self.title.set(title.trim());
         self.body.set(body.trim());
         self.in_body = !self.body.text().is_empty();
+        self.in_when = false;
     }
 }
 
@@ -153,24 +188,37 @@ pub(super) fn draw_draft(f: &mut Frame, draft: &Draft, area: Rect) {
     let body = draft.body.text();
     let rows: usize = body.split('\n').map(|l| l.chars().count() / width + 1).sum();
     // Six rows where the screen has them; a smaller one gets all it has.
-    let height = (rows + 4).max(6).min(area.height as usize) as u16;
+    let height = (rows + 5).max(7).min(area.height as usize) as u16;
     let area = Rect { y: area.bottom() - height, height, ..area };
     let name = if draft.task.is_some() { " Edit task " } else { " New task " };
     let block =
         Block::bordered().border_type(BorderType::Rounded).padding(Padding::horizontal(1)).title(name);
-    let [title, rule, body_area] =
-        Layout::vertical([Constraint::Length(1), Constraint::Length(1), Constraint::Min(1)])
-            .areas(block.inner(area));
+    let [title, when, rule, body_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Length(1),
+        Constraint::Min(1),
+    ])
+    .areas(block.inner(area));
     f.render_widget(Clear, area);
     f.render_widget(block, area);
 
     let mut line = vec!["Title: ".bold()];
-    if draft.in_body {
+    if draft.in_body || draft.in_when {
         line.push(Span::raw(left_clip(&clean(draft.title.text()), width.saturating_sub(8))));
     } else {
         line.extend(draft.title.line_spans(width.saturating_sub(8)));
     }
     f.render_widget(Paragraph::new(Line::from(line)), title);
+    let mut line = vec!["When:  ".bold()];
+    if draft.in_when {
+        line.extend(draft.when.line_spans(width.saturating_sub(8)));
+    } else if draft.when.text().is_empty() {
+        line.push("not scheduled: at mon 09:00 · every weekday 09:00 · every 4h".dark_gray());
+    } else {
+        line.push(Span::raw(left_clip(&clean(draft.when.text()), width.saturating_sub(8))));
+    }
+    f.render_widget(Paragraph::new(Line::from(line)), when);
     f.render_widget(Paragraph::new("─".repeat(width).dark_gray()), rule);
 
     if body.is_empty() && !draft.in_body {

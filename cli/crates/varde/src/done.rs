@@ -388,6 +388,23 @@ fn stop_sessions(store: &Store, id: &str, wait: bool) -> Result<(Vec<String>, Ve
     Ok((live, own))
 }
 
+/// Stop `run`, one `varde run` launched, and wait for it to go: SIGTERM,
+/// then SIGKILL after a few seconds.
+pub fn stop_run(store: &Store, run: &str) -> Result<()> {
+    let live: Vec<_> = live_runs(
+        store,
+        &store.conn.query_row("SELECT task FROM run WHERE id = ?1", [run], |r| r.get::<_, String>(0))?,
+    )?
+    .into_iter()
+    .filter(|(r, _, _)| r == run)
+    .collect();
+    for (_, pid, _) in &live {
+        unsafe { libc::kill(*pid as libc::pid_t, libc::SIGTERM) };
+    }
+    end(&live);
+    Ok(())
+}
+
 /// Give the SIGTERM'd `runs` a few seconds to go, then SIGKILL any that
 /// have not, and wait for them to go.
 fn end(runs: &[(String, i64, i64)]) {

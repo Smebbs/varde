@@ -34,7 +34,12 @@ pub fn glyph(r: &Row) -> (&'static str, Tone) {
         "done" => ("✓", Tone::Quiet),
         "parked" => ("‖", Tone::Quiet),
         "dropped" => ("✕", Tone::Quiet),
-        _ => ("○", Tone::Quiet),
+        // Waiting for its schedule: again and again, or once.
+        _ => match &r.schedule {
+            Some(s) if s.late => (if s.repeats { "↻" } else { "◷" }, Tone::Asking),
+            Some(s) => (if s.repeats { "↻" } else { "◷" }, Tone::Quiet),
+            None => ("○", Tone::Quiet),
+        },
     }
 }
 
@@ -78,7 +83,11 @@ pub fn meta(r: &Row, now: i64, project: bool) -> Vec<(String, Tone)> {
     if let Some(p) = r.project.as_deref().filter(|_| project) {
         out.push((crate::list::project_name(Some(p)).to_string(), Tone::Quiet));
     }
-    out.push((crate::list::age(now - r.last), Tone::Quiet));
+    // A task waiting for its schedule shows when it starts, not its age.
+    match r.schedule.as_ref().filter(|_| word(r.status).is_none()) {
+        Some(s) => out.push((s.label.clone(), if s.late { Tone::Asking } else { Tone::Quiet })),
+        None => out.push((crate::list::age(now - r.last), Tone::Quiet)),
+    }
     out
 }
 

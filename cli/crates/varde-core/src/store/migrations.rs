@@ -225,4 +225,24 @@ ALTER TABLE task ADD COLUMN prompt_title TEXT;
 ALTER TABLE task ADD COLUMN named INTEGER;
 UPDATE task SET named = 0 WHERE prompt_title IS NOT NULL AND state != 'open';
 "#,
+    // 4: a task's schedule: when `varde tick` next starts it, in the
+    // background. `rule` is as
+    // typed; `worktree` answers what a first start would ask (1, 0, or
+    // NULL to leave it to the settings); `error` is why the last try to
+    // fire it failed, until one succeeds.
+    r#"
+CREATE TABLE schedule (
+  task     TEXT PRIMARY KEY REFERENCES task(id),
+  rule     TEXT NOT NULL,
+  next_due INTEGER NOT NULL,
+  worktree INTEGER,
+  fired    INTEGER,
+  tried    INTEGER,
+  error    TEXT,
+  created  INTEGER NOT NULL
+);
+CREATE INDEX schedule_due ON schedule(next_due);
+-- A run its schedule started in the background, with no terminal.
+ALTER TABLE run ADD COLUMN background INTEGER NOT NULL DEFAULT 0;
+"#,
 ];

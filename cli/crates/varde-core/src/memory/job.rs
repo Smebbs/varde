@@ -222,6 +222,9 @@ pub struct JobInput {
     pub cursor: i64,
     pub cairn: Option<(Cairn, i64)>,
     pub notes: Vec<(String, String)>,
+    /// Its schedule's rule, when the task starts again and again, each
+    /// time a fresh session given only its cairn.
+    pub repeats: Option<String>,
 }
 
 /// Take a queued job for running; `None` if it is not queued any more.
@@ -257,7 +260,14 @@ pub fn claim_job(store: &mut Store, job: &str, now: i64) -> Result<Option<JobInp
             ))
         },
     )?;
+    let repeats = tx
+        .query_row("SELECT rule FROM schedule WHERE task = ?1", [&task], |r| r.get::<_, String>(0))
+        .optional()?
+        .filter(|rule| {
+            crate::schedule::parse(rule, chrono::NaiveDateTime::default()).is_ok_and(|r| r.repeats())
+        });
     let input = JobInput {
+        repeats,
         cairn: cairn(&tx, &task)?,
         notes: pending_notes(&tx, &task)?,
         run,

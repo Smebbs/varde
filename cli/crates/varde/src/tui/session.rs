@@ -120,8 +120,13 @@ impl App<'_> {
             context: None,
             agent: None,
             project: project.clone(),
+            take_over: start.take_over,
         };
         match start::prepare(store, id, opts, false)? {
+            start::Outcome::Ask(start::Ask::TakeOver { .. }) => {
+                self.mode = Mode::TakeOver(start, asked);
+                Ok(None)
+            }
             start::Outcome::Ask(start::Ask::Project { choices }) => {
                 let dir = Field::new(&choices.first().map(|c| crate::tasks::tilde(c)).unwrap_or_default());
                 self.mode = Mode::Project(start, asked, choices, 0, dir);

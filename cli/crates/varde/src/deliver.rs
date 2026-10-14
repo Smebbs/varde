@@ -54,6 +54,10 @@ struct Task {
     held_out: bool,
     /// The branch of the task's worktree, when the run is in it.
     branch: Option<String>,
+    /// Its schedule's rule, when it starts again and again.
+    repeats: Option<String>,
+    /// Its schedule started this run in the background, with nobody at it.
+    background: bool,
 }
 
 fn task_of(conn: &Connection, run: &str) -> Result<Option<Task>> {
@@ -61,8 +65,10 @@ fn task_of(conn: &Connection, run: &str) -> Result<Option<Task>> {
         .prepare_cached(
             "SELECT t.id, t.title, t.project, t.origin, t.created, coalesce(r.holdout, 0),
                (SELECT w.branch FROM worktree w WHERE w.task = t.id AND w.state = 'active'
-                  AND (r.cwd = w.path OR substr(r.cwd, 1, length(w.path) + 1) = w.path || '/'))
-             FROM run r JOIN task t ON t.id = r.task WHERE r.id = ?1",
+                  AND (r.cwd = w.path OR substr(r.cwd, 1, length(w.path) + 1) = w.path || '/')),
+               s.rule, r.background
+             FROM run r JOIN task t ON t.id = r.task LEFT JOIN schedule s ON s.task = t.id
+             WHERE r.id = ?1",
         )?
         .query_row([run], |r| {
             Ok(Task {
@@ -73,6 +79,11 @@ fn task_of(conn: &Connection, run: &str) -> Result<Option<Task>> {
                 created: r.get(4)?,
                 held_out: r.get(5)?,
                 branch: r.get(6)?,
+                repeats: r.get::<_, Option<String>>(7)?.filter(|rule| {
+                    varde_core::schedule::parse(rule, chrono::NaiveDateTime::default())
+                        .is_ok_and(|r| r.repeats())
+                }),
+                background: r.get(8)?,
             })
         })
         .optional()?)
@@ -259,11 +270,29 @@ fn guidance(run: &str, task: Option<&Task>, held: bool, updates: bool) -> String
     }
     // By its id, not a bare `varde done`: that resolves to this task only in
     // a session varde launched, and a session left to guess tried `--run`.
-    if let Some(t) = task {
-        out.push_str(&format!(
+    if task.is_some_and(|t| t.background) {
+        out.push_str(
+            " Nobody is watching: its schedule started this session in the background, and the user \
+             reads it later. Do the work without asking anything; a tool that needs approval is \
+             refused, so say what you could not do. End with what the user should know or do.",
+        );
+    }
+    match task {
+        // Each run of a repeating task is one occurrence: closing the task
+        // ends them all.
+        Some(Task { id, repeats: Some(rule), .. }) => out.push_str(&format!(
+            " This task repeats ({}): varde starts it again, each time in a fresh session that has \
+             only its cairn, so note how far you got and what the next run must not redo. When this \
+             run's work is done, say so and stop. Close it (varde done {}) only when the user asks to \
+             end the series.",
+            clip(rule, TITLE_CHARS),
+            task::short(id)
+        )),
+        Some(t) => out.push_str(&format!(
             " When the user asks you to finish this task, close it: varde done {}.",
             task::short(&t.id)
-        ));
+        )),
+        None => {}
     }
     out
 }

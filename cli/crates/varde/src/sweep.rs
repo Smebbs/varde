@@ -38,6 +38,7 @@ pub fn due(board: &Board, now: i64) -> bool {
 /// Start a detached `varde git-refresh` if the board is due one and none
 /// is running.
 pub fn kick(paths: &Paths, board: &Board, now: i64) -> Result<()> {
+    crate::schedule::kick(board, now, paths)?;
     if !due(board, now) || lock(paths, false)?.is_none() {
         return Ok(());
     }

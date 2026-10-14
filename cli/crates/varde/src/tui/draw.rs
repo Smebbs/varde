@@ -291,6 +291,22 @@ impl App<'_> {
                 line.extend(tail);
                 one(Line::from(line))
             }
+            Mode::WhenTree(d, dir) => {
+                let title =
+                    if d.title.text().trim().is_empty() { "the new task" } else { d.title.text().trim() };
+                let keys = "  Y/n · Esc back";
+                let question = crate::start::worktree_question(
+                    title,
+                    Some(std::path::Path::new(&super::home_in(dir))),
+                    width.saturating_sub(keys.width()),
+                );
+                ask(format!("{question}{keys}"))
+            }
+            Mode::TakeOver(_, asked) => {
+                let row = self.row_of(&asked.task);
+                let title = row.map_or_else(|| task::short(&asked.task), |r| r.title.clone());
+                ask(format!("\"{title}\" is working in the background. Take it over? It stops, and carries on here  y/N"))
+            }
             Mode::Worktree(_, asked, project) => {
                 let row = self.row_of(&asked.task);
                 let project = project.clone().or_else(|| row.and_then(|r| r.project.clone()).map(Into::into));

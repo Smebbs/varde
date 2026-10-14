@@ -49,6 +49,7 @@ pub fn run(paths: &Paths, as_json: bool) -> Result<()> {
         checks.push(jobs(&s.conn)?);
         checks.push(stale(&s.conn)?);
         checks.push(worktrees(&s.conn)?);
+        checks.push(schedules(paths, &s.conn)?);
     }
 
     if as_json {
@@ -349,6 +350,52 @@ fn worktrees(conn: &rusqlite::Connection) -> Result<Value> {
             ),
             "varde start <task> restores a worktree from its branch; varde drop <task> lets it go",
         ),
+    })
+}
+
+/// With a task scheduled, something must run `varde tick`: the heartbeat,
+/// installed and running.
+fn schedules(paths: &Paths, conn: &rusqlite::Connection) -> Result<Value> {
+    let n: i64 = conn.query_row(
+        "SELECT count(*) FROM schedule s JOIN task t ON t.id = s.task WHERE t.state = 'open'",
+        [],
+        |r| r.get(0),
+    )?;
+    let failed: Vec<String> = conn
+        .prepare("SELECT task, error FROM schedule WHERE error IS NOT NULL")?
+        .query_map([], |r| {
+            Ok(format!("{}: {}", varde_core::task::short(&r.get::<_, String>(0)?), r.get::<_, String>(1)?))
+        })?
+        .filter_map(|r| r.ok())
+        .collect();
+    let ticked = crate::schedule::since_tick(paths);
+    Ok(if n == 0 {
+        ok("schedule", "no task is scheduled".into())
+    } else if crate::schedule::heartbeat().is_none() {
+        fail(
+            "schedule",
+            format!(
+                "{n} task(s) scheduled, but nothing runs varde tick: they start only while a board is open"
+            ),
+            "varde schedule --install",
+        )
+    } else if ticked.is_none_or(|d| d > Duration::from_secs(300)) {
+        fail(
+            "schedule",
+            "the heartbeat is installed but varde tick has not run in the last 5 minutes".into(),
+            "systemctl --user status varde-tick.timer, or on macOS launchctl print gui/$(id -u)/varde.tick",
+        )
+    } else if !failed.is_empty() {
+        fail(
+            "schedule",
+            format!("failed to start: {}", failed.join("; ")),
+            "fix what it says; it is tried again every 10 minutes",
+        )
+    } else {
+        ok(
+            "schedule",
+            format!("{n} task(s) scheduled; varde tick ran {}s ago", ticked.map_or(0, |d| d.as_secs())),
+        )
     })
 }
 

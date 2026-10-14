@@ -616,6 +616,21 @@ fn non_idle_kinds() -> String {
 
 /// Someone looked at `task`'s sessions: what they finished is read.
 /// Returns how many runs that changed.
+/// Whether `run` is one a schedule started in the background that has
+/// ended with nobody looking since: what it did is yours to read, as a
+/// turn that ended is.
+pub fn ended_unseen(conn: &Connection, run: &str) -> Result<bool> {
+    Ok(conn
+        .prepare_cached(
+            "SELECT background AND coalesce((SELECT max(ts) FROM event WHERE run = r.id AND kind = 'ended'), 0)
+                 > coalesce((SELECT max(ts) FROM event WHERE run = r.id AND kind = 'seen'), 0)
+             FROM run r WHERE id = ?1",
+        )?
+        .query_row([run], |r| r.get(0))
+        .optional()?
+        .unwrap_or(false))
+}
+
 pub fn mark_seen(conn: &Connection, task: &str, now: i64) -> Result<usize> {
     let runs: Vec<String> = conn
         .prepare_cached("SELECT id FROM run WHERE task = ?1")?
@@ -623,7 +638,7 @@ pub fn mark_seen(conn: &Connection, task: &str, now: i64) -> Result<usize> {
         .collect::<Result<_, _>>()?;
     let mut n = 0;
     for run in runs {
-        if view(conn, &run)?.unread {
+        if view(conn, &run)?.unread || ended_unseen(conn, &run)? {
             conn.execute(
                 "INSERT INTO event (run, kind, ts, raw) VALUES (?1, 'seen', ?2, '{\"source\":\"varde seen\"}')",
                 params![run, now],

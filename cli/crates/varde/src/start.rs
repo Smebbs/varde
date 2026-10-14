@@ -15,6 +15,7 @@ use varde_core::{memory, project, task};
 use crate::{config, git, now_ms, process, run, tmux, Paths};
 use unicode_width::UnicodeWidthStr;
 
+#[derive(Clone)]
 pub struct Options {
     pub want: Want,
     /// `Some(true)` for a worktree, `Some(false)` for none, `None` to ask.
@@ -25,6 +26,9 @@ pub struct Options {
     pub agent: Option<String>,
     /// The project a first run is in, where the task's own is unsure.
     pub project: Option<PathBuf>,
+    /// Stop a session its schedule started in the background, and carry
+    /// it on here: the answer to [`Ask::TakeOver`].
+    pub take_over: bool,
 }
 
 /// The agent a fresh run uses when none is asked for.
@@ -90,10 +94,13 @@ pub enum Ask {
     Project { choices: Vec<String> },
     /// `--worktree`: whether a first run in a repository gets one.
     Worktree,
+    /// `--take-over`: the task's session is working in the background,
+    /// started by its schedule, where nobody can go to it.
+    TakeOver { run: String },
 }
 
 impl Ask {
-    fn message(&self) -> String {
+    pub fn message(&self) -> String {
         match self {
             Ask::Project { choices } if !choices.is_empty() => {
                 format!(
@@ -104,6 +111,10 @@ impl Ask {
             Ask::Project { .. } => "this task's project is unsure: pass --project <dir>".into(),
             Ask::Worktree => {
                 "this task has no worktree yet: pass --worktree always or --worktree never".into()
+            }
+            Ask::TakeOver { .. } => {
+                "this task is working in the background: pass --take-over to stop it and carry it on here"
+                    .into()
             }
         }
     }
@@ -129,6 +140,7 @@ pub fn start(paths: &Paths, reference: &str, opts: Options, as_json: bool) -> Re
                     json!({"v": 1, "action": "ask", "ask": "project", "choices": choices})
                 }
                 Ask::Worktree => json!({"v": 1, "action": "ask", "ask": "worktree"}),
+                Ask::TakeOver { run } => json!({"v": 1, "action": "ask", "ask": "takeover", "run": run}),
             };
             println!("{out}");
         }
@@ -153,7 +165,17 @@ pub fn attach(paths: &Paths, reference: &str, opts: Options) -> Result<i32> {
     let mut store = paths.open(Duration::from_secs(2))?;
     let id = task::resolve(&store, reference)?;
     let interactive = unsafe { libc::isatty(0) } == 1;
-    match prepare(&mut store, &id, opts, interactive)? {
+    let mut outcome = prepare(&mut store, &id, opts.clone(), interactive)?;
+    if let Outcome::Ask(Ask::TakeOver { .. }) = outcome {
+        let q = format!(
+            "{} is working in the background. Take it over? It stops, and carries on here.",
+            task::short(&id)
+        );
+        if interactive && ask(&q)? {
+            outcome = prepare(&mut store, &id, Options { take_over: true, ..opts }, interactive)?;
+        }
+    }
+    match outcome {
         Outcome::Focus { run, fork } => {
             let (pane, place) = whereabouts(&id, tty_of(&store, &run)?.as_deref());
             // Inside tmux, go there, as the board does.
@@ -213,6 +235,8 @@ const UNLAUNCHED_MS: i64 = 60_000;
 const SETUP_MS: i64 = 10 * 60_000;
 
 pub fn prepare(store: &mut Store, task_id: &str, opts: Options, interactive: bool) -> Result<Outcome> {
+    // Planned again once a background session it takes over has stopped.
+    let again = Options { take_over: false, ..opts.clone() };
     let (title, body, project, origin): (String, Option<String>, Option<String>, Option<String>) = store
         .conn
         .query_row("SELECT title, body, project, origin FROM task WHERE id = ?1", [task_id], |r| {
@@ -334,6 +358,19 @@ pub fn prepare(store: &mut Store, task_id: &str, opts: Options, interactive: boo
     let wt = worktree_facts(store, task_id)?;
     let Plan { session, tree } = plan::plan(&runs, wt.as_ref().map(|w| &w.0), opts.want, worktree);
 
+    // A session its schedule started in the background has no terminal to
+    // go to: it is taken over, stopped and carried on here, or asked about.
+    if let Session::Focus { run } = &session {
+        let background: bool =
+            store.conn.query_row("SELECT background FROM run WHERE id = ?1", [run], |r| r.get(0))?;
+        if background && !opts.take_over {
+            return Ok(Outcome::Ask(Ask::TakeOver { run: run.clone() }));
+        }
+        if background {
+            crate::done::stop_run(store, run)?;
+            return prepare(store, task_id, again, interactive);
+        }
+    }
     if let Session::Focus { run } = session {
         // Starting a task picks it up, even when that is only going to
         // the session it kept. The caller marks it seen once it gets there.

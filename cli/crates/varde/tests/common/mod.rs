@@ -16,7 +16,8 @@ use serde_json::Value;
 /// (`-p`), it answers as the model would.
 pub const AGENT: &str = r#"#!/bin/sh
 # Headless: answer as the model would, keeping the prompt for inspection.
-if [ "$1" = "-p" ]; then
+# A session its schedule started in the background is a session.
+if [ "$1" = "-p" ] && [ -z "$VARDE_BACKGROUND" ]; then
   # Naming a task: kept apart from the cairn updates. It answers
   # $FAKE_TITLE, and without one it fails.
   case "$*" in *"You name tasks"*)

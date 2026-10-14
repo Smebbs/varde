@@ -82,6 +82,24 @@ pub struct Row {
     /// When its git work was last checked, unix ms.
     #[serde(skip)]
     pub git_checked: Option<i64>,
+    /// When varde starts it next, if it is scheduled.
+    pub schedule: Option<Schedule>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct Schedule {
+    /// As typed: `every weekday 09:00`, `at mon 09:00`, an org timestamp.
+    pub rule: String,
+    /// Unix ms of when it is next due.
+    pub due: i64,
+    /// `◷ Mon 09:00` once, `↻ Mon 09:00` again and again; with `late`
+    /// when it should have started by now.
+    pub label: String,
+    pub repeats: bool,
+    /// It is past due and has not started: no heartbeat ran it, or it
+    /// failed to (`error`).
+    pub late: bool,
+    pub error: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -108,10 +126,12 @@ pub struct RunRef {
     pub cwd: Option<String>,
 }
 
-const GROUPS: [(&str, &str); 7] = [
+const GROUPS: [(&str, &str); 8] = [
     ("needs_you", "Needs you"),
     ("working", "Working"),
     ("open", "Open"),
+    // Open tasks with a schedule, until it starts them: soonest first.
+    ("scheduled", "Scheduled"),
     ("inbox", "Inbox"),
     ("done", "Done"),
     ("parked", "Parked"),
@@ -139,9 +159,11 @@ pub fn build(
                 EXISTS (SELECT 1 FROM worktree w WHERE w.task = t.id AND w.state = 'active'),
                 g.stage, g.label, g.checks, g.checked, o.id, o.title,
                 coalesce(t.changed, t.created), r.tty, r.tty_ctime,
-                CASE WHEN ?1 THEN (SELECT nullif(status, '') FROM cairn WHERE task = t.id) END
+                CASE WHEN ?1 THEN (SELECT nullif(status, '') FROM cairn WHERE task = t.id) END,
+                s.rule, s.next_due, s.error, coalesce(r.background, 0)
          FROM task t
          LEFT JOIN task o ON o.id = t.origin
+         LEFT JOIN schedule s ON s.task = t.id
          LEFT JOIN git_state g ON g.task = t.id
          LEFT JOIN run r ON r.id = (SELECT id FROM run WHERE task = t.id
                                     ORDER BY started DESC, rowid DESC LIMIT 1)
@@ -186,6 +208,16 @@ pub fn build(
         let mut status = store::effective_status(view.status, r.get(11)?, r.get(12)?, tty, alive);
         let mut counts = (view.agents, view.shells);
         let mut unread = view.unread;
+        // A run its schedule started in the background, ended and not
+        // looked at: your turn, as a turn that ended in a terminal is.
+        let background: bool = r.get(28)?;
+        if background
+            && status == Some(Status::Exited)
+            && store::ended_unseen(&store.conn, run_id.as_deref().unwrap_or(""))?
+        {
+            status = Some(Status::Waiting);
+            unread = true;
+        }
         let mut run = match run_id {
             Some(id) => Some(RunRef { id, native_id: r.get(8)?, cwd: r.get(9)? }),
             None => None,
@@ -200,19 +232,32 @@ pub fn build(
         }
         let busy = at_work(status, counts) || busy_older.contains(&task);
         let worktree: bool = r.get(14)?;
+        let schedule = match r.get::<_, Option<String>>(25)? {
+            Some(rule) if state == "open" => Some(schedule_of(rule, r.get(26)?, r.get(27)?, now)),
+            _ => None,
+        };
         let (group, label) = if state == "done" {
-            (4, "done")
+            (5, "done")
         } else if state == "parked" {
-            (5, "parked")
+            (6, "parked")
         } else if state == "dropped" {
-            (6, "dropped")
+            (7, "dropped")
         } else {
             match status {
                 Some(s) if s.needs_you() => (0, s.name()),
                 Some(s @ (Status::Working | Status::Delegated)) => (1, s.name()),
                 other => {
                     let label = if other == Some(Status::Exited) { "exited" } else { "open" };
-                    (if inbox { 3 } else { 2 }, label)
+                    (
+                        if schedule.is_some() {
+                            3
+                        } else if inbox {
+                            4
+                        } else {
+                            2
+                        },
+                        label,
+                    )
                 }
             }
         };
@@ -250,6 +295,7 @@ pub fn build(
             tracked,
             worktree,
             git_checked: r.get(18)?,
+            schedule,
         });
     }
     if !all {
@@ -257,12 +303,29 @@ pub fn build(
     }
     for g in &mut groups {
         // Unread first, then newest first, with the task id breaking ties
-        // so order is stable.
+        // so order is stable; what is scheduled, by when.
+        if g.key == "scheduled" {
+            g.rows.sort_by_key(|r| (r.schedule.as_ref().map_or(0, |s| s.due), r.task.clone()));
+            continue;
+        }
         g.rows.sort_by(|a, b| {
             b.unread.cmp(&a.unread).then(b.last.cmp(&a.last)).then_with(|| a.task.cmp(&b.task))
         });
     }
     Ok(Board { v: 2, groups })
+}
+
+/// Past due by this much, a schedule should have started: the heartbeat
+/// runs every minute.
+const LATE_MS: i64 = 5 * 60 * 1000;
+
+fn schedule_of(rule: String, due: i64, error: Option<String>, now: i64) -> Schedule {
+    use crate::schedule;
+    let repeats = schedule::parse(&rule, schedule::from_ms(now)).is_ok_and(|r| r.repeats());
+    let late = error.is_some() || due < now - LATE_MS;
+    let when = schedule::when(schedule::from_ms(due), schedule::from_ms(now));
+    let label = format!("{} {when}{}", if repeats { "↻" } else { "◷" }, if late { " late" } else { "" });
+    Schedule { rule, due, label, repeats, late, error }
 }
 
 /// What a board kept to one project leaves out.
@@ -391,7 +454,7 @@ mod tests {
         let b = build(&s, 0, 0, false, &|_, _| true).unwrap();
         assert_eq!(
             b.groups.iter().map(|g| g.key).collect::<Vec<_>>(),
-            ["needs_you", "working", "open", "inbox", "done", "parked"]
+            ["needs_you", "working", "open", "scheduled", "inbox", "done", "parked"]
         );
         assert!(b.groups.iter().all(|g| g.collapsed == (g.key == "parked")));
     }
@@ -413,10 +476,10 @@ mod tests {
         s.conn.execute("UPDATE task SET state = 'dropped' WHERE id = ?1", [id("thrown away")]).unwrap();
         let b = build(&s, 20, 0, false, &|_, _| true).unwrap();
         assert!(b.groups.iter().flat_map(|g| &g.rows).all(|r| r.title != "thrown away"));
-        assert_eq!(b.groups.len(), 6);
+        assert_eq!(b.groups.len(), 7);
         let b = build(&s, 20, 0, true, &|_, _| true).unwrap();
-        assert_eq!(keys(&b)[6], ("dropped", vec!["thrown away"]));
-        assert!(b.groups[6].collapsed);
+        assert_eq!(keys(&b)[7], ("dropped", vec!["thrown away"]));
+        assert!(b.groups[7].collapsed);
         let (state, status, changed) = row(&b, "thrown away");
         assert_eq!((state.as_str(), status.as_str()), ("dropped", "dropped"));
         // The real clock: the change happened just now.
@@ -445,6 +508,7 @@ mod tests {
                 ("needs_you", vec!["beta"]),
                 ("working", vec!["alpha"]),
                 ("open", vec![]),
+                ("scheduled", vec![]),
                 ("inbox", vec!["gamma"]),
                 ("done", vec![]),
                 ("parked", vec![]),
@@ -661,7 +725,7 @@ mod tests {
         s.conn.execute("UPDATE task SET state='done', closed=4 WHERE title='finished'", []).unwrap();
         let now = 2 + 365 * 24 * 3600 * 1000;
         let b = build(&s, now, now - 1000, false, &|_, _| true).unwrap();
-        assert_eq!(keys(&b)[3], ("inbox", vec!["old"]));
+        assert_eq!(keys(&b)[4], ("inbox", vec!["old"]));
         assert_eq!(b.groups.iter().map(|g| g.rows.len()).sum::<usize>(), 1);
         let b = build(&s, now, now - 1000, true, &|_, _| true).unwrap();
         assert_eq!(b.groups.iter().map(|g| g.rows.len()).sum::<usize>(), 2);
@@ -687,7 +751,7 @@ mod tests {
         let origin: String = s.conn.query_row("SELECT id FROM task", [], |r| r.get(0)).unwrap();
         crate::task::defer(&s, "later bit", None, &run, None, 2).unwrap();
         let b = build(&s, 3, 0, false, &|_, _| true).unwrap();
-        let row = &b.groups[3].rows.iter().find(|r| r.title == "later bit").unwrap();
+        let row = &b.groups[4].rows.iter().find(|r| r.title == "later bit").unwrap();
         let o = row.origin.as_ref().unwrap();
         assert_eq!((o.task.as_str(), o.title.as_str()), (origin.as_str(), "big job"));
         assert!(row.run.is_none());

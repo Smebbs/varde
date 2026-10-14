@@ -23,6 +23,7 @@ mod naming;
 mod pending;
 mod process;
 mod run;
+mod schedule;
 mod stale;
 mod start;
 mod sweep;
@@ -83,10 +84,53 @@ enum Cmd {
         /// and names that task as its origin.
         #[arg(long, value_name = "RUN", conflicts_with = "external", hide = true)]
         from: Option<String>,
+        /// Start it at a time, or again and again: `at mon 09:00`, `every
+        /// weekday 09:00`, `every 4h`, or an org timestamp. See `varde schedule`.
+        #[arg(long, value_name = "RULE", conflicts_with = "from")]
+        when: Option<String>,
+        /// With --when: whether its first start gets a worktree.
+        #[arg(long, value_enum, requires = "when")]
+        worktree: Option<WorktreeArg>,
         /// Print the new task's id and short id as JSON.
         #[arg(long)]
         json: bool,
     },
+    /// Start a task at a time, or again and again.
+    ///
+    /// varde starts it as you would, a fresh session each time, in a tmux
+    /// window of its own; you go to it as to any session. A repeating task
+    /// starts from what its cairn says the last one learned. RULE is `at
+    /// [DAY|DATE] [HH:MM]`, `every day|weekday|weekend|mon,thu [HH:MM]`,
+    /// `every 30m|4h|2d|1w`, or an org timestamp such as `<2026-10-19 Mon
+    /// 09:00 ++1w>`. A start missed while the machine was off or asleep
+    /// happens as soon as it is on. Run `varde schedule --install` once,
+    /// so something wakes varde every minute.
+    #[command(display_order = 9)]
+    Schedule {
+        /// The task: the six characters the board shows, or their first four.
+        #[arg(required_unless_present_any = ["install", "uninstall"])]
+        task: Option<String>,
+        /// When it starts; left out, its schedule is shown.
+        #[arg(conflicts_with = "off")]
+        rule: Vec<String>,
+        /// Remove its schedule.
+        #[arg(long)]
+        off: bool,
+        /// Whether its first start gets a worktree: nobody is there to ask.
+        #[arg(long, value_enum)]
+        worktree: Option<WorktreeArg>,
+        /// Install the heartbeat that runs `varde tick` every minute: a
+        /// systemd user timer, or a LaunchAgent on macOS.
+        #[arg(long, conflicts_with_all = ["task", "uninstall"])]
+        install: bool,
+        /// Remove the heartbeat.
+        #[arg(long, conflicts_with = "task")]
+        uninstall: bool,
+    },
+    /// Start the scheduled tasks that are due (run every minute by the
+    /// heartbeat, and by a board).
+    #[command(hide = true)]
+    Tick,
     /// Change a task's title, context or project.
     #[command(display_order = 10)]
     Set {
@@ -365,6 +409,10 @@ struct StartArgs {
     /// The project of a first run, for a task deferred or without one.
     #[arg(long)]
     project: Option<PathBuf>,
+    /// Stop the task's session working in the background, started by its
+    /// schedule, and carry it on here.
+    #[arg(long)]
+    take_over: bool,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -391,6 +439,7 @@ impl StartArgs {
             context,
             agent: self.agent,
             project: self.project,
+            take_over: self.take_over,
         })
     }
 }
@@ -610,9 +659,18 @@ fn dispatch(paths: &Paths, cmd: Option<Cmd>, popup: bool) -> Result<i32> {
         Cmd::Doctor { json } => doctor::run(paths, json),
         Cmd::Agent { json } => start::agent(json),
         Cmd::Eval { all, since, json } => eval::run(paths, all, since.as_deref(), json),
-        Cmd::New { title, project, body, external, from, json } => {
-            tasks::new(paths, &title, project, body, external, from, json)
+        Cmd::New { title, project, body, external, from, when, worktree, json } => {
+            let when = when.map(|w| (w, worktree.map(|w| matches!(w, WorktreeArg::Always))));
+            tasks::new(paths, &title, project, body, external, from, when, json)
         }
+        Cmd::Schedule { install: true, .. } => schedule::install(paths, true),
+        Cmd::Schedule { uninstall: true, .. } => schedule::install(paths, false),
+        Cmd::Schedule { task, rule, off, worktree, .. } => {
+            let rule = (!rule.is_empty()).then(|| rule.join(" "));
+            let worktree = worktree.map(|w| matches!(w, WorktreeArg::Always));
+            schedule::set(paths, &task.unwrap_or_default(), rule, off, worktree)
+        }
+        Cmd::Tick => schedule::tick(paths),
         Cmd::Accept { tasks } => tasks::accept(paths, &tasks),
         Cmd::Link { task, external } => tasks::link(paths, &task, &external),
         Cmd::Unlink { task } => tasks::unlink(paths, &task),

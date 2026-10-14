@@ -71,6 +71,7 @@ opens the new-task form, filled in from it:
 ```
 Title:   Fix the SSO redirect
 Project: ~/src/app
+When:
 ── context ──────────────────────────────
 It loops after the session expires.
 
@@ -82,6 +83,9 @@ From: [[file:~/notes/auth.org::*Fix the SSO redirect][auth.org › Auth › Fix 
 comes from a `VARDE_PROJECT` property, own or inherited, else the
 repository the file is in. On a heading that already links an open
 task, it offers to go to that instead.
+A heading's `SCHEDULED:` goes into `When:`, so varde starts the task
+then; clear it to start the task yourself. It is copied once: `e` on
+the board changes the schedule later, not the org timestamp.
 
 **Marking a heading DONE** offers to close the open tasks its text
 links (`org-varde-close-with-heading`: `ask`, `always` or `never`).
@@ -118,7 +122,7 @@ board does. `?` lists every key.
 | `s` | Start it in the background and stay on the board. |
 | `TAB` / `S-TAB` | The next / previous task that needs you. |
 | `v` | View the task and its cairn. |
-| `n` / `e` | New task / edit its title and context, in a form: `Title:` and `Project:` above the line, the context below. An empty Title has a model name the task. `C-c C-c` saves, `C-c C-k` puts it away. |
+| `n` / `e` | New task / edit its title and context, in a form: `Title:`, `Project:` and `When:` (when varde starts it: `at mon 09:00`, `every weekday 09:00`; empty, never) above the line, the context below. An empty Title has a model name the task. `C-c C-c` saves, `C-c C-k` puts it away. |
 | `d` / `P` / `x` | Done / park / drop. `u` reopens. |
 | `a` | Accept an Inbox task. |
 | `m` | Move it to another project. |
@@ -193,3 +197,8 @@ Closing a task closes its terminal and its workspace.
 A `claude` session you start outside Emacs, or with `N`, becomes an
 Inbox task once you ask it something. It stays in the Inbox until you
 accept it (`a`), start it, or close it.
+
+**Scheduled tasks** sit in the Scheduled group, showing when they start
+(`↻ Mon 09:00`). varde runs them in the background; once done, one
+waits in Needs you and `RET` carries it on in its terminal, as any task.
+`RET` while it still works asks whether to take it over.

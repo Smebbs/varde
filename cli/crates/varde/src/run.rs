@@ -24,7 +24,8 @@ pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
     let run_id = &crate::memory_cmd::resolve_run(&store.conn, run_id)
         .map_err(|e| anyhow!("{e}; runs come from `varde start`"))?;
     let row = store.conn.query_row(
-        "SELECT r.agent, r.native_id, r.relation, r.cwd, r.prompt, r.pid, r.launch, t.title, p.native_id, r.task
+        "SELECT r.agent, r.native_id, r.relation, r.cwd, r.prompt, r.pid, r.launch, t.title, p.native_id, r.task,
+                r.background
          FROM run r JOIN task t ON t.id = r.task LEFT JOIN run p ON p.id = r.parent_run
          WHERE r.id = ?1",
         [run_id],
@@ -40,10 +41,11 @@ pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
                 r.get::<_, String>(7)?,
                 r.get::<_, Option<String>>(8)?,
                 r.get::<_, String>(9)?,
+                r.get::<_, bool>(10)?,
             ))
         },
     );
-    let (agent, native, relation, cwd, prompt, pid, launch, title, parent_native, task) =
+    let (agent, native, relation, cwd, prompt, pid, launch, title, parent_native, task, background) =
         row.with_context(|| format!("no run {run_id}; runs come from `varde start`"))?;
     // Said for the task, not the run: the user typed `varde attach`, and a
     // second one racing the first lands here.
@@ -65,7 +67,11 @@ pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
         _ => Launch::New { id: preset, name: &title, prompt: prompt.as_deref() },
     };
     let (argv, env) = adapter.launch(how);
+    // Started by a schedule, with nobody at it: to the end of its reply,
+    // its output kept in a log beside the store.
+    let argv = if background { adapter.background(argv) } else { argv };
     let argv = crate::config::get().launch(&agent, argv);
+    let log = if background { Some(background_log(paths, run_id)?) } else { None };
     crate::job::sync_memory(paths);
 
     // Claim the run before anything starts, so two `varde run`s of it
@@ -83,7 +89,8 @@ pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
     // Inside tmux the board can go to this pane while the session runs. A
     // window the board opened is the task's already; a pane of your own
     // is tagged only until the agent exits, so nothing ever closes it.
-    let here = tmux::this_pane();
+    // A background run has no pane of its own.
+    let here = if background { None } else { tmux::this_pane() };
     let pane = here.as_ref().map(|(p, _)| p.clone());
     let lent = here.filter(|(_, was)| *was != task);
     if let Some((pane, _)) = &lent {
@@ -97,7 +104,10 @@ pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
         eprintln!("varde: setting up the worktree: {setup}");
         let mut sh = Command::new("sh");
         sh.args(["-c", &setup]).current_dir(root);
-        foreground(&mut sh);
+        match &log {
+            Some(log) => to_log(&mut sh, log)?,
+            None => foreground(&mut sh),
+        }
         // ^C stops the setup, not us: the run is claimed and must launch.
         match ignoring_terminal_signals(|| sh.status()) {
             Ok(s) if s.success() => {}
@@ -111,7 +121,11 @@ pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
     if let Some(dir) = &cwd {
         cmd.current_dir(dir);
     }
-    foreground(&mut cmd);
+    match &log {
+        // Its hooks track it, though its CLI says it is scripted.
+        Some(log) => to_log(cmd.env(BACKGROUND, "1"), log)?,
+        None => foreground(&mut cmd),
+    }
     let mut child = match cmd.spawn() {
         Ok(c) => c,
         Err(e) => {
@@ -165,6 +179,25 @@ pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
         crate::pending::append_exit(paths, run_id, code, now)?;
     }
     Ok(code)
+}
+
+/// Set for a session a schedule started in the background: its hooks
+/// track it, though its agent's print mode says it is run by a script.
+pub const BACKGROUND: &str = "VARDE_BACKGROUND";
+
+/// Where a background run's output goes: what the agent printed, and any
+/// failure to start.
+pub fn background_log(paths: &Paths, run: &str) -> Result<PathBuf> {
+    let dir = paths.home.join("background");
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir.join(format!("{run}.log")))
+}
+
+/// `cmd` with no terminal: nothing to read, its output appended to `log`.
+fn to_log(cmd: &mut Command, log: &Path) -> Result<()> {
+    let out = std::fs::OpenOptions::new().create(true).append(true).open(log)?;
+    cmd.stdin(std::process::Stdio::null()).stdout(out.try_clone()?).stderr(out);
+    Ok(())
 }
 
 /// The child gets the terminal's signals whatever we ignore: the TUI

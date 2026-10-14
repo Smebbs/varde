@@ -329,6 +329,9 @@ pub struct RunDetail {
     /// lines.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub held_out: bool,
+    /// Started by its schedule in the background, with no terminal.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub background: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -370,7 +373,7 @@ pub fn detail(store: &Store, id: &str, alive: &dyn Fn(i64, i64) -> bool) -> Resu
     )?;
     let mut stmt = store.conn.prepare_cached(
         "SELECT id, native_id, relation, parent_run, launch, cwd, started, exit_code, pid, pid_start,
-                coalesce(holdout, 0), tty, tty_ctime
+                coalesce(holdout, 0), tty, tty_ctime, background
          FROM run WHERE task = ?1 ORDER BY started, rowid",
     )?;
     let runs = stmt.query_map([id], |r| {
@@ -391,6 +394,7 @@ pub fn detail(store: &Store, id: &str, alive: &dyn Fn(i64, i64) -> bool) -> Resu
                 exit_code: r.get(7)?,
                 launched: true,
                 held_out: r.get(10)?,
+                background: r.get(13)?,
             },
         ))
     })?;

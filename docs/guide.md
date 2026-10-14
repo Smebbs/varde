@@ -19,6 +19,7 @@ why varde is built this way.
   | Needs you | a live session whose turn ended (*your turn*) or that asks you something (*needs input*) |
   | Working | a live session at work |
   | Open | tasks with no session running |
+  | Scheduled | tasks varde starts itself at a time, soonest first |
   | Inbox | sessions you started yourself, and work an agent left for later |
   | Done | done today, or not landed yet |
   | Parked | put aside (folded) |
@@ -84,6 +85,8 @@ varde park k3m9qz            # put it aside, worktree kept
 varde drop k3m9qz            # drop it; its work is kept under refs/varde/discarded/
 varde reopen k3m9qz          # back to Open, without starting it
 varde accept k3m9qz          # an Inbox task into Open
+varde schedule k3m9qz every weekday 09:00  # varde starts it then, a fresh session each time (--off stops it)
+varde new Triage mentions --when "every day 06:00" --worktree never  # a task that starts itself
 varde set k3m9qz --project ~/src/api  # move it to another project
 varde show k3m9qz            # where it stands, its cairn, its sessions
 varde edit k3m9qz --add findings The cache key omits the locale.
@@ -121,6 +124,38 @@ task stays under Done.
 becomes an Inbox task after its first prompt, and stays there once it
 ends until you accept, start or close it. `claude -p` and the Agent SDK
 are not tracked.
+
+**Scheduled and repeating tasks.** `varde schedule <task> RULE` makes
+varde start the task itself, in the background: a fresh session with
+no terminal (the agent's print mode), on the board as any other. Once
+it is done it waits in Needs you, and RET (or `varde attach`) carries
+it on in your terminal, as any task. RET while it still works asks
+whether to take it over: it stops there and carries on with you. Nobody
+is there to approve a tool your settings do not allow, so such a tool
+is refused, and the session says what it could not do. RULE is one of:
+
+- `at mon 09:00`, `at 2026-11-02 07:00`, `at tomorrow`: once.
+- `every weekday 09:00`, `every day 06:00`, `every mon,thu`,
+  `every weekend 10:00`: on those days.
+- `every 30m`, `every 4h`, `every 2d`: that long after it last started.
+- An org timestamp: `<2026-10-19 Mon 09:00 ++1w>`.
+
+A time left out is midnight, the first moment the machine is on that
+day: `every day` is "when I open my laptop in the morning". A start
+missed while the machine was off or asleep happens as soon as it is
+on, once, however many were missed. Each run of a repeating task is a
+fresh conversation, given the task's cairn, so tell it what to do in
+its context and let the cairn carry how far it got. The next run waits
+for the last one's cairn update, and stops a session of it left idle
+for 15 minutes; one you are still in is left alone. `done`, `park` and
+`drop` stop the schedule, and `reopen` resumes it. Nobody is there to
+answer when it starts, so a first start that would ask about a
+worktree needs `--worktree always|never` up front.
+
+Once, run `varde schedule --install`: it installs a systemd user timer
+(on macOS a LaunchAgent) that runs `varde tick` every minute. Without
+it, schedules fire only while a board is open, and `varde doctor` says
+so.
 
 ## The board
 

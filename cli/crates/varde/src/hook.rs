@@ -53,8 +53,10 @@ pub fn run(paths: &Paths, agent: &str, event: &str) {
     let mut answer = None;
     // varde's own headless calls, and agents run by a script rather than
     // a person, are not sessions anyone comes back to.
+    // A session a schedule started is in print mode, and is tracked.
+    let background = std::env::var_os(crate::run::BACKGROUND).is_some_and(|x| !x.is_empty());
     let tracked = std::env::var_os(INTERNAL).is_none_or(|x| x.is_empty())
-        && !varde_agent::by_name(agent).is_some_and(|a| a.scripted());
+        && (background || !varde_agent::by_name(agent).is_some_and(|a| a.scripted()));
     if tracked {
         // A panic must not reach the agent as a failed hook.
         panic::set_hook(Box::new(|_| {}));

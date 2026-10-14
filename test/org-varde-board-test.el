@@ -207,7 +207,9 @@
           ;; Its project is the heading's: nothing is asked.
           (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) (error "Asked"))))
             (call-interactively #'org-varde-new-create)))
-        (should (member (concat "new --json --project " proj " --context - -- Fix the login") (org-varde-test-calls)))
+        ;; Its SCHEDULED is taken as its schedule, once, in the form.
+        (should (member (concat "new --json --project " proj " --context - --when <2026-10-12 Mon> -- Fix the login")
+                        (org-varde-test-calls)))
         (should (string-match-p "\\`It fails on CI only\\.\n\nFrom: \\[\\[file:" (org-varde-test-stdin "new")))
         ;; Linked in the heading's text, below org's lines; nothing saved.
         (should (string-match-p "=>  1:00\n\\[\\[varde:new111\\]\\[Fix the login\\]\\]\nIt fails" (buffer-string)))
@@ -433,14 +435,26 @@ searches FROM and TO, and return the text with its link."
         (should (equal (org-varde--form-value 'project) "/tmp/other"))
         (should-not (alist-get 'project org-varde--form-hints))
         (org-varde-new-return)
+        ;; When varde starts it: empty, never; the hint says how.
+        (should (eq (org-varde--form-at) 'when))
+        (should (alist-get 'when org-varde--form-hints))
+        (insert "every weekday 09:00")
+        (org-varde-new-return)
         (should (eq (org-varde--form-at) 'body))
         (insert "Line one")
         (org-varde-new-return)
         (insert "two")
         (should (equal (org-varde--new-text) '("Fix it" . "Line one\ntwo")))
-        (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) (error "Asked"))))
+        ;; Nobody is there to say whether its first start gets a worktree:
+        ;; asked now, and made with the answer.
+        (org-varde-test-fail-once "new" "nobody is there to say whether it gets a worktree when it starts: pass --worktree always or --worktree never")
+        (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) (error "Asked")))
+                  ((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
           (call-interactively #'org-varde-new-create))))
-    (should (member "new --json --project /tmp/other --context - -- Fix it" (org-varde-test-calls)))
+    (should (member "new --json --project /tmp/other --context - --when every weekday 09:00 -- Fix it"
+                    (org-varde-test-calls)))
+    (should (member "new --json --project /tmp/other --context - --when every weekday 09:00 --worktree always -- Fix it"
+                    (org-varde-test-calls)))
     (should (equal (org-varde-test-stdin "new") "Line one\ntwo"))))
 
 (ert-deftest org-varde-new-form-under-evil ()
@@ -828,6 +842,38 @@ where a new task goes unasked."
       (should-not (get-buffer "*varde edit aaa111*"))
       (should (member "set T0000000000000000000AAA111 --title=New title --body -" (org-varde-test-calls)))
       (should (equal (org-varde-test-stdin "set") "New context")))))
+
+(ert-deftest org-varde-board-e-changes-or-clears-the-schedule ()
+  (org-varde-test-with-varde
+    (org-varde-test-reply "show" "{\"v\":2,\"title\":\"Triage\",\"body\":\"\",\"schedule\":{\"rule\":\"every day 06:00\",\"due\":0}}")
+    (org-varde-board-test--with
+        (org-varde-board-test--data '(("scheduled" "Scheduled" ("T0000000000000000000AAA111" "Triage" "open" nil))))
+      (org-varde-board-test--first-row)
+      (save-window-excursion (org-varde-board-edit))
+      (with-current-buffer "*varde edit aaa111*"
+        (should (equal (org-varde--form-value 'when) "every day 06:00"))
+        ;; Saved unchanged, the schedule is left alone.
+        (call-interactively #'org-varde-new-create))
+      (should-not (seq-find (lambda (c) (string-prefix-p "schedule" c)) (org-varde-test-calls)))
+      (dolist (rule '("every weekday 09:00" ""))
+        (save-window-excursion (org-varde-board-edit))
+        (with-current-buffer "*varde edit aaa111*"
+          (let ((b (org-varde--form-bounds 'when))) (delete-region (car b) (cdr b)))
+          (org-varde--form-goto 'when)
+          (insert rule)
+          (call-interactively #'org-varde-new-create)))
+      (should (member "schedule T0000000000000000000AAA111 -- every weekday 09:00" (org-varde-test-calls)))
+      (should (member "schedule T0000000000000000000AAA111 --off" (org-varde-test-calls))))))
+
+(ert-deftest org-varde-board-a-scheduled-row-says-when-it-starts ()
+  (let ((data (org-varde--json "{\"v\":2,\"groups\":[{\"key\":\"scheduled\",\"label\":\"Scheduled\",\"collapsed\":false,\"rows\":[{\"task\":\"T0000000000000000000AAA111\",\"short\":\"aaa111\",\"title\":\"Triage mentions\",\"status\":\"open\",\"state\":\"open\",\"project\":null,\"inbox\":false,\"last\":0,\"schedule\":{\"rule\":\"every weekday 09:00\",\"label\":\"↻ Mon 09:00\",\"late\":false}},{\"task\":\"T0000000000000000000BBB222\",\"short\":\"bbb222\",\"title\":\"Monday\",\"status\":\"open\",\"state\":\"open\",\"project\":null,\"inbox\":false,\"last\":0,\"schedule\":{\"rule\":\"at mon\",\"label\":\"◷ Mon late\",\"late\":true}}]}]}")))
+    (org-varde-board-test--with data
+      (should (string-match-p "^Scheduled  2" (buffer-string)))
+      (should (string-match-p "^ ↻ Triage mentions .*↻ Mon 09:00  aaa111$" (buffer-string)))
+      (should (string-match-p "◷ Mon late  bbb222$" (buffer-string))))
+    ;; A link says the same.
+    (let ((row (car (plist-get (car (plist-get data :groups)) :rows))))
+      (should (equal (substring-no-properties (org-varde--status-mark row t)) "↻ Mon 09:00")))))
 
 (ert-deftest org-varde-board-parked-opens-on-request ()
   (org-varde-board-test--with

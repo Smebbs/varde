@@ -25,6 +25,7 @@ use anyhow::Result;
 use ratatui::crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use ratatui::widgets::ListState;
 use ratatui::DefaultTerminal;
+use rusqlite::OptionalExtension;
 use varde_core::board::{self, Group, Row};
 use varde_core::plan::Want;
 use varde_core::store::Store;
@@ -70,6 +71,11 @@ enum Mode {
     Move(String, Field),
     /// Typing the directory of the project a new task is in.
     Where(Draft, Field),
+    /// Asked whether a new scheduled task's first start, with nobody
+    /// there, gets a worktree; in the project typed.
+    WhenTree(Draft, String),
+    /// Asked whether to take over a session working in the background.
+    TakeOver(Start, Asked),
     /// Asked whether a first run in tmux gets its own worktree, with the
     /// project picked for it.
     Worktree(Start, Asked, Option<PathBuf>),
@@ -96,6 +102,8 @@ enum Close {
 struct Start {
     want: Want,
     go: bool,
+    /// Stop a session working in the background and carry it on.
+    take_over: bool,
 }
 
 /// What a key asks for that takes the screen from the board.
@@ -742,7 +750,7 @@ impl<'a> App<'a> {
                 }
                 Edit::Create if draft.task.is_some() => self.save(draft),
                 Edit::Create => match self.new_task_project() {
-                    Some(dir) => self.create(draft, &dir),
+                    Some(dir) => self.create(draft, &dir, None),
                     None => {
                         let dir =
                             self.current().and_then(|r| r.project.clone()).or_else(|| self.here.clone());
@@ -754,10 +762,15 @@ impl<'a> App<'a> {
                 },
                 Edit::Cancel => self.keep(draft),
             },
+            Mode::WhenTree(draft, dir) => match key.code {
+                KeyCode::Char('y' | 'Y') | KeyCode::Enter => self.create(draft, &dir, Some(true)),
+                KeyCode::Char('n' | 'N') => self.create(draft, &dir, Some(false)),
+                _ => self.mode = Mode::New(draft),
+            },
             Mode::Where(draft, mut dir) => match key.code {
                 KeyCode::Enter => {
                     let typed = dir.text().to_string();
-                    self.create(draft, &typed);
+                    self.create(draft, &typed, None);
                 }
                 KeyCode::Esc => self.mode = Mode::New(draft),
                 KeyCode::Char('g') if ctrl => self.mode = Mode::New(draft),
@@ -812,6 +825,12 @@ impl<'a> App<'a> {
                     dir.key(key, Words::Path);
                     self.mode = Mode::Project(start, asked, choices, i, dir);
                 }
+            },
+            Mode::TakeOver(start, asked) => match key.code {
+                KeyCode::Char('y' | 'Y') => {
+                    return self.answer(asked, Start { take_over: true, ..start }, None, None)
+                }
+                _ => self.message = "left working in the background".into(),
             },
             Mode::Worktree(start, asked, project) => match key.code {
                 KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
@@ -878,7 +897,7 @@ impl<'a> App<'a> {
                     self.pending_g = true;
                     return None;
                 }
-                let start = |want, go| Some(Start { want, go });
+                let start = |want, go| Some(Start { want, go, take_over: false });
                 let start = match act {
                     // On a folded group, RET opens it.
                     Some(Act::Start) if self.group_at.is_some() => {
@@ -1042,7 +1061,7 @@ impl<'a> App<'a> {
         let state: String = self.paths.open(BUSY).ok().and_then(|s| {
             s.conn.query_row("SELECT state FROM task WHERE id = ?1", [&task], |r| r.get(0)).ok()
         })?;
-        let start = Start { want: Want::Continue, go: true };
+        let start = Start { want: Want::Continue, go: true, take_over: false };
         if matches!(state.as_str(), "done" | "parked" | "dropped") {
             self.mode = Mode::Reopen(start, task);
             return None;
@@ -1282,11 +1301,12 @@ impl<'a> App<'a> {
         }
         let result = (|| -> Result<Draft> {
             let store = self.paths.open(BUSY)?;
-            let (title, body): (String, Option<String>) =
-                store.conn.query_row("SELECT title, body FROM task WHERE id = ?1", [&id], |r| {
-                    Ok((r.get(0)?, r.get(1)?))
-                })?;
-            Ok(Draft::of(&id, &title, &body.unwrap_or_default()))
+            let (title, body, when): (String, Option<String>, Option<String>) = store.conn.query_row(
+                "SELECT title, body, (SELECT rule FROM schedule WHERE task = t.id) FROM task t WHERE id = ?1",
+                [&id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )?;
+            Ok(Draft::of(&id, &title, &body.unwrap_or_default(), &when.unwrap_or_default()))
         })();
         match result {
             Ok(draft) => {
@@ -1404,10 +1424,17 @@ impl<'a> App<'a> {
             || draft.task.as_ref().is_some_and(|id| {
                 self.paths.open(BUSY).ok().is_some_and(|s| {
                     s.conn
-                        .query_row("SELECT title, coalesce(body, '') FROM task WHERE id = ?1", [id], |r| {
-                            Ok(r.get::<_, String>(0)? == draft.title.text()
-                                && r.get::<_, String>(1)? == draft.body.text())
-                        })
+                        .query_row(
+                            "SELECT title, coalesce(body, ''),
+                                    coalesce((SELECT rule FROM schedule WHERE task = t.id), '')
+                             FROM task t WHERE id = ?1",
+                            [id],
+                            |r| {
+                                Ok(r.get::<_, String>(0)? == draft.title.text()
+                                    && r.get::<_, String>(1)? == draft.body.text()
+                                    && r.get::<_, String>(2)? == draft.when.text().trim())
+                            },
+                        )
                         .unwrap_or(false)
                 })
             });
@@ -1435,9 +1462,26 @@ impl<'a> App<'a> {
         let Some(id) = draft.task.clone() else { return };
         let result = (|| {
             let store = self.paths.open(BUSY)?;
+            let when = draft.when.text().trim();
+            let had: Option<String> = store
+                .conn
+                .query_row("SELECT rule FROM schedule WHERE task = ?1", [&id], |r| r.get(0))
+                .optional()?;
+            // Checked first: a refused schedule saves nothing.
+            if !when.is_empty() && had.as_deref() != Some(when) {
+                varde_core::schedule::parse(when, varde_core::schedule::from_ms(now_ms()))
+                    .map_err(anyhow::Error::msg)?;
+            }
             task::set(&store, &id, Some(draft.title.text().trim()), Some(draft.body.text()))?;
             crate::naming::start(&store, &id);
-            Ok(format!("saved {}", task::short(&id)))
+            let mut said = format!("saved {}", task::short(&id));
+            if when.is_empty() && had.is_some() {
+                store.conn.execute("DELETE FROM schedule WHERE task = ?1", [&id])?;
+                said.push_str("; no longer scheduled");
+            } else if !when.is_empty() && had.as_deref() != Some(when) {
+                said = format!("saved; {}", crate::schedule::arm(&store, &id, when, None)?);
+            }
+            Ok(said)
         })();
         if result.is_err() {
             self.mode = Mode::New(draft);
@@ -1453,22 +1497,51 @@ impl<'a> App<'a> {
 
     /// Create the task in the project `dir` is in. A failure leaves the
     /// form open, as it was.
-    fn create(&mut self, draft: Draft, dir: &str) {
+    /// With a schedule whose first start would ask about a worktree, it
+    /// asks now, nobody being there then; `worktree` is the answer.
+    fn create(&mut self, draft: Draft, dir: &str, worktree: Option<bool>) {
+        let when = draft.when.text().trim().to_string();
+        // A rule it cannot read goes back to the form; a project, to its prompt.
+        if let Err(e) = varde_core::schedule::parse(&when, varde_core::schedule::from_ms(now_ms())) {
+            if !when.is_empty() {
+                self.mode = Mode::New(draft);
+                return self.report(Err(anyhow::Error::msg(e)));
+            }
+        }
         let result = (|| {
             let store = self.paths.open(BUSY)?;
-            let project = crate::start::project_of(&store, Path::new(&home_in(dir)))?.display().to_string();
+            let project = crate::start::project_of(&store, Path::new(&home_in(dir)))?;
+            if !when.is_empty()
+                && worktree.is_none()
+                && crate::schedule::check(&project, &when, None).is_err()
+            {
+                return Ok(None);
+            }
+            let project = project.display().to_string();
             let body = Some(draft.body.text().trim()).filter(|b| !b.is_empty());
             let id = task::create(&store, draft.title.text().trim(), body, Some(&project), None, now_ms())?;
+            let scheduled = if when.is_empty() {
+                None
+            } else {
+                Some(crate::schedule::arm(&store, &id, &when, worktree)?)
+            };
             crate::naming::start(&store, &id);
             self.selected = Some(id.clone());
             self.reveal = Some(id.clone());
             let name = crate::list::project_name(Some(&project));
-            Ok(format!("created {} in {name}; RET starts it", task::short(&id)))
+            Ok(Some(match scheduled {
+                Some(said) => format!("created in {name}: {said}"),
+                None => format!("created {} in {name}; RET starts it", task::short(&id)),
+            }))
         })();
-        if result.is_err() {
-            self.mode = Mode::Where(draft, Field::new(dir));
+        match result {
+            Ok(None) => self.mode = Mode::WhenTree(draft, dir.to_string()),
+            Ok(Some(said)) => self.report(Ok(said)),
+            Err(e) => {
+                self.mode = Mode::Where(draft, Field::new(dir));
+                self.report(Err(e));
+            }
         }
-        self.report(result);
     }
 
     /// Search the cairns, in the project the board was started in, as
@@ -1681,7 +1754,7 @@ fn here_project(store: &Store) -> Result<Option<String>> {
 }
 
 /// A directory as typed, with a leading `~` for the home directory.
-fn home_in(dir: &str) -> String {
+pub(super) fn home_in(dir: &str) -> String {
     match dir.trim().strip_prefix('~') {
         Some(rest) if rest.is_empty() || rest.starts_with('/') => {
             format!("{}{rest}", std::env::var("HOME").unwrap_or_default())
@@ -2352,7 +2425,13 @@ mod tests {
         let mut app = board(&paths, &["Where"]);
         let long = format!("/srv/{}/project", "deep/".repeat(30));
         let dir = Field::new(&long);
-        app.mode = Mode::Project(Start { want: Want::Continue, go: true }, asked("T"), vec![long], 0, dir);
+        app.mode = Mode::Project(
+            Start { want: Want::Continue, go: true, take_over: false },
+            asked("T"),
+            vec![long],
+            0,
+            dir,
+        );
         let s = screen(&mut app, 80, 10);
         assert!(s.contains("…") && s.contains("1/1  ↑/↓ other  Tab complete  RET start  Esc cancel"), "{s}");
     }
@@ -2362,7 +2441,7 @@ mod tests {
         let (_dir, paths) = temp_paths();
         let mut app = board(&paths, &["Where"]);
         let choices = vec!["/srv/a".to_string(), "/srv/b".to_string()];
-        let start = Start { want: Want::Continue, go: true };
+        let start = Start { want: Want::Continue, go: true, take_over: false };
         app.mode = Mode::Project(start, asked("T"), choices, 0, Field::new("/srv/a"));
         let dir = |app: &App| match &app.mode {
             Mode::Project(.., i, d) => (*i, d.text().to_string()),
@@ -2740,7 +2819,8 @@ mod tests {
         let (other, wanted, gone) = (&ids[0], &ids[1], &ids[2]);
         // Parked elsewhere while the question was up: nothing starts.
         done::shelve(&paths.open(BUSY).unwrap(), gone, false).unwrap();
-        app.mode = Mode::Worktree(Start { want: Want::Continue, go: false }, asked(gone), None);
+        app.mode =
+            Mode::Worktree(Start { want: Want::Continue, go: false, take_over: false }, asked(gone), None);
         key(&mut app, KeyCode::Char('y'));
         assert!(app.message.ends_with("is parked now; not started"), "{}", app.message);
 
@@ -2749,7 +2829,7 @@ mod tests {
         assert_eq!(app.current_id().as_ref(), Some(other));
         let project = dir.path().join("p");
         std::fs::create_dir(&project).unwrap();
-        let start = Start { want: Want::Continue, go: false };
+        let start = Start { want: Want::Continue, go: false, take_over: false };
         // A directory typed, not one of the choices, is the project.
         let elsewhere = vec!["/srv/elsewhere".to_string()];
         app.mode = Mode::Project(start, asked(wanted), elsewhere, 0, Field::new(""));
@@ -2871,7 +2951,7 @@ mod tests {
             }
         }
         app.mode = Mode::Project(
-            Start { want: Want::Continue, go: true },
+            Start { want: Want::Continue, go: true, take_over: false },
             asked("T"),
             vec!["/srv/p".into()],
             0,
@@ -3000,6 +3080,54 @@ mod tests {
         key(&mut app, KeyCode::Char('q'));
         key(&mut app, KeyCode::Char('C'));
         assert!(app.detail && app.project_detail);
+    }
+
+    #[test]
+    fn the_form_schedules_a_task_and_e_changes_or_clears_it() {
+        let (dir, paths) = temp_paths();
+        let mut app = board(&paths, &["One"]);
+        let plain = dir.path().canonicalize().unwrap().join("plain");
+        std::fs::create_dir(&plain).unwrap();
+        let store = paths.open(BUSY).unwrap();
+        store.conn.execute("UPDATE task SET project = ?1", [plain.to_string_lossy()]).unwrap();
+        app.refresh().unwrap();
+        let rule = || -> Option<String> {
+            store.conn.query_row("SELECT rule FROM schedule", [], |r| r.get(0)).optional().unwrap()
+        };
+        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
+
+        key(&mut app, KeyCode::Char('n'));
+        assert!(screen(&mut app, 100, 24).contains("When:  not scheduled: at mon 09:00"));
+        app.paste("Triage mentions");
+        key(&mut app, KeyCode::Down);
+        app.paste("every sometimes");
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Enter);
+        // A rule it cannot read goes back to the form, saying why.
+        assert!(matches!(&app.mode, Mode::New(d) if d.in_when), "{}", app.message);
+        assert!(app.message.contains("`every` takes"), "{}", app.message);
+        app.key(ctrl('u'));
+        app.paste("every day 06:00");
+        key(&mut app, KeyCode::Enter);
+        key(&mut app, KeyCode::Enter);
+        assert!(app.message.contains("repeats (every day 06:00)"), "{}", app.message);
+        assert_eq!(rule().as_deref(), Some("every day 06:00"));
+        assert_eq!(app.current().map(|r| r.title.as_str()), Some("Triage mentions"));
+        assert!(screen(&mut app, 100, 24).contains("Scheduled"));
+
+        key(&mut app, KeyCode::Char('e'));
+        assert!(matches!(&app.mode, Mode::New(d) if d.when.text() == "every day 06:00"));
+        key(&mut app, KeyCode::Down);
+        app.key(ctrl('u'));
+        app.paste("every weekday 09:00");
+        key(&mut app, KeyCode::Enter);
+        assert_eq!(rule().as_deref(), Some("every weekday 09:00"), "{}", app.message);
+        key(&mut app, KeyCode::Char('e'));
+        key(&mut app, KeyCode::Down);
+        app.key(ctrl('u'));
+        key(&mut app, KeyCode::Enter);
+        assert!(app.message.ends_with("no longer scheduled"), "{}", app.message);
+        assert_eq!(rule(), None);
     }
 
     #[test]

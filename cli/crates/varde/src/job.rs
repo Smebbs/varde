@@ -668,9 +668,18 @@ material does not state.\n"
     } else {
         String::new()
     };
+    let repeats = match &input.repeats {
+        Some(rule) if !closing => format!(
+            "\nThis task repeats ({}): each run starts in a fresh session given only this cairn. Keep in \
+the STATUS how far this run got (what it covered, up to when), so the next run carries on from there \
+and does not redo it.\n",
+            hygienic(rule)
+        ),
+        _ => String::new(),
+    };
     let digest = if digest.trim().is_empty() { "(nothing new)" } else { digest };
     format!(
-        "Task: {title}{body}\n{close}\nCurrent cairn:\n{current}Pinned notes:\n{notes}\n\nSession since the last update:\n{digest}",
+        "Task: {title}{body}\n{close}{repeats}\nCurrent cairn:\n{current}Pinned notes:\n{notes}\n\nSession since the last update:\n{digest}",
         title = hygienic(&input.title),
     )
 }
@@ -757,6 +766,7 @@ mod tests {
             cursor: 0,
             cairn: None,
             notes: Vec::new(),
+            repeats: None,
         };
         let m = material(&input, &Cairn::default(), "", &[], true);
         assert!(m.contains("EDIT it to say it was still open when the task closed"), "{m}");

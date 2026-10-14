@@ -6,6 +6,23 @@ follow [Semantic Versioning](https://semver.org).
 
 ## Unreleased
 
+### Added
+
+- Scheduled and repeating tasks. `varde schedule <task> RULE` (or
+  `varde new --when`, or the new `When:` line in both boards' forms)
+  makes varde start the task itself: `at mon 09:00`, `every weekday
+  09:00`, `every 4h`, or an org timestamp. It runs in the background,
+  in the agent's print mode with no terminal, tracked as any session and
+  in Needs you once it is done; RET then carries it on as any task, and
+  RET while it works offers to take it over. A repeating task's sessions
+  each start fresh from its cairn, after the last one's update. `varde schedule --install` adds a systemd user
+  timer (a LaunchAgent on macOS) that runs `varde tick` every minute, so
+  a start missed while the machine slept happens on wake. Scheduled
+  tasks have a group of their own on the board, and `list --json` rows
+  a `schedule`.
+- `org-varde-new-here` copies a heading's `SCHEDULED:` into the form's
+  `When:`.
+
 ### Changed
 
 - org-varde writes a task in a form, as a mail is written in

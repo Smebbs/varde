@@ -13,6 +13,7 @@ use crate::{cairn_view, git, now_ms, Paths};
 
 const BUSY: Duration = Duration::from_secs(2);
 
+#[allow(clippy::too_many_arguments)]
 pub fn new(
     paths: &Paths,
     title: &[String],
@@ -20,6 +21,7 @@ pub fn new(
     body: Option<String>,
     external: Option<String>,
     from: Option<String>,
+    when: Option<(String, Option<bool>)>,
     as_json: bool,
 ) -> Result<()> {
     let store = paths.open(BUSY)?;
@@ -40,6 +42,10 @@ pub fn new(
                 Some(d) => crate::start::project_of(&store, &d)?,
                 None => project::of(&store.conn, &std::env::current_dir().context("current directory")?),
             };
+            // Checked before anything is made, so a bad rule leaves nothing behind.
+            if let Some((rule, worktree)) = &when {
+                crate::schedule::check(&root, rule, *worktree)?;
+            }
             task::create(
                 &store,
                 &title.join(" "),
@@ -50,7 +56,14 @@ pub fn new(
             )?
         }
     };
+    let scheduled = match when {
+        Some((rule, worktree)) => Some(crate::schedule::arm(&store, &id, &rule, worktree)?),
+        None => None,
+    };
     crate::naming::start(&store, &id);
+    if let Some(said) = scheduled.filter(|_| !as_json) {
+        eprintln!("varde: {said}");
+    }
     if as_json {
         println!("{}", json!({"v": 1, "id": id, "short": task::short(&id)}));
     } else if unsafe { libc::isatty(1) } == 1 {
@@ -212,6 +225,7 @@ pub fn show(paths: &Paths, reference: &str, history: bool, with_git: bool, as_js
     let usage = memory::usage(&store.conn, memory::Owner::Task(&id))?;
     let notes: Vec<String> = memory::pending_notes(&store.conn, &id)?.into_iter().map(|(_, t)| t).collect();
     let versions = if history { memory::history(&store.conn, &id)? } else { Vec::new() };
+    let schedule = crate::schedule::of(&store, &id)?;
     // A conversation left by `/clear` or `/resume` has ended while its
     // process goes on: where the session went.
     let moved: Vec<(String, String)> = d
@@ -242,6 +256,7 @@ pub fn show(paths: &Paths, reference: &str, history: bool, with_git: bool, as_js
         v["usage"] = serde_json::to_value(&usage)?;
         v["notes"] = json!(notes);
         v["limits"] = varde_core::cairn::Shape::Task.limits();
+        v["schedule"] = schedule.as_ref().map_or(Value::Null, crate::schedule::Shown::json);
         if with_git {
             v["git"] = facts.as_ref().map_or(Value::Null, git::Facts::to_json);
         }
@@ -257,7 +272,7 @@ pub fn show(paths: &Paths, reference: &str, history: bool, with_git: bool, as_js
         let checks = p.checks.map(|c| format!(", checks {c}")).unwrap_or_default();
         format!("#{} {}{draft}{checks}  {}", p.number, p.state, p.url)
     });
-    let view = View { git, pr, moved, sessions: usize::MAX };
+    let view = View { git, pr, moved, sessions: usize::MAX, schedule: schedule.map(|s| s.text()) };
     let add = format!("varde edit {} --add findings TEXT adds a line now", d.short);
     let block =
         cairn_view::lines(cairn_view::Whose::Task, cairn.as_ref(), &usage, &notes, &add, false, now_ms());
@@ -291,6 +306,8 @@ pub struct View {
     pub pr: Option<String>,
     pub moved: Vec<(String, String)>,
     pub sessions: usize,
+    /// Its schedule, as `varde schedule` says it.
+    pub schedule: Option<String>,
 }
 
 impl View {
@@ -326,6 +343,9 @@ impl View {
         if let Some(p) = &d.prompt_title {
             out.push((Part::Quiet, format!("named by the model; first titled: {p}")));
         }
+        if let Some(s) = &self.schedule {
+            out.push((Part::Fact, format!("scheduled {s}")));
+        }
         if let Some(w) = d.worktree.as_ref().filter(|w| w.state == "active") {
             out.push((Part::Fact, format!("worktree {} on {} from {}", tilde(&w.path), w.branch, w.base)));
         }
@@ -357,6 +377,7 @@ impl View {
                 None => "starting",
             };
             let held = if r.held_out { " · held out of memory" } else { "" };
+            let held = if r.background { format!("{held} · in the background") } else { held.to_string() };
             out.push((
                 Part::Text,
                 format!(

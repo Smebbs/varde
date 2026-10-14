@@ -118,7 +118,14 @@ id.  In Needs you, GROUP says it is your turn: the row does not again."
                                              ((equal (plist-get git :stage) "landed") 'org-varde-board-working)
                                              (t 'org-varde-board-git))))
                       (and project (not kept) (file-name-nondirectory (directory-file-name project)))
-                      (org-varde--age (- now (plist-get row :last)))))))
+                      ;; Waiting for its schedule, it shows when it starts.
+                      (let ((schedule (plist-get row :schedule)))
+                        (if (and schedule (not (member (plist-get row :status)
+                                                       '("working" "delegated" "waiting" "blocked"))))
+                            (propertize (plist-get schedule :label)
+                                        'face (if (plist-get schedule :late) 'org-varde-board-blocked
+                                                'org-varde-board-empty))
+                          (org-varde--age (- now (plist-get row :last)))))))))
     (concat (mapconcat (lambda (p) (if (get-text-property 0 'face p) p (propertize p 'face 'org-varde-board-empty)))
                        parts (propertize " · " 'face 'org-varde-board-empty))
             (propertize (concat "  " (plist-get row :short)) 'face 'org-varde-board-empty))))
@@ -689,9 +696,10 @@ Asked for, offering the project of the task at point."
 (define-derived-mode org-varde-new-mode text-mode "varde new"
   "Write a new task, or change one, in a form, as `message-mode' writes
 a mail: its Title, which varde makes from the context when left empty;
-its Project, which \\[org-varde-new-tab] picks; and below the line, the
-context for the agent.  \\[org-varde-new-return] goes from a field to
-the next.  \\[org-varde-new-create] creates it, and
+its Project, which \\[org-varde-new-tab] picks; When varde starts it,
+if at all (`at mon 09:00', `every weekday 09:00', `every 4h', an
+org timestamp); and below the line, the context for the agent.
+\\[org-varde-new-return] goes from a field to the next.  \\[org-varde-new-create] creates it, and
 \\[org-varde-new-cancel] puts it away, for `n' on the board to bring
 back; cleared first, it is dropped."
   (add-hook 'after-change-functions #'org-varde--form-hints nil t)
@@ -711,6 +719,9 @@ back; cleared first, it is dropped."
 (defvar-local org-varde--new-task nil
   "The task whose title and context this buffer edits, or nil for a new one.")
 
+(defvar-local org-varde--new-when ""
+  "The schedule the task this buffer edits had when the form opened.")
+
 (defvar-local org-varde--new-then nil
   "What to do once the task being written is made, or nil: a function of
 its short id and title that returns what to add to the message.")
@@ -727,9 +738,10 @@ and what is typed after it is the field's.  FIRST: nothing goes before it."
               'front-sticky (and first '(read-only))
               'font-lock-face (if (eq field 'body) 'org-varde-quiet 'org-varde-form-label)))
 
-(defun org-varde--form-fill (title project body)
+(defun org-varde--form-fill (title project body &optional rule)
   "Fill this buffer with the form: its TITLE, its PROJECT unless that is
-:none, and its context BODY.  Point is at the end of the title."
+:none, the RULE of when varde starts it, and its context BODY.  Point is
+at the end of the title."
   (let ((inhibit-read-only t)
         (inhibit-modification-hooks t))
     ;; The mode forgot them, so they are found by their mark.
@@ -740,6 +752,7 @@ and what is typed after it is the field's.  FIRST: nothing goes before it."
     (unless (eq project :none)
       (insert (org-varde--form-label 'project "\nProject: ")
               (if project (abbreviate-file-name (directory-file-name project)) "")))
+    (insert (org-varde--form-label 'when "\nWhen:    ") (or rule ""))
     ;; The line's newline is not its own, so evil's dd can take the
     ;; context's last line; `org-varde--form-hints' puts it back.
     (insert (org-varde--form-label 'body (concat "\n── context " (make-string 30 ?─))) "\n" body))
@@ -762,7 +775,7 @@ and what is typed after it is the field's.  FIRST: nothing goes before it."
 
 (defun org-varde--form-fields ()
   "The fields of this form, in order."
-  (seq-filter #'org-varde--form-bounds '(title project body)))
+  (seq-filter #'org-varde--form-bounds '(title project when body)))
 
 (defun org-varde--form-at ()
   "The field point is in: on a name, the field before it."
@@ -783,7 +796,8 @@ below its line."
       (save-excursion (goto-char (car b)) (insert "\n"))))
   (pcase-dolist (`(,field . ,hint)
                  `((title . ,(unless org-varde--new-task "left empty, varde names it from the context"))
-                   (project . "asked for on create, or TAB picks it")))
+                   (project . "asked for on create, or TAB picks it")
+                   (when . "not scheduled: at mon 09:00, every weekday 09:00, every 4h")))
     (let ((b (org-varde--form-bounds field))
           (o (alist-get field org-varde--form-hints)))
       (if (and hint b (string-blank-p (buffer-substring-no-properties (car b) (cdr b))))
@@ -842,8 +856,10 @@ It offers the one there, or else the one offered for the task."
       ;; An edit in progress is kept.
       (unless (buffer-modified-p)
         (org-varde-new-mode)
-        (setq org-varde--new-task (plist-get row :task))
-        (org-varde--form-fill (or (plist-get d :title) "") :none (or (plist-get d :body) "")))
+        (setq org-varde--new-task (plist-get row :task)
+              org-varde--new-when (or (plist-get (plist-get d :schedule) :rule) ""))
+        (org-varde--form-fill (or (plist-get d :title) "") :none (or (plist-get d :body) "")
+                              org-varde--new-when))
       (setq org-varde--new-task (plist-get row :task)
             header-line-format (concat " " (org-varde--edit-keys "save" "cancel"))))
     (pop-to-buffer buffer)))
@@ -893,6 +909,8 @@ heading that links an open task already, it offers to go to that."
                        (string-join (cons (file-name-nondirectory file) (org-get-outline-path t)) " › ")))))
          (at (copy-marker (if region (region-end) (save-excursion (org-back-to-heading t) (point)))))
          (org (derived-mode-p 'org-mode))
+         ;; Taken once, as the title and text are: varde never reads org.
+         (scheduled (and heading (org-entry-get nil "SCHEDULED")))
          (dir (and org (org-entry-get nil "VARDE_PROJECT" t)))
          (repo (unless dir (org-varde-board--project-of default-directory))))
     (if (and linked (y-or-n-p (format "This heading links %s: go to it? (n makes a new task) "
@@ -913,7 +931,8 @@ heading that links an open task already, it offers to go to that."
                  (goto-char at)
                  (set-marker at nil)
                  (if region (org-varde--link-below-region short title) (org-varde--insert-link short title)))
-               (format "; linked in %s" (buffer-name))))))))))
+               (format "; linked in %s" (buffer-name))))))
+       scheduled))))
 
 (defun org-varde-board--region-text (beg end)
   "The text between BEG and END, as a task: its first line, the title, as
@@ -955,12 +974,13 @@ text when it ends on the heading or among its planning and drawers."
       (unless (bolp) (insert "\n"))
       (insert (org-varde--link-text (concat "varde:" short) title) "\n"))))
 
-(defun org-varde--new (offer here &optional text then)
+(defun org-varde--new (offer here &optional text then rule)
   "Open the buffer that writes a new task.  OFFER is the project offered
 when it is asked for, and HERE the one its Project starts as, which it
 goes to without asking.  TEXT, when given, is what it starts with: its
 first line the title, and the rest the context; a draft there goes to
-the kill ring.  THEN is as `org-varde--new-then'."
+the kill ring.  THEN is as `org-varde--new-then'.  RULE is what its When
+starts as."
   (let ((buffer (get-buffer-create "*varde new*")))
     (with-current-buffer buffer
       (cond ((and (buffer-modified-p) (not text))
@@ -973,7 +993,7 @@ the kill ring.  THEN is as `org-varde--new-then'."
                       (nl (string-search "\n" text)))
                  ;; Unchanged, C-c C-k drops it.
                  (org-varde--form-fill (string-trim (substring text 0 nl)) here
-                                       (if nl (string-trim (substring text nl)) "")))
+                                       (if nl (string-trim (substring text nl)) "") rule))
                (setq org-varde--new-then then)))
       (setq org-varde--new-offer offer
             header-line-format (concat " " (org-varde--edit-keys "create" "later"))))
@@ -1016,26 +1036,49 @@ buffer that edits a task saves its title and context instead."
     (org-varde--create-task directory)))
 
 (defun org-varde--save-task ()
-  "Save the title and context written in this buffer to its task."
-  (pcase-let ((`(,title . ,body) (org-varde--new-text)))
+  "Save the title, context and schedule written in this buffer to its task."
+  (pcase-let ((`(,title . ,body) (org-varde--new-text))
+              (rule (or (org-varde--form-value 'when) "")))
     (org-varde--call body (list "set" org-varde--new-task (concat "--title=" title) "--body" "-"))
+    (cond ((equal rule org-varde--new-when))
+          ((string-empty-p rule) (org-varde--varde "schedule" org-varde--new-task "--off"))
+          (t (org-varde--scheduled (list "schedule" org-varde--new-task "--" rule))))
     (set-buffer-modified-p nil)
     (org-varde--close-edit)
     (message "Saved \"%s\"" title))
   (org-varde-refresh))
+
+(defun org-varde--scheduled (args &optional input)
+  "Run varde with ARGS, which schedule a task, INPUT on stdin; return its
+output.  When varde says nobody will be there to answer whether its
+first start gets a worktree, it is asked now, and ARGS run again with
+the answer."
+  (condition-case e
+      (org-varde--call input args)
+    (org-varde-varde-error
+     (if (not (string-search "--worktree" (cadr e)))
+         (signal (car e) (cdr e))
+       (let ((args (copy-sequence args))
+             (tree (if (y-or-n-p "Give it a worktree of its own when it starts? ") "always" "never")))
+         ;; Before the `--' that ends the options.
+         (let ((at (or (seq-position args "--") (length args))))
+           (org-varde--call input (append (seq-take args at) (list "--worktree" tree) (seq-drop args at)))))))))
 
 (defun org-varde--create-task (directory)
   "Create the task written in this buffer in the project DIRECTORY is in."
   (pcase-let* ((`(,title . ,body) (org-varde--new-text))
                (project (expand-file-name directory))
                (body (and (not (string-blank-p body)) body))
+               (rule (or (org-varde--form-value 'when) ""))
                (then org-varde--new-then)
          (new (org-varde--json
                      (condition-case e
-                         (org-varde--call body (append (list "new" "--json" "--project" project)
+                         (org-varde--scheduled (append (list "new" "--json" "--project" project)
                                                        (and body (list "--context" "-"))
+                                                       (and (not (string-empty-p rule)) (list "--when" rule))
                                                        ;; None: varde makes one from the context.
-                                                       (and (not (string-empty-p title)) (list "--" title))))
+                                                       (and (not (string-empty-p title)) (list "--" title)))
+                                               body)
                        (org-varde-varde-error
                         ;; One older than titles made from the context.
                         (if (and (string-empty-p title) (string-search "<TITLE>" (cadr e)))
@@ -1047,10 +1090,11 @@ buffer that edits a task saves its title and context instead."
     (when-let* ((board (get-buffer org-varde-board-buffer)))
       (with-current-buffer board (setq org-varde-board--select (plist-get new :id))))
     (org-varde-board--reveal project)
-    (message "Created %s in %s%s; RET on the board starts it"
+    (message "Created %s in %s%s; %s"
              (if (string-empty-p title) (format "task %s" (plist-get new :short)) (format "\"%s\"" title))
              (file-name-nondirectory (directory-file-name project))
-             (if then (funcall then (plist-get new :short) title) "")))
+             (if then (funcall then (plist-get new :short) title) "")
+             (if (string-empty-p rule) "RET on the board starts it" (concat "varde starts it: " rule))))
   (org-varde-refresh))
 
 (defun org-varde-board--reveal (project)

@@ -490,6 +490,12 @@ TITLE names the task in the question."
        (when region
          (setq org-varde--answers (plist-put org-varde--answers :worktree worktree)))
        (append args (list "--worktree" worktree))))
+    ;; Its schedule started it in the background, where nobody can go.
+    ((and "takeover" (guard (not (member "--take-over" args))))
+     (if (y-or-n-p (format "%s is working in the background.  Take it over?  It stops, and carries on here. "
+                           (org-varde--named (nth 1 args) title)))
+         (append args (list "--take-over"))
+       (user-error "Left working in the background")))
     ('nil nil)
     (other (error "Varde asked again about the %s" other))))
 
@@ -918,7 +924,12 @@ WORD the word after it, as a link and a review say it."
                  ("done" '("✓" "done" org-varde-quiet))
                  ("parked" '("‖" "parked" org-varde-quiet))
                  ("dropped" '("✕" "dropped" org-varde-quiet))
-                 (_ '("○" "open" org-varde-quiet)))))
+                 ;; Waiting for its schedule: when it starts.
+                 (_ (let ((label (plist-get (plist-get row :schedule) :label)))
+                      (if label
+                          (list (substring label 0 1) (string-trim (substring label 1))
+                                (if (plist-get (plist-get row :schedule) :late) 'org-varde-board-blocked 'org-varde-quiet))
+                        '("○" "open" org-varde-quiet)))))))
     (propertize (if word (concat glyph " " said) glyph) 'face face)))
 
 (defvar-local org-varde--link-shown nil
