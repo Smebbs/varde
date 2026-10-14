@@ -78,6 +78,23 @@ fn a_fresh_run_can_have_its_own_worktree() {
 }
 
 #[test]
+fn a_session_in_its_tasks_worktree_is_told_to_commit_on_its_branch() {
+    let e = Env::with_repo(AGENT);
+    let t = e.new_task("Own tree");
+    e.ok(&["attach", &t, "--worktree", "always"]);
+    let branch = e.show(&t)["worktree"]["branch"].as_str().unwrap().to_string();
+    let given = contexts(&e).last().unwrap().clone();
+    assert!(
+        given.contains(&format!("This is the task's own git worktree, on branch {branch}: commit")),
+        "{given}"
+    );
+    // One in the project checkout, shared with other tasks, is not.
+    let other = e.new_task("Shared");
+    e.ok(&["attach", &other, "--worktree", "never"]);
+    assert!(!contexts(&e).last().unwrap().contains("own git worktree"));
+}
+
+#[test]
 fn without_a_terminal_the_worktree_question_must_be_answered() {
     let e = Env::with_repo(AGENT);
     let t = e.new_task("Something");

@@ -411,13 +411,19 @@ pub fn prepare(store: &mut Store, task_id: &str, opts: Options, interactive: boo
                 base: repo_cfg.base.clone(),
             };
             let slug = git::slug(&title, &task::short(task_id));
-            let new = match git::create(repo, &slug, &layout) {
+            // Made again where it was, a worktree is on the branch it had.
+            let before = wt
+                .as_ref()
+                .map(|(w, _, _)| w)
+                .filter(|w| Path::new(&w.path).file_name().is_some_and(|n| n == slug.as_str()))
+                .map(|w| w.branch.as_str());
+            let new = match git::create(repo, &slug, &layout, before) {
                 Ok(new) => new,
                 // Being made by a start racing this one: once there, it is
                 // reused, and the run that start records is taken below.
                 Err(e) => {
                     std::thread::sleep(std::time::Duration::from_millis(300));
-                    match git::create(repo, &slug, &layout) {
+                    match git::create(repo, &slug, &layout, before) {
                         Ok(new) => new,
                         Err(_) => return raced(&store.conn)?.ok_or(e),
                     }

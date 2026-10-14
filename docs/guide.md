@@ -108,7 +108,11 @@ whether it gets a worktree (`--worktree always|never`, or the settings
 below, decide instead). It is `.worktrees/<slug>` on branch
 `varde/<slug>`, cut from your base branch. Submodules are checked out,
 ignored files listed in `.worktreeinclude` are copied, and `git config
-varde.setup` runs. After `done`, the worktree and its branch are
+varde.setup` runs. The branch tracks the base, so magit and `git
+status` show the task's work as the commits ahead of it. Rename it as
+you like: varde follows the branch the worktree has checked out, one
+the agent cut there included, and never deletes a branch that was there
+before the task. After `done`, the worktree and its branch are
 removed once nothing can be lost: no uncommitted changes, every commit
 in the base branch or a merged PR, no session running. Until then the
 task stays under Done.

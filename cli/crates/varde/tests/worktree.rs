@@ -546,6 +546,66 @@ fn work_your_git_config_hides_from_status_is_still_kept() {
 }
 
 #[test]
+fn a_worktrees_branch_tracks_its_base_and_is_not_pushed() {
+    let e = env();
+    let (t, path) = worktree_with_a_commit(&e, "Tracks");
+    // magit and `git status` show the task's commits as ahead of the base.
+    assert_eq!(git(&path, &["rev-parse", "--abbrev-ref", "@{upstream}"]), "main");
+    let d: Value = serde_json::from_str(&e.ok(&["show", &t, "--json"])).unwrap();
+    assert_eq!((d["git"]["upstream"].as_str(), d["git"]["stage"].as_str()), (None, Some("committed")));
+}
+
+#[test]
+fn a_branch_the_agent_cuts_or_renames_in_the_worktree_is_the_tasks() {
+    for how in [&["switch", "-q", "-c", "fix/widget"][..], &["branch", "-m", "fix/widget"]] {
+        let e = env();
+        let (t, path) = worktree_with_a_commit(&e, "Widget");
+        git(&path, how);
+        commit(&path, "more.txt", "more");
+        e.ok(&["git-refresh"]);
+        assert_eq!(worktree(&e, &t).1, "fix/widget");
+        // Landed from the agent's branch, the task's worktree and both
+        // branches go: the one varde cut has nothing the other lacks.
+        git(&e.repo(), &["merge", "-q", "--ff-only", "fix/widget"]);
+        let said = e.ok(&["done", &t]);
+        assert!(said.contains("fix/widget had landed; worktree removed"), "{how:?}: {said}");
+        assert!(!path.exists());
+        assert_eq!(git(&e.repo(), &["branch", "--format=%(refname:short)"]), "main", "{how:?}");
+    }
+}
+
+#[test]
+fn a_branch_that_was_there_before_the_task_stays_the_users() {
+    let e = env();
+    let (t, path) = worktree_with_a_commit(&e, "Borrowed");
+    let (_, branch) = worktree(&e, &t);
+    git(&e.repo(), &["merge", "-q", "--ff-only", &branch]);
+    git(&e.repo(), &["branch", "release"]);
+    // As if made long before the task's worktree.
+    e.sql("UPDATE worktree SET created = created + 600000");
+    git(&path, &["switch", "-q", "release"]);
+    e.ok(&["done", &t]);
+    assert!(!path.exists());
+    assert_eq!(worktree(&e, &t).1, branch);
+    assert_eq!(git(&e.repo(), &["branch", "--format=%(refname:short)"]), "main\nrelease");
+}
+
+#[test]
+fn a_dropped_task_started_again_is_back_on_the_branch_the_agent_cut() {
+    let e = env();
+    let (t, path) = worktree_with_a_commit(&e, "Renamed");
+    git(&path, &["switch", "-q", "-c", "fix/widget"]);
+    commit(&path, "mine.txt", "mine");
+    std::fs::write(path.join("wip.txt"), "wip").unwrap();
+    e.ok(&["drop", &t]);
+    e.ok(&["reopen", &t]);
+    e.ok(&["attach", &t, "--fresh", "--worktree", "always"]);
+    assert_eq!(git(&path, &["branch", "--show-current"]), "fix/widget");
+    assert_eq!(git(&path, &["log", "-1", "--format=%s"]), "mine.txt");
+    assert!(path.join("wip.txt").exists());
+}
+
+#[test]
 fn commits_on_a_detached_head_stop_a_removal() {
     let e = env();
     let (t, path) = worktree_with_a_commit(&e, "Detached");

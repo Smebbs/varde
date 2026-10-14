@@ -52,12 +52,16 @@ struct Task {
     created: i64,
     /// Whether `start` held this run out of memory.
     held_out: bool,
+    /// The branch of the task's worktree, when the run is in it.
+    branch: Option<String>,
 }
 
 fn task_of(conn: &Connection, run: &str) -> Result<Option<Task>> {
     Ok(conn
         .prepare_cached(
-            "SELECT t.id, t.title, t.project, t.origin, t.created, coalesce(r.holdout, 0)
+            "SELECT t.id, t.title, t.project, t.origin, t.created, coalesce(r.holdout, 0),
+               (SELECT w.branch FROM worktree w WHERE w.task = t.id AND w.state = 'active'
+                  AND (r.cwd = w.path OR substr(r.cwd, 1, length(w.path) + 1) = w.path || '/'))
              FROM run r JOIN task t ON t.id = r.task WHERE r.id = ?1",
         )?
         .query_row([run], |r| {
@@ -68,6 +72,7 @@ fn task_of(conn: &Connection, run: &str) -> Result<Option<Task>> {
                 origin: r.get(3)?,
                 created: r.get(4)?,
                 held_out: r.get(5)?,
+                branch: r.get(6)?,
             })
         })
         .optional()?)
@@ -244,6 +249,14 @@ fn guidance(run: &str, task: Option<&Task>, held: bool, updates: bool) -> String
          own: varde new --from {run} \"<title>\" --context \"<why, and where to start>\". Never file \
          work only you thought of."
     ));
+    // Agents cut branches and worktrees of their own, and the work then
+    // missed the worktree the user looks at (magit) and varde follows.
+    if let Some(b) = task.and_then(|t| t.branch.as_deref()) {
+        out.push_str(&format!(
+            " This is the task's own git worktree, on branch {b}: commit your work here, not on \
+             another branch or worktree unless the user asks (renaming this branch is fine)."
+        ));
+    }
     // By its id, not a bare `varde done`: that resolves to this task only in
     // a session varde launched, and a session left to guess tried `--run`.
     if let Some(t) = task {

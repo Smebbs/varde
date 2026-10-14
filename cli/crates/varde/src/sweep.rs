@@ -83,6 +83,7 @@ pub fn run(paths: &Paths) -> Result<()> {
             Some((path, repo, branch, base)) => {
                 let p = Path::new(&path);
                 let repo = &git::home(Path::new(&repo), p);
+                let branch = follow(&store.conn, &path, repo, &branch).unwrap_or(branch);
                 let facts = git::facts(p, Some(&base), true).ok();
                 // Asking gh can take seconds, in which the task may have been
                 // started again: its state then, not before, says to tidy.
@@ -179,7 +180,7 @@ pub fn active_worktree(store: &Store, task: &str) -> Result<Option<(String, Stri
 /// the main checkout's. Returns the worktree's new state, `merged` for
 /// work that landed and `removed` for a branch that never had any.
 pub fn tidy(repo: &Path, path: &Path, branch: &str, f: &Facts) -> Result<Option<&'static str>> {
-    if f.changes > 0 || f.branch != branch || !(f.landed || f.ahead == 0) {
+    if f.changes > 0 || !(f.landed || f.ahead == 0) {
         return Ok(None);
     }
     if git::included_changes(repo, path).map_or(true, |c| !c.is_empty()) {
@@ -189,6 +190,35 @@ pub fn tidy(repo: &Path, path: &Path, branch: &str, f: &Facts) -> Result<Option<
         return Ok(None);
     }
     git::remove(repo, path)?;
-    git::git(repo, &["branch", "-D", branch])?;
+    if f.branch == branch {
+        git::git(repo, &["branch", "-D", branch])?;
+    } else if let Some(base) = f.target.as_deref().filter(|_| git::has_branch(repo, branch)) {
+        // A branch that was there before the task, or a detached HEAD, was
+        // checked out instead: that stays, and the task's own goes only
+        // when it holds nothing the base lacks.
+        git::delete_if_merged(repo, base, branch)?;
+    }
     Ok(Some(if f.landed { "merged" } else { "removed" }))
+}
+
+/// The task's branch in its worktree at `path`, recorded as `branch`: the
+/// branch checked out there instead, when it was made there (renamed from
+/// it, or cut by the agent: `git::born_since`), which is then recorded, so
+/// that closing, dropping and starting again follow the work. The branch
+/// it replaces is deleted when the new one has all its commits.
+pub fn follow(conn: &rusqlite::Connection, path: &str, repo: &Path, branch: &str) -> Result<String> {
+    let p = Path::new(path);
+    let created: i64 =
+        conn.query_row("SELECT created FROM worktree WHERE path = ?1", [path], |r| r.get(0))?;
+    let Some(live) = git::born_since(p, created).filter(|b| b != branch) else {
+        return Ok(branch.to_string());
+    };
+    if git::has_branch(repo, branch)
+        && git::git(repo, &["merge-base", "--is-ancestor", branch, &live]).is_ok()
+    {
+        // Checked out in another worktree, git refuses, and it is kept.
+        let _ = git::git(repo, &["branch", "-D", branch]);
+    }
+    conn.execute("UPDATE worktree SET branch = ?2 WHERE path = ?1", params![path, live])?;
+    Ok(live)
 }

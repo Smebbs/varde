@@ -121,6 +121,11 @@ pub fn facts(checkout: &Path, base: Option<&str>, with_pr: bool) -> Result<Facts
             changes += 1;
         }
     }
+    // A task's branch tracks its local base (`git::restore`): that says
+    // nothing about where the work is pushed.
+    if upstream.is_some() && local_upstream(checkout, &branch) {
+        (upstream, unpushed) = (None, None);
+    }
     let target = base.map(str::to_string).or_else(|| upstream.clone());
     let (behind, ahead) = match &target {
         Some(t) => {
@@ -158,6 +163,11 @@ pub fn facts(checkout: &Path, base: Option<&str>, with_pr: bool) -> Result<Facts
     })
 }
 
+/// Whether `branch` tracks a branch of its own repository, not a remote's.
+fn local_upstream(dir: &Path, branch: &str) -> bool {
+    git(dir, &["config", "--get", &format!("branch.{branch}.remote")]).is_ok_and(|r| r == ".")
+}
+
 /// Whether `branch` moved on from where it was cut. Its reflog's oldest
 /// entry is its creation; without a reflog nothing can be claimed.
 fn has_own_commits(dir: &Path, branch: &str, tip: &str) -> bool {
@@ -188,6 +198,9 @@ pub fn merged_pr(repo: &Path, branch: &str) -> Option<Pr> {
     // Its configured upstream, not the ref: GitHub deletes a merged PR's
     // branch, and a prune then takes the ref while the PR stays merged.
     git(repo, &["config", "--get", &format!("branch.{branch}.merge")]).ok()?;
+    if local_upstream(repo, branch) {
+        return None;
+    }
     let tip = git(repo, &["rev-parse", branch]).ok()?;
     pr(repo, branch).filter(|p| p.state == "merged" && p.head == tip)
 }
@@ -256,7 +269,7 @@ mod tests {
     #[test]
     fn facts_follow_the_work_from_edit_to_landed() {
         let r = repo();
-        let new = create(r.path(), "f-abc123", &layout(r.path())).unwrap();
+        let new = create(r.path(), "f-abc123", &layout(r.path()), None).unwrap();
         let stage = || facts(&new.path, Some("main"), false).unwrap();
         // A fresh branch is not landed: it has nothing of its own.
         assert_eq!(stage().stage(), "clean");

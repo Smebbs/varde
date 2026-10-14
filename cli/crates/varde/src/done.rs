@@ -99,6 +99,7 @@ fn close_task(store: &Store, id: &str, opts: Options) -> Result<Value> {
     if let Some((path, repo, branch, base)) = wt {
         let p = Path::new(&path);
         let repo_p = &git::home(Path::new(&repo), p);
+        let branch = sweep::follow(&store.conn, &path, repo_p, &branch).unwrap_or(branch);
         let look = || -> Result<Look> {
             // Keeping the worktree needs none of these facts, so a repo in
             // an odd state (base deleted, repo moved) must not stop the
@@ -230,7 +231,7 @@ fn close_task(store: &Store, id: &str, opts: Options) -> Result<Value> {
         } else if opts.discard {
             // A repo that is gone took the worktree and branch with it.
             if repo_p.join(".git").exists() {
-                let saved_ref = git::discarded_ref(&branch);
+                let saved_ref = git::discarded_ref(p);
                 saved = git::save(repo_p, p, &branch, &saved_ref, &task::short(&id))?.map(|_| saved_ref);
                 git::remove(repo_p, p)?;
                 // `save` kept the branch's commits, so deleting it loses nothing.

@@ -307,8 +307,8 @@ call, or a reply that is not a title, keeps the cut title for good.
 The rename is one conditional write too, made only while the title is
 still the cut one: a title you set meanwhile wins. The cut title is
 kept (`prompt_title`), so `varde show` can tell the two apart. The
-board and Emacs show the new title on their next refresh; a worktree's
-branch keeps the name it was given when the task started.
+board and Emacs show the new title on their next refresh; varde never
+renames a worktree's branch (§6.3).
 `memory.titles = false`, or `memory.enabled = false`, keeps the cut
 title.
 
@@ -444,6 +444,25 @@ run again. `git config varde.setup` names a command run in the
 terminal, at the worktree's root, before the agent starts: once when
 the worktree is made, and again only when it is brought back. A failing
 setup is reported, and the session starts anyway.
+
+**The task's branch** (Q32). A worktree is the task's, and so is the
+branch it has checked out, whatever it is called: you may rename it,
+and an agent may cut one of its own there (`git switch -c`). varde
+follows: a branch the worktree has checked out that was made no earlier
+than the worktree (its reflog's first entry, which a rename keeps) is
+recorded as the task's, and the one it replaced is deleted when the new
+one has all its commits. Closing, dropping and starting again then act
+on it, and a worktree made again where it was is on it. A branch that
+was there before the task, checked out in its worktree, stays yours:
+the worktree goes once its work has landed, and the branch is left.
+The branch tracks its base, so magit and `git status` show the task's
+work as the commits ahead of it, and nothing else; for varde, a branch
+that tracks a local branch is not pushed, and has no PR to look up. A
+plain `git push` refuses it (the names differ), and a push into the
+base is refused while the base is checked out, so nothing lands by
+accident. A session in the task's worktree is told its branch and to
+commit there, since an agent left alone cut branches and worktrees of
+its own, which missed the worktree varde and the user look at.
 
 **In a worktree of your own** (Q24). A task made in a linked worktree
 of yours (`git worktree add`) belongs to that checkout, and so does its
@@ -1210,7 +1229,8 @@ Practices from day one:
 - Sessions are named before they start.
 - A first prompt is the signal that a session is real.
 - The agent view is disabled for each launch.
-- Merged branches are reused, never re-suffixed.
+- Merged branches are reused, never re-suffixed. A task's branch is
+  followed through a rename (Q32).
 - A worktree is force-removed only when it is clean, submodules
   included.
 - Word budgets, not sentence counts.
@@ -1287,3 +1307,4 @@ Practices from day one:
 | Q29 | A stable board, one keymap (2026-10-12) | The board never moves under you: every group is always shown in its fixed order, an empty one as a dim `Working  0`, since groups that came and went made the layout jump and the eye lose its place. Folding is the user's (`z`, any group; Parked starts folded), and a folded group is one line the selection stops on. The keys are vi's where vi has one (`j`/`k`, `gg`/`G`, `{`/`}`, C-d/C-u) and the same on the Emacs board wherever Emacs allows; Tab cycles the tasks that need you, the move made most, and RET goes to a session while `s` starts one without going, on both boards. `g` alone no longer refreshes (C-l does), and `p` no longer parks: a motion key in Emacs does nothing destructive in the terminal either. The footer is the keys most needed for the row at point, as many as fit the width. |
 | Q30 | Cairns, seen and edited a line at a time (2026-10-12) | A cairn is shown the same way in `varde show` and the board's view: what it is ("what its sessions learned, handed to the next one"), when it was last updated and by what, how many sessions were handed it, what is stale and which notes wait, then Status and every section with how full it is, your lines marked. It is edited a line at a time, in place, through `varde edit --add/--set/--rm/--restore` that every client calls, by the id `varde show` prints after each line (`#12`), with the same keys in the terminal and Emacs views: a whole document in an editor, open for minutes, was a clumsy way to fix one line and raced the updates. Removing asks nothing, since `u` (`--restore`) brings the line back; on a Status the user set, `x` (`--rm status`) hands it back to the updates. `$EDITOR` stays for bulk changes. |
 | Q31 | Org through links (2026-10-13) | Reverses "a heading per task". Keeping a heading and its task in step took about 1 050 lines and 85 tests: an index over every org file, settling keyword changes, reconciling both ways by guessing which change came last from CLOSED times and file mtimes, copied and archived headings, and still two sources of truth, each able to undo the other. Tasks are made on the board, where most were made anyway, and org is where notes are written; a note links the tasks it is about, `[[varde:SHORT][Title]]`, and the link shows where its task stands, as forge's and orgit's links point into a repository, mu4e's into mail, and org-ql's or om-dash's blocks gather a review. `org-varde-new-here` makes a task from a heading and links it there; DONE on a heading offers to close its tasks, one way; a dynamic block lists them for a review. Nothing is synced, so nothing disagrees. |
+| Q32 | The task's branch (2026-10-15) | Tracked by the worktree, not the name. A branch the agent cut or you renamed in the worktree is the task's (made no earlier than the worktree), and a branch that was there before is never deleted; a stored name made such a task's worktree wait in Done for ever, its work landed. The branch tracks its local base, for magit's "Unmerged into" and `git status`. Sessions in the worktree are told to commit on its branch. Rejected: worktrees on a detached HEAD until the user names a branch (Codex app), since every closed task with commits would wait on that, magit cannot push it, and the agent names one anyway to push; and dropping the `varde/` prefix by default, since landings fast-forward and it groups the branches (`branch_prefix = ""` still drops it). Claude Code's subagent worktrees branch from `origin/main` unless `worktree.baseRef` is `head` in its settings, which is the user's to set. |

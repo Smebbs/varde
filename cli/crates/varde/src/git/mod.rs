@@ -140,7 +140,9 @@ pub struct Layout {
     pub base: Option<String>,
 }
 
-pub fn create(repo: &Path, slug: &str, layout: &Layout) -> Result<New> {
+/// `before` is the branch the task's earlier worktree at the same place
+/// had, renamed perhaps, which it gets back.
+pub fn create(repo: &Path, slug: &str, layout: &Layout, before: Option<&str>) -> Result<New> {
     // A worktree of your own is where you work on its branch, so its
     // tasks start from that work and merge back into it.
     let base = match (linked_branch(repo), layout.base.as_deref()) {
@@ -150,7 +152,7 @@ pub fn create(repo: &Path, slug: &str, layout: &Layout) -> Result<New> {
         (None, None) => base(repo)?,
     };
     let path = layout.dir.join(slug);
-    let branch = format!("{}{slug}", layout.prefix);
+    let branch = before.map_or_else(|| format!("{}{slug}", layout.prefix), str::to_string);
     exclude_worktrees(&main_checkout(repo), &layout.dir)?;
     // The branch outlives a removed worktree when it holds unmerged work;
     // a fresh start picks that work back up rather than failing.
@@ -158,10 +160,10 @@ pub fn create(repo: &Path, slug: &str, layout: &Layout) -> Result<New> {
     Ok(New { path, branch, base, made: made.is_some(), notices: made.unwrap_or_default() })
 }
 
-/// Where the work of `branch` is kept when its task is dropped: under its
-/// slug, whatever prefix the branch was given.
-pub fn discarded_ref(branch: &str) -> String {
-    format!("refs/varde/discarded/{}", branch.rsplit('/').next().unwrap_or(branch))
+/// Where the work of the worktree at `path` is kept when its task is
+/// dropped: under its slug, whatever the branch was given or renamed to.
+pub fn discarded_ref(path: &Path) -> String {
+    format!("refs/varde/discarded/{}", path.file_name().unwrap_or_default().to_string_lossy())
 }
 
 /// The subject of a commit `save` makes.
@@ -179,7 +181,7 @@ pub fn restore(repo: &Path, path: &Path, branch: &str, base: &str) -> Result<Opt
         return Ok(None);
     }
     let p = path.to_string_lossy();
-    let kept = discarded_ref(branch);
+    let kept = discarded_ref(path);
     let mut notices = vec![];
     if has_branch(repo, branch) {
         git(repo, &["worktree", "add", &p, branch])?;
@@ -200,6 +202,12 @@ pub fn restore(repo: &Path, path: &Path, branch: &str, base: &str) -> Result<Opt
         notices.push(format!("brought back the work dropped from {branch}"));
     } else {
         git(repo, &["worktree", "add", "-b", branch, &p, base])?;
+    }
+    // Tracking its base, the branch shows in magit and `git status` as
+    // its commits ahead of it. A branch that already tracks something,
+    // such as one pushed, keeps that.
+    if git(repo, &["rev-parse", "--abbrev-ref", &format!("{branch}@{{upstream}}")]).is_err() {
+        let _ = git(repo, &["branch", "--set-upstream-to", base, branch]);
     }
     notices.extend(setup(repo, path));
     Ok(Some(notices))
@@ -513,6 +521,20 @@ pub fn remove(repo: &Path, path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// The branch the worktree at `path` has checked out, if it was made no
+/// earlier than `since` (ms): renamed from the task's branch or cut there
+/// by the agent, and so the task's own. A branch that was there before
+/// the task, checked out in its worktree, is not.
+pub fn born_since(path: &Path, since: i64) -> Option<String> {
+    let branch = git(path, &["symbolic-ref", "--short", "-q", "HEAD"]).ok().filter(|b| !b.is_empty())?;
+    // Its reflog's oldest entry is its creation, and a rename keeps it.
+    let log = git(path, &["reflog", "show", "--date=unix", "--format=%gd", &format!("refs/heads/{branch}")])
+        .ok()?;
+    let born: i64 = log.lines().last()?.rsplit_once("@{")?.1.strip_suffix('}')?.parse().ok()?;
+    // In seconds, and the branch is made before its worktree is recorded.
+    (born >= since / 1000 - 5).then_some(branch)
+}
+
 /// Delete `branch` only if it is merged into `base`; unmerged work is kept.
 pub fn delete_if_merged(repo: &Path, base: &str, branch: &str) -> Result<bool> {
     if ahead(repo, base, branch)? > 0 {
@@ -578,7 +600,7 @@ pub mod tests {
     #[test]
     fn a_worktree_is_created_ignored_and_restored() {
         let r = repo();
-        let new = create(r.path(), "x-abc123", &layout(r.path())).unwrap();
+        let new = create(r.path(), "x-abc123", &layout(r.path()), None).unwrap();
         assert!(new.path.is_dir());
         assert_eq!(new.base, "main");
         assert_eq!(git(r.path(), &["status", "--porcelain"]).unwrap(), "");
@@ -608,24 +630,24 @@ pub mod tests {
         git(r.path(), &["update-ref", "refs/remotes/origin/main", "HEAD"]).unwrap();
         git(r.path(), &["symbolic-ref", "refs/remotes/origin/HEAD", "refs/remotes/origin/main"]).unwrap();
         assert_eq!(base(r.path()).unwrap(), "dev");
-        let new = create(r.path(), "b-abc123", &layout(r.path())).unwrap();
+        let new = create(r.path(), "b-abc123", &layout(r.path()), None).unwrap();
         assert_eq!(git(&new.path, &["rev-parse", "--abbrev-ref", "HEAD"]).unwrap(), new.branch);
     }
 
     #[test]
     fn a_kept_branch_is_picked_up_by_a_new_worktree() {
         let r = repo();
-        let first = create(r.path(), "k-abc123", &layout(r.path())).unwrap();
+        let first = create(r.path(), "k-abc123", &layout(r.path()), None).unwrap();
         commit(&first.path, "a.txt", "a");
         remove(r.path(), &first.path).unwrap();
-        let again = create(r.path(), "k-abc123", &layout(r.path())).unwrap();
+        let again = create(r.path(), "k-abc123", &layout(r.path()), None).unwrap();
         assert!(again.path.join("a.txt").exists());
     }
 
     #[test]
     fn unmerged_branches_are_kept() {
         let r = repo();
-        let new = create(r.path(), "k-abc123", &layout(r.path())).unwrap();
+        let new = create(r.path(), "k-abc123", &layout(r.path()), None).unwrap();
         commit(&new.path, "a.txt", "a");
         remove(r.path(), &new.path).unwrap();
         assert!(!delete_if_merged(r.path(), "main", &new.branch).unwrap());
@@ -639,7 +661,7 @@ pub mod tests {
 
     /// What `varde drop` does to a worktree.
     fn drop_it(repo: &Path, new: &New) -> Option<String> {
-        let saved = save(repo, &new.path, &new.branch, &discarded_ref(&new.branch), "abc123").unwrap();
+        let saved = save(repo, &new.path, &new.branch, &discarded_ref(&new.path), "abc123").unwrap();
         remove(repo, &new.path).unwrap();
         git(repo, &["branch", "-D", &new.branch]).unwrap();
         saved
@@ -648,7 +670,7 @@ pub mod tests {
     #[test]
     fn a_drop_keeps_the_branch_when_the_worktree_has_another_checked_out() {
         let r = repo();
-        let new = create(r.path(), "o-abc123", &layout(r.path())).unwrap();
+        let new = create(r.path(), "o-abc123", &layout(r.path()), None).unwrap();
         commit(&new.path, "a.txt", "real work");
         let work = git(&new.path, &["rev-parse", "HEAD"]).unwrap();
         git(&new.path, &["checkout", "-q", "-b", "elsewhere", "main"]).unwrap();
@@ -665,7 +687,7 @@ pub mod tests {
     #[test]
     fn a_second_drop_keeps_the_first() {
         let r = repo();
-        let new = create(r.path(), "s-abc123", &layout(r.path())).unwrap();
+        let new = create(r.path(), "s-abc123", &layout(r.path()), None).unwrap();
         commit(&new.path, "a.txt", "first");
         let first = git(&new.path, &["rev-parse", "HEAD"]).unwrap();
         drop_it(r.path(), &new);
@@ -681,7 +703,7 @@ pub mod tests {
     #[test]
     fn a_dropped_worktree_comes_back_as_it_was() {
         let r = repo();
-        let new = create(r.path(), "d-abc123", &layout(r.path())).unwrap();
+        let new = create(r.path(), "d-abc123", &layout(r.path()), None).unwrap();
         commit(&new.path, "a.txt", "committed");
         let tip = git(&new.path, &["rev-parse", "HEAD"]).unwrap();
         std::fs::write(new.path.join("a.txt"), "edited").unwrap();
@@ -695,25 +717,25 @@ pub mod tests {
         assert_eq!(std::fs::read_to_string(new.path.join("a.txt")).unwrap(), "edited");
         assert_eq!(std::fs::read_to_string(new.path.join("new.txt")).unwrap(), "untracked");
         // Brought back once: the ref goes, and the work is where it was.
-        assert!(rev(r.path(), &discarded_ref(&new.branch)).is_none());
+        assert!(rev(r.path(), &discarded_ref(&new.path)).is_none());
     }
 
     #[test]
     fn a_drop_with_nothing_left_keeps_nothing() {
         let r = repo();
-        let new = create(r.path(), "n-abc123", &layout(r.path())).unwrap();
+        let new = create(r.path(), "n-abc123", &layout(r.path()), None).unwrap();
         remove(r.path(), &new.path).unwrap();
         git(r.path(), &["branch", "-D", &new.branch]).unwrap();
-        assert_eq!(save(r.path(), &new.path, &new.branch, &discarded_ref(&new.branch), "x").unwrap(), None);
+        assert_eq!(save(r.path(), &new.path, &new.branch, &discarded_ref(&new.path), "x").unwrap(), None);
     }
 
     #[test]
     fn restoring_twice_reuses_the_worktree() {
         let r = repo();
-        let new = create(r.path(), "t-abc123", &layout(r.path())).unwrap();
+        let new = create(r.path(), "t-abc123", &layout(r.path()), None).unwrap();
         std::fs::write(new.path.join("wip.txt"), "wip").unwrap();
         // A start that failed after git made the worktree runs again.
-        assert!(create(r.path(), "t-abc123", &layout(r.path())).unwrap().notices.is_empty());
+        assert!(create(r.path(), "t-abc123", &layout(r.path()), None).unwrap().notices.is_empty());
         assert!(new.path.join("wip.txt").exists());
     }
 
@@ -743,7 +765,7 @@ pub mod tests {
         // Named, but not ignored: git would track it, so it is not copied.
         std::fs::write(r.path().join("notes.txt"), "mine").unwrap();
 
-        let made = create(r.path(), "w-abc123", &layout(r.path())).unwrap();
+        let made = create(r.path(), "w-abc123", &layout(r.path()), None).unwrap();
         // Git clones a submodule from a local path only when the user's own
         // config allows it, which a test cannot set without touching it: the
         // update is tried, and its failure reported rather than fatal.
@@ -761,7 +783,7 @@ pub mod tests {
     fn a_repo_with_no_commits_says_so() {
         let d = tempfile::tempdir().unwrap();
         git(d.path(), &["init", "-q"]).unwrap();
-        let e = create(d.path(), "e-abc123", &layout(d.path())).err().unwrap().to_string();
+        let e = create(d.path(), "e-abc123", &layout(d.path()), None).err().unwrap().to_string();
         assert!(e.contains("no commits yet"), "{e}");
     }
 }

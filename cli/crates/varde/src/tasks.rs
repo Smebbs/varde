@@ -143,13 +143,13 @@ fn moving(store: &Store, id: &str, dir: &Path) -> Result<Option<String>> {
     let last: Option<(String, String, String)> = store
         .conn
         .query_row(
-            "SELECT repo, branch, state FROM worktree WHERE task = ?1 ORDER BY created DESC LIMIT 1",
+            "SELECT repo, path, state FROM worktree WHERE task = ?1 ORDER BY created DESC LIMIT 1",
             [id],
             |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
         )
         .optional()?;
-    if let Some((repo, branch, _)) = last.filter(|(_, _, state)| state == "removed") {
-        let kept = git::discarded_ref(&branch);
+    if let Some((repo, path, _)) = last.filter(|(_, _, state)| state == "removed") {
+        let kept = git::discarded_ref(Path::new(&path));
         if git::rev(Path::new(&repo), &kept).is_some() {
             bail!(
                 "{short} has work kept from its drop at {kept} in {repo}, which starting it there brings back: \
