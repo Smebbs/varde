@@ -221,7 +221,10 @@ or that asked for a decision with no `seen` since. A client calls
 `seen` when you look at the task's terminal, and `start` does it
 whenever it sends you to a live session (`focus`). The TUI and
 `varde attach` clear it once they get you there, and not when they can
-only say where it runs. A `seen` is an event, so status is unaffected.
+only say where it runs. In tmux, `varde run` clears it itself while its
+pane is on screen: a turn that ends while you are in the task is read,
+with or without a board running. A `seen` is an event, so status is
+unaffected.
 
 ### 6.1 The attach decision
 
@@ -1258,7 +1261,7 @@ Practices from day one:
 | Q3 | Memory in org | No writes apart from `VARDE_TASK`, and the heading a task is filed under when you ask (since Q31, only the links you ask for). It is viewed on demand. |
 | Q4 | Ad-hoc sessions | They become tasks automatically and wait in the Inbox (revised 2026-10-08, see Q14). |
 | Q5 | Terminal | A shell with `varde run <run>` typed into it. |
-| Q6 | Standalone viewing | Plain commands and a TUI board. Inside tmux the board hosts each task's session in a tmux window of its own, tagged `@varde_task`, `@varde_owned` and `@varde_home` (the store), with the board's `VARDE_*` settings and `PATH` in its environment, so the run lands in the board's store: RET types `varde run` into it (reusing the task's idle shell of the same store) and goes to a live session's pane, and `s` does the same without going there. `varde run` in a pane of your own, found by its tty rather than `TMUX_PANE` (which an Emacs started from tmux passes on), tags it only while the session runs. Only windows the board opened are ever closed: by `done`, `park` and `drop`, from anywhere, once their sessions are gone and each is back at an idle shell (any common shell, or `$SHELL`), and by the board on a refresh for a task of its own store that it finds closed elsewhere (another store's windows, and tasks it does not know, are left); a pane busy with something else is left. On each refresh the board also rings a window's bell when its task comes to need you, so tmux flags it, and marks a task seen when its window is the one on screen. There is no daemon: this happens only while a board runs. Outside tmux it suspends as before. |
+| Q6 | Standalone viewing | Plain commands and a TUI board. Inside tmux the board hosts each task's session in a tmux window of its own, tagged `@varde_task`, `@varde_owned` and `@varde_home` (the store), with the board's `VARDE_*` settings and `PATH` in its environment, so the run lands in the board's store: RET types `varde run` into it (reusing the task's idle shell of the same store) and goes to a live session's pane, and `s` does the same without going there. `varde run` in a pane of your own, found by its tty rather than `TMUX_PANE` (which an Emacs started from tmux passes on), tags it only while the session runs. Only windows the board opened are ever closed: by `done`, `park` and `drop`, from anywhere, once their sessions are gone and each is back at an idle shell (any common shell, or `$SHELL`), and by the board on a refresh for a task of its own store that it finds closed elsewhere (another store's windows, and tasks it does not know, are left); a pane busy with something else is left. On each refresh the board also rings a window's bell when its task comes to need you, so tmux flags it, and marks a task seen when its window is the one on screen. There is no daemon: this happens only while a board runs, but for the seen mark, which `varde run` also sets for its own pane. Outside tmux it suspends as before. |
 | Q7 | Name and repo | `varde`, in this repo, under `cli/`. |
 | Q8 | Agents | Claude first, then pi (2026-10), behind one adapter trait that leaves room for Codex and others. |
 | Q9 | Memory model | One bounded cairn per task. Notes are pinned inputs. Your own lines are protected. History is kept. (Revised 2026-10-10, see Q19: updates are edits, not rewrites.) |

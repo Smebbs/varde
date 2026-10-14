@@ -247,6 +247,38 @@ fn the_pane_is_found_by_its_terminal_not_an_inherited_tmux_pane() {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "uses util-linux script")]
+fn a_turn_that_ends_in_a_pane_on_screen_is_read_with_no_board_running() {
+    let e = Env::with_repo(AGENT);
+    let Some(t) = Tmux::start(e.dir.path()) else { return eprintln!("no tmux; skipped") };
+    let pane = t.tmux(&["display", "-p", "-t", "t", "#{pane_id}"]).unwrap();
+    let task = e.new_task("Watched");
+    let plan: Value =
+        serde_json::from_str(&e.ok(&["start", &task, "--worktree", "never", "--json"])).unwrap();
+    let run = plan["run"].as_str().unwrap();
+    let unread = || e.board()["groups"][0]["rows"][0]["unread"] == true;
+    t.type_in(&pane, &e.typed(&format!("FAKE_SLEEP=30 '{}' run {run}", env!("CARGO_BIN_EXE_varde"))));
+    // Its turn ends with no client attached: nobody is in it. The session
+    // outlives the waits below: one that exits is not unread either.
+    wait("the turn's end", unread);
+    std::thread::sleep(std::time::Duration::from_millis(1500));
+    assert!(unread(), "read with nobody looking");
+    let attach = format!("tmux -S {} attach -t t", t.sock.display());
+    let mut client = Command::new("script")
+        .args(["-qfc", &attach, "/dev/null"])
+        .env("TERM", "xterm-256color")
+        .env_remove("TMUX")
+        .stdin(std::process::Stdio::piped())
+        .stdout(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let read = poll(100, || !unread());
+    let _ = client.kill();
+    let _ = client.wait();
+    assert!(read, "unread while its pane is on screen");
+}
+
+#[test]
 fn attach_on_a_live_task_names_its_tmux_window() {
     let e = env();
     let Some(t) = Tmux::start(e.dir.path()) else { return eprintln!("no tmux; skipped") };

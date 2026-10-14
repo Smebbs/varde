@@ -18,6 +18,10 @@ follow [Semantic Versioning](https://semver.org).
 
 ### Fixed
 
+- A turn that ends while you are in its session, in tmux, is read: the
+  session marks it so while its pane is on screen. Only a running board
+  did, on its next refresh, and only if the pane was still on screen
+  then.
 - On macOS the Emacs board no longer misses what hooks write while a
   session runs, which left a finished task showing Working. kqueue
   tells a watch on a directory only of files coming and going, not of

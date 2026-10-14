@@ -83,7 +83,9 @@ pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
     // Inside tmux the board can go to this pane while the session runs. A
     // window the board opened is the task's already; a pane of your own
     // is tagged only until the agent exits, so nothing ever closes it.
-    let lent = tmux::this_pane().filter(|(_, was)| *was != task);
+    let here = tmux::this_pane();
+    let pane = here.as_ref().map(|(p, _)| p.clone());
+    let lent = here.filter(|(_, was)| *was != task);
     if let Some((pane, _)) = &lent {
         let _ = tmux::server().tag(pane, &task);
     }
@@ -137,7 +139,7 @@ pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
     let status = ignoring_terminal_signals(|| {
         passing_on_sigterm(pid, || {
             std::thread::scope(|s| {
-                s.spawn(|| watch_interrupts(paths, run_id, &agent, stopped));
+                s.spawn(|| watch_interrupts(paths, run_id, &task, &agent, pane.as_deref(), stopped));
                 let status = child.wait();
                 drop(stop);
                 status
@@ -227,8 +229,16 @@ const POLL: Duration = Duration::from_secs(1);
 /// does write the interrupt to its transcript: watch that, until `stop`
 /// is dropped. The session may move to another conversation (`/clear`,
 /// `/resume`), a run of its own in the same process: the newest is
-/// watched.
-fn watch_interrupts(paths: &Paths, run_id: &str, agent: &str, stop: mpsc::Receiver<()>) {
+/// watched. A turn that ends while its tmux `pane` is on screen is read
+/// there, whether or not a board is running to see it.
+fn watch_interrupts(
+    paths: &Paths,
+    run_id: &str,
+    task: &str,
+    agent: &str,
+    pane: Option<&str>,
+    stop: mpsc::Receiver<()>,
+) {
     let Some(adapter) = varde_agent::by_name(agent) else { return };
     let mut store = None;
     // The run watched, its transcript, and how far into it has been read.
@@ -250,6 +260,9 @@ fn watch_interrupts(paths: &Paths, run_id: &str, agent: &str, stop: mpsc::Receiv
             at = Some((run, path, len));
         }
         let Some((run, path, from)) = at.as_mut() else { continue };
+        if let Some(pane) = pane {
+            read_if_shown(s, task, run, pane, now);
+        }
         if let Some(idle) = cancelled(s, adapter.as_ref(), run, now) {
             let _ = s.record_interrupt(run, idle);
         }
@@ -271,6 +284,15 @@ fn watch_interrupts(paths: &Paths, run_id: &str, agent: &str, stop: mpsc::Receiv
         }
         *from += end as u64 + 1;
         read_at = now;
+    }
+}
+
+/// Mark `task` read when `run` is unread and `pane`, the one it runs in,
+/// is on screen: you are in it. tmux is asked only then.
+fn read_if_shown(store: &Store, task: &str, run: &str, pane: &str, now: i64) {
+    let unread = store::view(&store.conn, run).is_ok_and(|v| v.unread);
+    if unread && tmux::server().shown(pane) {
+        let _ = store::mark_seen(&store.conn, task, now);
     }
 }
 

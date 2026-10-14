@@ -16,6 +16,14 @@ use anyhow::{bail, Result};
 /// What separates the fields `panes` asks tmux for.
 const SEP: &str = "|~|";
 
+/// What tells whether a pane is on screen: `on_screen` reads it.
+const SHOWN: &str = "#{pane_active}#{window_active}#{session_attached}";
+
+/// The active pane of the active window of an attached session.
+fn on_screen(shown: &str) -> bool {
+    shown.starts_with("11") && shown.get(2..).is_some_and(|n| n != "0")
+}
+
 /// Shells, as tmux names a pane's command. With `$SHELL`, a pane running
 /// one of these is back at its prompt.
 const SHELLS: &[&str] = &[
@@ -127,7 +135,7 @@ impl Tmux {
             "#{@varde_owned}",
             "#{@varde_home}",
             "#{@varde_board}",
-            "#{pane_active}#{window_active}#{session_attached}",
+            SHOWN,
             "#{pane_tty}",
             "#{pane_current_path}",
             "#{pane_current_command}",
@@ -145,9 +153,7 @@ impl Tmux {
                     owned: !f.next()?.is_empty(),
                     home: f.next()?,
                     board: f.next()?,
-                    shown: f
-                        .next()
-                        .is_some_and(|s| s.starts_with("11") && s.get(2..).is_some_and(|n| n != "0")),
+                    shown: f.next().is_some_and(|s| on_screen(&s)),
                     tty: f.next()?,
                     path: f.next()?,
                     command: f.next()?,
@@ -238,6 +244,11 @@ impl Tmux {
             self.tmux(&["set-option", "-p", "-t", pane, "@varde_task", task])?;
         }
         Ok(())
+    }
+
+    /// Whether `pane` is on a client's screen, as `Pane::shown` says.
+    pub fn shown(&self, pane: &str) -> bool {
+        self.tmux(&["display", "-p", "-t", pane, SHOWN]).is_ok_and(|s| on_screen(&s))
     }
 
     /// Mark `pane` as running the board of the store `home`, or as no
