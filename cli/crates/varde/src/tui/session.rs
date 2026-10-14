@@ -9,7 +9,7 @@ use varde_core::board::{Board, Row};
 use varde_core::store::Store;
 use varde_core::task;
 
-use super::{App, Asked, Away, Mode, Start, BUSY, OPEN_GROUPS};
+use super::{App, Asked, Away, Field, Mode, Start, BUSY, OPEN_GROUPS};
 use crate::{now_ms, run, start, tmux};
 
 impl App<'_> {
@@ -123,10 +123,8 @@ impl App<'_> {
         };
         match start::prepare(store, id, opts, false)? {
             start::Outcome::Ask(start::Ask::Project { choices }) => {
-                if choices.is_empty() {
-                    anyhow::bail!("no project to offer: varde attach {} --project <dir>", task::short(id));
-                }
-                self.mode = Mode::Project(start, asked, choices, 0);
+                let dir = Field::new(&choices.first().map(|c| crate::tasks::tilde(c)).unwrap_or_default());
+                self.mode = Mode::Project(start, asked, choices, 0, dir);
                 Ok(None)
             }
             start::Outcome::Ask(start::Ask::Worktree) => {

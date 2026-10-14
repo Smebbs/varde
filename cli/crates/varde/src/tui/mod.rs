@@ -73,8 +73,9 @@ enum Mode {
     /// Asked whether a first run in tmux gets its own worktree, with the
     /// project picked for it.
     Worktree(Start, Asked, Option<PathBuf>),
-    /// Picking the project of a first run in tmux: the choices, and which.
-    Project(Start, Asked, Vec<String>, usize),
+    /// Picking the project of a first run: the choices, which one was
+    /// last stepped to, and the directory, one of them or typed.
+    Project(Start, Asked, Vec<String>, usize, Field),
 }
 
 /// The task a question about starting was asked of, and its state then.
@@ -708,7 +709,10 @@ impl<'a> App<'a> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let menu = self.menu.take();
         // What was said over a form or prompt lasts until the next key.
-        if matches!(self.mode, Mode::New(_) | Mode::Where(..) | Mode::Move(..) | Mode::Recall(_)) {
+        if matches!(
+            self.mode,
+            Mode::New(_) | Mode::Where(..) | Mode::Move(..) | Mode::Project(..) | Mode::Recall(_)
+        ) {
             self.message.clear();
         }
         match std::mem::replace(&mut self.mode, Mode::Normal) {
@@ -788,21 +792,27 @@ impl<'a> App<'a> {
                     self.mode = Mode::Move(task, dir);
                 }
             },
-            Mode::Project(start, asked, choices, i) => {
-                let n = choices.len();
-                match key.code {
-                    KeyCode::Char('j') | KeyCode::Down => {
-                        self.mode = Mode::Project(start, asked, choices, (i + 1) % n)
-                    }
-                    KeyCode::Char('k') | KeyCode::Up => {
-                        self.mode = Mode::Project(start, asked, choices, (i + n - 1) % n)
-                    }
-                    KeyCode::Enter => {
-                        return self.answer(asked, start, None, Some(PathBuf::from(&choices[i])))
-                    }
-                    _ => self.message = "cancelled".into(),
+            Mode::Project(start, asked, choices, i, mut dir) => match key.code {
+                KeyCode::Down | KeyCode::Up if !choices.is_empty() => {
+                    let n = choices.len();
+                    let i = if key.code == KeyCode::Down { (i + 1) % n } else { (i + n - 1) % n };
+                    dir.set(&draw::tilde(&choices[i]));
+                    self.mode = Mode::Project(start, asked, choices, i, dir);
                 }
-            }
+                KeyCode::Enter => {
+                    return self.answer(asked, start, None, Some(PathBuf::from(home_in(dir.text()))))
+                }
+                KeyCode::Esc => self.message = "cancelled".into(),
+                KeyCode::Char('g') if ctrl => self.message = "cancelled".into(),
+                KeyCode::Tab | KeyCode::BackTab => {
+                    self.menu = tab(&mut dir, menu, key.code == KeyCode::BackTab);
+                    self.mode = Mode::Project(start, asked, choices, i, dir);
+                }
+                _ => {
+                    dir.key(key, Words::Path);
+                    self.mode = Mode::Project(start, asked, choices, i, dir);
+                }
+            },
             Mode::Worktree(start, asked, project) => match key.code {
                 KeyCode::Char('y' | 'Y') | KeyCode::Enter => {
                     return self.answer(asked, start, Some(true), project)
@@ -1196,7 +1206,7 @@ impl<'a> App<'a> {
         match &mut self.mode {
             Mode::New(draft) => draft.paste(text),
             Mode::Recall(query) => query.insert(&text.split_whitespace().collect::<Vec<_>>().join(" ")),
-            Mode::Move(_, dir) | Mode::Where(_, dir) => dir.insert(text.trim()),
+            Mode::Move(_, dir) | Mode::Where(_, dir) | Mode::Project(.., dir) => dir.insert(text.trim()),
             Mode::Normal if self.detail && self.view.paste(text) => {}
             Mode::Normal => self.message = "pasted text goes into a prompt: n new task, / recall".into(),
             _ => {}
@@ -2341,9 +2351,42 @@ mod tests {
         let (_dir, paths) = temp_paths();
         let mut app = board(&paths, &["Where"]);
         let long = format!("/srv/{}/project", "deep/".repeat(30));
-        app.mode = Mode::Project(Start { want: Want::Continue, go: true }, asked("T"), vec![long], 0);
+        let dir = Field::new(&long);
+        app.mode = Mode::Project(Start { want: Want::Continue, go: true }, asked("T"), vec![long], 0, dir);
         let s = screen(&mut app, 80, 10);
-        assert!(s.contains("…") && s.contains("project  1/1  j/k other  RET start  Esc cancel"), "{s}");
+        assert!(s.contains("…") && s.contains("1/1  ↑/↓ other  Tab complete  RET start  Esc cancel"), "{s}");
+    }
+
+    #[test]
+    fn the_project_chooser_steps_through_its_choices_or_takes_a_typed_directory() {
+        let (_dir, paths) = temp_paths();
+        let mut app = board(&paths, &["Where"]);
+        let choices = vec!["/srv/a".to_string(), "/srv/b".to_string()];
+        let start = Start { want: Want::Continue, go: true };
+        app.mode = Mode::Project(start, asked("T"), choices, 0, Field::new("/srv/a"));
+        let dir = |app: &App| match &app.mode {
+            Mode::Project(.., i, d) => (*i, d.text().to_string()),
+            _ => panic!("not asking the project"),
+        };
+        key(&mut app, KeyCode::Down);
+        assert_eq!(dir(&app), (1, "/srv/b".into()));
+        key(&mut app, KeyCode::Up);
+        key(&mut app, KeyCode::Up);
+        assert_eq!(dir(&app), (1, "/srv/b".into()), "round to the last");
+        // j and k are typed, as in any path.
+        for c in "/jk".chars() {
+            key(&mut app, KeyCode::Char(c));
+        }
+        assert_eq!(dir(&app), (1, "/srv/b/jk".into()));
+        app.paste("/x ");
+        assert_eq!(dir(&app), (1, "/srv/b/jk/x".into()));
+        key(&mut app, KeyCode::Esc);
+        assert!(matches!(app.mode, Mode::Normal) && app.message == "cancelled");
+        // With none known, it asks for one to be typed.
+        app.mode = Mode::Project(start, asked("T"), vec![], 0, Field::new(""));
+        key(&mut app, KeyCode::Down);
+        assert_eq!(dir(&app), (0, "".into()));
+        assert!(!screen(&mut app, 80, 10).contains("other"));
     }
 
     #[test]
@@ -2707,10 +2750,20 @@ mod tests {
         let project = dir.path().join("p");
         std::fs::create_dir(&project).unwrap();
         let start = Start { want: Want::Continue, go: false };
-        app.mode = Mode::Project(start, asked(wanted), vec![project.display().to_string()], 0);
+        // A directory typed, not one of the choices, is the project.
+        let elsewhere = vec!["/srv/elsewhere".to_string()];
+        app.mode = Mode::Project(start, asked(wanted), elsewhere, 0, Field::new(""));
+        app.paste(&project.display().to_string());
         key(&mut app, KeyCode::Enter);
         assert!(app.message.contains("in a window of its own"), "{}", app.message);
         assert_eq!((runs(&paths, wanted), runs(&paths, other), runs(&paths, gone)), (1, 0, 0));
+        let in_: String = paths
+            .open(BUSY)
+            .unwrap()
+            .conn
+            .query_row("SELECT project FROM task WHERE id = ?1", [wanted], |r| r.get(0))
+            .unwrap();
+        assert_eq!(Path::new(&in_), project.canonicalize().unwrap());
     }
 
     #[test]
@@ -2817,8 +2870,13 @@ mod tests {
                 screen(&mut app, w, h);
             }
         }
-        app.mode =
-            Mode::Project(Start { want: Want::Continue, go: true }, asked("T"), vec!["/srv/p".into()], 0);
+        app.mode = Mode::Project(
+            Start { want: Want::Continue, go: true },
+            asked("T"),
+            vec!["/srv/p".into()],
+            0,
+            Field::new("/srv/p"),
+        );
         app.recall("one", true);
         for (w, h) in [(1, 1), (5, 3), (20, 6)] {
             screen(&mut app, w, h);

@@ -236,7 +236,10 @@ impl App<'_> {
         };
         // While a form or prompt is open, what was said about it, such as
         // why it was refused, shows over it until the next key.
-        let prompt = matches!(self.mode, Mode::New(_) | Mode::Where(..) | Mode::Move(..) | Mode::Recall(_));
+        let prompt = matches!(
+            self.mode,
+            Mode::New(_) | Mode::Where(..) | Mode::Move(..) | Mode::Project(..) | Mode::Recall(_)
+        );
         let one = |l: Line<'static>| -> Vec<Line<'static>> {
             let mut rows: Vec<Line<'static>> =
                 if prompt && !self.message.is_empty() { said().collect() } else { Vec::new() };
@@ -300,14 +303,18 @@ impl App<'_> {
                 );
                 ask(format!("{question}{keys}"))
             }
-            Mode::Project(_, _, choices, i) => {
-                let mut keys = vec![format!("  {}/{}", i + 1, choices.len()).dark_gray()];
-                keys.extend(key_spans(&[("j/k", "other"), ("RET", "start"), ("Esc", "cancel")]));
+            Mode::Project(_, _, choices, i, dir) => {
+                let mut keys = vec![];
+                if !choices.is_empty() {
+                    keys.push(format!("  {}/{}", i + 1, choices.len()).dark_gray());
+                    keys.extend(key_spans(&[("↑/↓", "other")]));
+                }
+                keys.extend(
+                    self.prompt_tail(&[("Tab", "complete"), ("RET", "start"), ("Esc", "cancel")], width),
+                );
                 let room = width.saturating_sub(23 + keys.iter().map(Span::width).sum::<usize>());
-                let mut line = vec![
-                    "Project for this task: ".bold(),
-                    Span::raw(left_clip(&tilde(&choices[*i]), room)).bold(),
-                ];
+                let mut line = vec!["Project for this task: ".bold()];
+                line.extend(dir.line_spans(room));
                 line.extend(keys);
                 one(Line::from(line))
             }
