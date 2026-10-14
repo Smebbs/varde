@@ -97,9 +97,10 @@ enum Cmd {
     },
     /// Start a task at a time, or again and again.
     ///
-    /// varde starts it as you would, a fresh session each time, in a tmux
-    /// window of its own; you go to it as to any session. A repeating task
-    /// starts from what its cairn says the last one learned. RULE is `at
+    /// varde starts it in the background, a fresh session each time with
+    /// no terminal; once it is done, starting the task carries it on as
+    /// any task, and while it works, starting it offers to take it over.
+    /// A repeating task starts from what its cairn says the last one learned. RULE is `at
     /// [DAY|DATE] [HH:MM]`, `every day|weekday|weekend|mon,thu [HH:MM]`,
     /// `every 30m|4h|2d|1w`, or an org timestamp such as `<2026-10-19 Mon
     /// 09:00 ++1w>`. A start missed while the machine was off or asleep
