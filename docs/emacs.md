@@ -78,6 +78,8 @@ It loops after the session expires.
 From: [[file:~/notes/auth.org::*Fix the SSO redirect][auth.org › Auth › Fix the SSO redirect]]
 ```
 
+`TAB` and `S-TAB` go between the fields (`C-j` and `C-k` too, in
+evil's normal state), and `M-TAB` on the Project picks its directory.
 `C-c C-c` creates the task and puts a link to it in the heading's text
 (the file is left unsaved); `C-c C-k` puts the draft away. The Project
 comes from a `VARDE_PROJECT` property, own or inherited, else the

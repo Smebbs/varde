@@ -29,9 +29,14 @@ follow [Semantic Versioning](https://semver.org).
   `message-mode`: a `Title:` and a `Project:` field above a line, the
   context below it, where the first line used to be the title. An
   empty Title says varde names the task from the context; `RET` goes to
-  the next field, `TAB` on the Project picks its directory, and evil's
-  line edits keep to a field. `C-u C-c C-c` no longer asks for another
-  project: change the Project field instead.
+  the next field, `TAB` and `S-TAB` go between them (`C-j` and `C-k`
+  in evil's normal state), as in Customize's forms, `M-TAB` on the
+  Project picks its directory, and evil's line edits keep to a field.
+  `C-u C-c C-c` no longer asks for another project: change the Project
+  field instead.
+- The board's new-task form: Tab goes to the next field, `When:`
+  among them, round to the title, and Shift-Tab back, as in
+  org-varde's form. Tab went between the title and the context only.
 
 ### Fixed
 

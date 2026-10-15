@@ -686,7 +686,11 @@ Asked for, offering the project of the task at point."
   "<remap> <save-buffer>" #'org-varde-new-create
   "C-c C-k" #'org-varde-new-cancel
   "RET" #'org-varde-new-return
+  ;; As Customize's and eww's forms: TAB and S-TAB go from field to
+  ;; field, and M-TAB completes in one.
   "TAB" #'org-varde-new-tab
+  "<backtab>" #'org-varde-new-previous-field
+  "C-M-i" #'org-varde-new-complete
   ;; evil's :w, :wq, :x and ZZ create; :q and ZQ put it away.
   "<remap> <evil-write>" #'org-varde-new-create
   "<remap> <evil-save-and-close>" #'org-varde-new-create
@@ -696,14 +700,26 @@ Asked for, offering the project of the task at point."
 (define-derived-mode org-varde-new-mode text-mode "varde new"
   "Write a new task, or change one, in a form, as `message-mode' writes
 a mail: its Title, which varde makes from the context when left empty;
-its Project, which \\[org-varde-new-tab] picks; When varde starts it,
+its Project, which \\[org-varde-new-complete] picks; When varde starts it,
 if at all (`at mon 09:00', `every weekday 09:00', `every 4h', an
 org timestamp); and below the line, the context for the agent.
-\\[org-varde-new-return] goes from a field to the next.  \\[org-varde-new-create] creates it, and
+\\[org-varde-new-tab] and \\[org-varde-new-return] go from a field to the next, and \\[org-varde-new-previous-field] back; under
+evil, C-j and C-k too.  \\[org-varde-new-create] creates it, and
 \\[org-varde-new-cancel] puts it away, for `n' on the board to bring
 back; cleared first, it is dropped."
   (add-hook 'after-change-functions #'org-varde--form-hints nil t)
-  (add-hook 'kill-buffer-query-functions #'org-varde--keep-edit-p nil t))
+  (add-hook 'kill-buffer-query-functions #'org-varde--keep-edit-p nil t)
+  ;; Normal state's own TAB would win, and C-j and C-k go between
+  ;; fields as between evil-collection's sections.  An empty field's
+  ;; place is the end of its line: normal state stays there, not on
+  ;; the field's name.
+  (setq-local evil-move-beyond-eol t)
+  (when (fboundp 'evil-define-key*)
+    (evil-define-key* 'normal org-varde-new-mode-map
+                      (kbd "TAB") #'org-varde-new-tab
+                      (kbd "<backtab>") #'org-varde-new-previous-field
+                      (kbd "C-j") #'org-varde-new-next-field
+                      (kbd "C-k") #'org-varde-new-previous-field)))
 
 (defface org-varde-form-label '((t :inherit bold))
   "A field's name in the form that writes a task."
@@ -796,7 +812,7 @@ below its line."
       (save-excursion (goto-char (car b)) (insert "\n"))))
   (pcase-dolist (`(,field . ,hint)
                  `((title . ,(unless org-varde--new-task "left empty, varde names it from the context"))
-                   (project . "asked for on create, or TAB picks it")
+                   (project . "asked for on create, or M-TAB picks it")
                    (when . "not scheduled: at mon 09:00, every weekday 09:00, every 4h")))
     (let ((b (org-varde--form-bounds field))
           (o (alist-get field org-varde--form-hints)))
@@ -820,19 +836,36 @@ below its line."
 (defun org-varde-new-return ()
   "In a field above the line, go to the next; in the context, a new line."
   (interactive)
-  (let ((field (org-varde--form-at)))
-    (if (eq field 'body)
-        (call-interactively #'newline)
-      (org-varde--form-goto (cadr (memq field (org-varde--form-fields)))))))
+  (if (eq (org-varde--form-at) 'body)
+      (call-interactively #'newline)
+    (org-varde-new-next-field)))
 
 (defun org-varde-new-tab ()
-  "On the Project, pick its directory; on the Title, go to the next
-field; in the context, indent."
+  "In a field above the line, go to the next; in the context, indent."
   (interactive)
-  (pcase (org-varde--form-at)
-    ('project (org-varde-new-pick-project))
-    ('body (call-interactively #'indent-for-tab-command))
-    (_ (org-varde-new-return))))
+  (if (eq (org-varde--form-at) 'body)
+      (call-interactively #'indent-for-tab-command)
+    (org-varde-new-next-field)))
+
+(defun org-varde-new-next-field (&optional n)
+  "Go to the next field, from the context round to the Title; N back
+when negative."
+  (interactive)
+  (let* ((fields (org-varde--form-fields))
+         (i (seq-position fields (org-varde--form-at))))
+    (org-varde--form-goto (nth (mod (+ i (or n 1)) (length fields)) fields))))
+
+(defun org-varde-new-previous-field ()
+  "Go to the field before, from the Title round to the context."
+  (interactive)
+  (org-varde-new-next-field -1))
+
+(defun org-varde-new-complete ()
+  "On the Project, pick its directory; elsewhere, complete at point."
+  (interactive)
+  (if (eq (org-varde--form-at) 'project)
+      (org-varde-new-pick-project)
+    (completion-at-point)))
 
 (defun org-varde-new-pick-project ()
   "Pick the directory of the task's project, for its Project field.

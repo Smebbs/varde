@@ -3148,7 +3148,7 @@ mod tests {
         let s = screen(&mut app, 100, 24);
         assert!(s.contains("Edit task") && s.contains("RET save"), "{s}");
         app.paste(" more");
-        key(&mut app, KeyCode::Tab);
+        key(&mut app, KeyCode::BackTab);
         key(&mut app, KeyCode::Enter);
         app.paste("New line.");
         app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
@@ -3167,7 +3167,7 @@ mod tests {
         assert_eq!(text("prompt_title").as_deref(), Some("Old context"), "the model may name it");
         key(&mut app, KeyCode::Char('e'));
         app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
-        key(&mut app, KeyCode::Tab);
+        key(&mut app, KeyCode::BackTab);
         for _ in 0..3 {
             app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         }
@@ -3239,7 +3239,7 @@ mod tests {
 
         // Only a context: the title is cut from it, as from a first prompt.
         key(&mut app, KeyCode::Char('n'));
-        key(&mut app, KeyCode::Tab);
+        key(&mut app, KeyCode::BackTab);
         app.paste("why does the cache key ignore the region in the locale cache");
         app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
         key(&mut app, KeyCode::Enter);

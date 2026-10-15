@@ -186,8 +186,9 @@ shows them all.
 | C-l | Redraw and read the board again. |
 | `q` / Esc | Close the pane, else quit (`q` only, unless configured). |
 
-**The new-task form.** `n` opens it on the title; Tab moves to the
-context. RET on the title, or C-s, creates the task. With no title, a
+**The new-task form.** `n` opens it on the title; Tab and Shift-Tab
+move between the title, `When:` and the context, as in org-varde's
+form. RET on the title, or C-s, creates the task. With no title, a
 model names it from the context. C-x C-e writes it in `$EDITOR`. Esc
 puts the draft away, and the next `n` brings it back. Prompts edit text
 as a shell does (C-w, C-u, C-k, Alt-b/f, C-y).

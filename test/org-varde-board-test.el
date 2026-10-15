@@ -412,7 +412,8 @@ searches FROM and TO, and return the text with its link."
         (should (equal (current-kill 0) "varde:new111"))))))
 
 ;; The form, as a mail is written: names that cannot be changed, RET
-;; from field to field, and the Project's directory picked with TAB.
+;; and TAB from field to field, S-TAB back, and the Project's directory
+;; picked with M-TAB.
 (ert-deftest org-varde-new-is-a-form-of-fields ()
   (org-varde-test-with-varde
     (org-varde-test-reply "new" "{\"v\":1,\"id\":\"T0000000000000000000NEW111\",\"short\":\"new111\"}")
@@ -426,14 +427,25 @@ searches FROM and TO, and return the text with its link."
         (insert "Fix it")
         (org-varde-new-return)
         (should (eq (org-varde--form-at) 'project))
-        ;; Empty, it is asked for on create; TAB picks it now, offering
+        ;; Empty, it is asked for on create; M-TAB picks it now, offering
         ;; the project offered.
         (should (alist-get 'project org-varde--form-hints))
         (cl-letf (((symbol-function 'read-directory-name)
                    (lambda (_prompt dir &rest _) (should (equal dir "/tmp/offered/")) "/tmp/other/")))
-          (org-varde-new-tab))
+          (execute-kbd-macro (kbd "C-M-i")))
         (should (equal (org-varde--form-value 'project) "/tmp/other"))
         (should-not (alist-get 'project org-varde--form-hints))
+        ;; TAB goes on from it, never picks.
+        (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) (error "Asked"))))
+          (execute-kbd-macro (kbd "TAB")))
+        (should (eq (org-varde--form-at) 'when))
+        (execute-kbd-macro (kbd "<backtab> <backtab>"))
+        (should (eq (org-varde--form-at) 'title))
+        ;; Round to the context, and back.
+        (execute-kbd-macro (kbd "<backtab>"))
+        (should (eq (org-varde--form-at) 'body))
+        (execute-kbd-macro (kbd "<backtab> <backtab>"))
+        (should (eq (org-varde--form-at) 'project))
         (org-varde-new-return)
         ;; When varde starts it: empty, never; the hint says how.
         (should (eq (org-varde--form-at) 'when))
@@ -459,7 +471,7 @@ searches FROM and TO, and return the text with its link."
 
 (ert-deftest org-varde-new-form-under-evil ()
   "Run with evil on the load path to check this; skipped otherwise.
-Evil's line edits keep to a field."
+Evil's line edits keep to a field, and C-j and C-k go between them."
   (skip-unless (require 'evil nil t))
   (evil-mode 1)
   (unwind-protect
@@ -479,6 +491,16 @@ Evil's line edits keep to a field."
             ;; Its line is still there to write below.
             (execute-kbd-macro (kbd "G o More <escape>"))
             (should (equal (org-varde--new-text) '("New title" . "More")))
+            ;; C-j and C-k go between fields, and TAB, which is
+            ;; normal state's own, too.
+            (execute-kbd-macro (kbd "<escape> C-k"))
+            (should (eq (org-varde--form-at) 'when))
+            (execute-kbd-macro (kbd "C-k <backtab>"))
+            (should (eq (org-varde--form-at) 'title))
+            (execute-kbd-macro (kbd "TAB C-j"))
+            (should (eq (org-varde--form-at) 'when))
+            (execute-kbd-macro (kbd "C-j"))
+            (should (eq (org-varde--form-at) 'body))
             (set-buffer-modified-p nil))))
     (evil-mode -1)))
 

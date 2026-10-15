@@ -80,8 +80,8 @@ impl Draft {
         Some(draft)
     }
 
-    /// Tab moves between title and body; Down and Up go through When,
-    /// the line between them.
+    /// Tab goes to the next field, round from the body to the title, and
+    /// Shift-Tab back, as org-varde's form; Down and Up go through them too.
     /// Enter creates from the title or the when and starts a new line in the body;
     /// C-s creates from either. Esc and C-g put the form away, and C-x C-e
     /// or Alt-e opens the draft in `$EDITOR`. The rest edits the text as
@@ -100,8 +100,8 @@ impl Draft {
             KeyCode::Char('e') if alt => return Edit::Editor,
             KeyCode::Enter if !self.in_body => return Edit::Create,
             KeyCode::Enter => self.body.insert("\n"),
-            // Tab goes between title and body, as before there was a When.
-            KeyCode::Tab | KeyCode::BackTab => self.go(if self.in_body { 0 } else { 2 }),
+            KeyCode::Tab => self.go((self.at() + 1) % 3),
+            KeyCode::BackTab => self.go((self.at() + 2) % 3),
             KeyCode::Down if !self.in_body => self.go(self.at() + 1),
             KeyCode::Up if self.in_when || (self.in_body && self.body.on_first_line()) => {
                 self.go(self.at() - 1)
@@ -222,7 +222,7 @@ pub(super) fn draw_draft(f: &mut Frame, draft: &Draft, area: Rect) {
     f.render_widget(Paragraph::new("─".repeat(width).dark_gray()), rule);
 
     if body.is_empty() && !draft.in_body {
-        f.render_widget(Paragraph::new("Tab to add context for the agent".dark_gray()), body_area);
+        f.render_widget(Paragraph::new("context for the agent".dark_gray()), body_area);
         return;
     }
     // The cursor's row, as wrapped, kept in view.
@@ -252,7 +252,7 @@ mod tests {
     fn a_draft_takes_a_title_and_a_multiline_body() {
         let mut d = Draft::default();
         typed(&mut d, "Short title");
-        press(&mut d, KeyCode::Tab);
+        press(&mut d, KeyCode::BackTab);
         typed(&mut d, "line one");
         assert!(matches!(press(&mut d, KeyCode::Enter), Edit::Typing));
         typed(&mut d, "line two");
@@ -269,8 +269,15 @@ mod tests {
         typed(&mut d, "t");
         assert!(matches!(press(&mut d, KeyCode::Enter), Edit::Create));
         press(&mut d, KeyCode::Tab);
+        assert!(d.in_when);
         press(&mut d, KeyCode::Tab);
-        assert!(matches!(press(&mut d, KeyCode::Enter), Edit::Create), "Tab goes back to the title");
+        assert!(d.in_body);
+        press(&mut d, KeyCode::Tab);
+        assert!(matches!(press(&mut d, KeyCode::Enter), Edit::Create), "Tab goes round to the title");
+        press(&mut d, KeyCode::BackTab);
+        assert!(d.in_body, "Shift-Tab goes back, round to the body");
+        press(&mut d, KeyCode::BackTab);
+        assert!(d.in_when);
         assert!(matches!(press(&mut d, KeyCode::Esc), Edit::Cancel));
     }
 
@@ -283,7 +290,7 @@ mod tests {
         assert_eq!(d.title.text(), "Fix the  ");
         d.key(KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT));
         assert_eq!(d.title.text(), "Fix ");
-        press(&mut d, KeyCode::Tab);
+        press(&mut d, KeyCode::BackTab);
         typed(&mut d, "one");
         press(&mut d, KeyCode::Enter);
         typed(&mut d, "two words");
@@ -339,8 +346,8 @@ mod tests {
         typed(&mut long, "A title far longer than this narrow box ends here");
         let s = screen(&long);
         assert!(s.contains("Title: …") && s.contains("box ends here"), "{s}");
-        assert!(s.contains("Tab to add context"), "{s}");
-        press(&mut d, KeyCode::Tab);
+        assert!(s.contains("context for the agent"), "{s}");
+        press(&mut d, KeyCode::BackTab);
         for i in 0..15 {
             typed(&mut d, &format!("line {i}"));
             press(&mut d, KeyCode::Enter);

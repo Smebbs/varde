@@ -255,7 +255,7 @@ impl App<'_> {
                         (true, Some(_)) => ("C-s", "save"),
                         (true, None) => ("C-s", "create"),
                     },
-                    ("Tab", "title/context"),
+                    ("Tab", "next field"),
                     ("Esc", "later"),
                     ("C-x C-e", "$EDITOR"),
                 ])[1..]
