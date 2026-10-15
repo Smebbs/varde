@@ -4,6 +4,16 @@ Notable changes to varde and org-varde. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions
 follow [Semantic Versioning](https://semver.org).
 
+## Unreleased
+
+### Added
+
+- `agents.<agent>.background` in the config: arguments added only to a
+  session a schedule starts, e.g. `["--permission-mode", "auto"]` for
+  Claude, so a scheduled task can use tools your settings do not allow
+  without anyone there to approve them. Interactive sessions are
+  unchanged.
+
 ## 1.2.0 - 2026-10-15
 
 ### Added

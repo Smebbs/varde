@@ -113,6 +113,11 @@ fn a_due_task_runs_in_the_background_and_comes_round_again_fresh() {
 #[test]
 fn a_session_at_work_in_the_background_is_taken_over() {
     let e = Env::with_repo(AGENT);
+    std::fs::write(
+        e.path("config.toml"),
+        "[agents.claude]\nbackground = [\"--permission-mode\", \"auto\"]\n",
+    )
+    .unwrap();
     let t = e.new_task("Triage mentions");
     e.ok(&["schedule", &t, "every", "day", "06:00", "--worktree", "never"]);
     due_now(&e, &t);
@@ -131,6 +136,11 @@ fn a_session_at_work_in_the_background_is_taken_over() {
         (Some("resume"), runs[0]["id"].as_str())
     );
     assert!(runs[1].get("background").is_none());
+    // The user's arguments for a background session, and only for one.
+    e.ok(&["run", plan["run"].as_str().unwrap()]);
+    let argv = e.argv();
+    assert!(argv[0].starts_with("--permission-mode auto -p "), "{argv:?}");
+    assert!(!argv[1].contains("--permission-mode"), "{argv:?}");
 }
 
 #[test]

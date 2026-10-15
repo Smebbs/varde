@@ -49,6 +49,10 @@ pub struct Agent {
     /// The program and leading arguments varde runs in place of the
     /// agent's own name, e.g. a wrapper script.
     pub command: Option<Vec<String>>,
+    /// Arguments added to a session a schedule starts in the background,
+    /// e.g. `["--permission-mode", "auto"]`: nobody is there to approve a
+    /// tool, and varde widens nothing on its own.
+    pub background: Vec<String>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -255,6 +259,15 @@ impl Config {
         argv
     }
 
+    /// `argv`, a background launch's, with the user's arguments for
+    /// `agent` after its program.
+    pub fn background(&self, agent: &str, mut argv: Vec<String>) -> Vec<String> {
+        if let (Some(a), false) = (self.agents.get(agent), argv.is_empty()) {
+            argv.splice(1..1, a.background.iter().cloned());
+        }
+        argv
+    }
+
     /// Where `repo`'s worktrees go, without `..`: a session's directory is
     /// matched against it, and hooks report that one resolved.
     pub fn worktree_dir(&self, repo: &Path) -> PathBuf {
@@ -329,6 +342,7 @@ mod tests {
             agent = "pi"
             [agents.claude]
             command = ["claude-wrapper", "--x"]
+            background = ["--permission-mode", "auto"]
             [memory]
             enabled = false
             [worktree]
@@ -344,6 +358,9 @@ mod tests {
         std::env::remove_var("VARDE_CLAUDE");
         assert_eq!(c.launch("claude", vec!["claude".into(), "-n".into()]), ["claude-wrapper", "--x", "-n"]);
         assert_eq!(c.launch("pi", vec!["pi".into()]), ["pi"]);
+        let bg = c.background("claude", vec!["claude".into(), "-p".into()]);
+        assert_eq!(bg, ["claude", "--permission-mode", "auto", "-p"]);
+        assert_eq!(c.background("pi", vec!["pi".into(), "-p".into()]), ["pi", "-p"]);
         assert_eq!(c.worktree.default, Some(Policy::Always));
         assert_eq!(c.board.scope, Scope::All);
         assert_eq!(c.worktree_dir(Path::new("/src/app")), Path::new("/src/app.worktrees"));

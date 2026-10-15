@@ -132,7 +132,9 @@ it is done it waits in Needs you, and RET (or `varde attach`) carries
 it on in your terminal, as any task. RET while it still works asks
 whether to take it over: it stops there and carries on with you. Nobody
 is there to approve a tool your settings do not allow, so such a tool
-is refused, and the session says what it could not do. RULE is one of:
+is refused, and the session says what it could not do. To let it decide
+for itself, give the agent the arguments for that in `background` (see
+Configure), e.g. Claude's `["--permission-mode", "auto"]`. RULE is one of:
 
 - `at mon 09:00`, `at 2026-11-02 07:00`, `at tomorrow`: once.
 - `every weekday 09:00`, `every day 06:00`, `every mon,thu`,
@@ -297,6 +299,7 @@ agent = "claude"                  # or "pi"
 
 [agents.claude]
 command = ["claude"]              # e.g. a wrapper that ends in: exec claude "$@"
+background = []                   # added to a scheduled session, e.g. ["--permission-mode", "auto"]
 
 [memory]
 enabled = true                    # false: no model calls

@@ -69,8 +69,9 @@ pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
     let (argv, env) = adapter.launch(how);
     // Started by a schedule, with nobody at it: to the end of its reply,
     // its output kept in a log beside the store.
-    let argv = if background { adapter.background(argv) } else { argv };
-    let argv = crate::config::get().launch(&agent, argv);
+    let config = crate::config::get();
+    let argv = if background { config.background(&agent, adapter.background(argv)) } else { argv };
+    let argv = config.launch(&agent, argv);
     let log = if background { Some(background_log(paths, run_id)?) } else { None };
     crate::job::sync_memory(paths);
 

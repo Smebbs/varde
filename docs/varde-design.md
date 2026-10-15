@@ -582,7 +582,11 @@ derived as any run's, and the guidance tells it nobody is watching.
   is kept. The boards, Emacs and `varde attach` ask y/n.
 - **Permissions.** Print mode refuses a tool your settings do not
   allow, since nobody is there to approve it; the session is told so,
-  and says what it could not do. varde widens nothing.
+  and says what it could not do. varde widens nothing on its own: the
+  user's `agents.<agent>.background` arguments go on a background
+  launch only, e.g. Claude's `--permission-mode auto`, so a schedule
+  runs as far as the user chose and an interactive session is left as
+  it was.
 
 ## 7. Memory
 
