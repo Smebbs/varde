@@ -53,6 +53,7 @@ pub fn create(
          VALUES (?1,?2,?3,?4,?5,?6,?7)",
         params![id, title, prompt_title, body, project, external, now],
     )?;
+    crate::memory::reindex(&store.conn, &id)?;
     Ok(id)
 }
 
@@ -85,6 +86,7 @@ pub fn defer(
          VALUES (?1,?2,?2,?3,?4,1,?5,?6)",
         params![id, title, body, project, origin, now],
     )?;
+    crate::memory::reindex(&store.conn, &id)?;
     Ok(id)
 }
 

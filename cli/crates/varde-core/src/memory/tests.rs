@@ -351,6 +351,31 @@ fn recall_finds_a_task_by_its_new_title() {
 }
 
 #[test]
+fn recall_finds_a_task_with_no_memory_by_its_title_last() {
+    let (_d, s) = store();
+    let bare = crate::task::create(&s, "Flaky websocket reconnect", None, Some("/p"), None, 1).unwrap();
+    task_with_run(&s, "T2", "Websocket server", "/p");
+    put_cairn(&s.conn, "T2", &cairn_of("Done", "The websocket reconnect backs off"), 0, "job", None, 1)
+        .unwrap();
+    assert_eq!(found(&s, "websocket reconnect", Some("/p"), None), ["T2".to_string(), bare.clone()]);
+    // A bare title is not related work.
+    let asker = Asker { source: "preamble", run: Some("R9") };
+    let related = related(&s.conn, "flaky websocket reconnect", Some("/p"), None, 3, asker, 2).unwrap();
+    assert!(related.hits.iter().all(|h| h.task != bare));
+}
+
+#[test]
+fn a_task_a_hook_made_is_found_by_its_title_once_titles_are_indexed() {
+    let (_d, s) = store();
+    // As the first prompt makes it: the hook does not write the index.
+    task_with_run(&s, "T1", "Flaky websocket reconnect", "/p");
+    assert!(found(&s, "websocket", None, None).is_empty());
+    assert_eq!(index_titles(&s.conn).unwrap(), 1);
+    assert_eq!(index_titles(&s.conn).unwrap(), 0);
+    assert_eq!(found(&s, "websocket", None, None), ["T1"]);
+}
+
+#[test]
 fn recall_finds_by_content_within_a_project_else_everywhere() {
     let (_d, s) = store();
     task_with_run(&s, "T1", "Fix login", "/p");

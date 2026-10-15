@@ -245,4 +245,11 @@ CREATE INDEX schedule_due ON schedule(next_due);
 -- A run its schedule started in the background, with no terminal.
 ALTER TABLE run ADD COLUMN background INTEGER NOT NULL DEFAULT 0;
 "#,
+    // 5: recall finds a task by its title before it has any memory, as
+    // `memory::index_titles` indexes it.
+    r#"
+INSERT INTO memory_fts (task, kind, ref, title)
+SELECT id, 'title', '', title FROM task
+WHERE id NOT IN (SELECT c7 FROM memory_fts_content WHERE c7 IS NOT NULL);
+"#,
 ];

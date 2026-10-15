@@ -140,6 +140,8 @@ pub fn run(paths: &Paths) -> Result<()> {
     for id in memory::requeue_stuck(&store.conn, now_ms())? {
         job::spawn(&id)?;
     }
+    // Tasks a hook made are found by their titles from here on.
+    let _ = memory::index_titles(&store.conn);
     // Tasks a hook made, titled from their first prompt, wait for a name.
     let _ = crate::naming::sweep(&store);
     // Whether what cairns say about code still names code that exists.

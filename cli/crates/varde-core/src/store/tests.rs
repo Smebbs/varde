@@ -638,3 +638,25 @@ fn a_store_from_before_naming_names_only_its_open_tasks() {
     };
     assert_eq!((named("OPEN"), named("DONE"), named("TYPED")), (None, Some(0), None));
 }
+
+#[test]
+fn a_store_from_before_bare_titles_indexes_them_once() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("varde.db");
+    let c = Connection::open(&path).unwrap();
+    for sql in &MIGRATIONS[..4] {
+        c.execute_batch(sql).unwrap();
+    }
+    c.pragma_update(None, "user_version", 4).unwrap();
+    c.execute_batch(
+        "INSERT INTO task (id, title, created) VALUES ('BARE', 'Flaky websocket', 1), ('KEPT', 'Websocket', 1);
+         INSERT INTO memory_fts (task, kind, ref, title) VALUES ('KEPT', 'title', '', 'Websocket');",
+    )
+    .unwrap();
+    drop(c);
+    let s = Store::open(&path, Duration::from_millis(200)).unwrap();
+    let rows = |id: &str| -> i64 {
+        s.conn.query_row("SELECT count(*) FROM memory_fts WHERE task = ?1", [id], |r| r.get(0)).unwrap()
+    };
+    assert_eq!((rows("BARE"), rows("KEPT")), (1, 1));
+}

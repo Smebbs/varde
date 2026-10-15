@@ -11,8 +11,9 @@ use super::Owner;
 use crate::store::Store;
 
 /// Rebuild what recall searches for one task: its title, its bullets,
-/// current and former, and its notes. A task with none of them is not
-/// searched at all, so a bare title never shows up as earlier work.
+/// current and former, and its notes. A task with only a title is found
+/// by it, after every task that matched more, and is never offered as
+/// related work.
 pub fn reindex(conn: &Connection, task: &str) -> Result<()> {
     delete_rows(conn, "c7 = ?1", task)?;
     let mut rows = indexed_items(conn, Owner::Task(task))?;
@@ -23,9 +24,6 @@ pub fn reindex(conn: &Connection, task: &str) -> Result<()> {
         .query_map([task], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
         .collect::<Result<_, _>>()?;
     rows.extend(notes);
-    if rows.is_empty() {
-        return Ok(());
-    }
     let title: String = conn.query_row("SELECT title FROM task WHERE id = ?1", [task], |r| r.get(0))?;
     rows.push(("title".into(), String::new(), title));
     let mut insert = conn.prepare_cached(
@@ -47,6 +45,17 @@ pub fn reindex(conn: &Connection, task: &str) -> Result<()> {
         ])?;
     }
     Ok(())
+}
+
+/// Index the title of every task not yet indexed: those a hook made,
+/// which does not write the index on the way in. Returns how many.
+pub fn index_titles(conn: &Connection) -> Result<usize> {
+    Ok(conn.execute(
+        "INSERT INTO memory_fts (task, kind, ref, title)
+         SELECT id, 'title', '', title FROM task
+         WHERE id NOT IN (SELECT c7 FROM memory_fts_content WHERE c7 IS NOT NULL)",
+        [],
+    )?)
 }
 
 /// Rebuild what recall searches for a project's cairn: its bullets,

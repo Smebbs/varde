@@ -905,8 +905,12 @@ first, in any project.
 so and shows the best hits from every project; `--all` searches
 everywhere. Each hit is the task's best bullet or note that matched,
 not its title, with the task's state and whether the bullet is stale;
-title-only hits come last. Every recall is logged with who asked
-(`agent`, `user`, `hook`), its run, and its hits by kind and id.
+title-only hits come last. Every task's title is searched, one with no
+memory yet too, so a task already filed is found before a second is
+made. `varde new` indexes it as it makes the task; one a hook made is
+indexed by the next `varde git-refresh` (§6.3), since a hook writes no
+index. Every recall is logged with who asked (`agent`, `user`,
+`hook`), its run, and its hits by kind and id.
 
 **Related work,** offered unasked by the hooks (§7.3), needs more than
 a score. A BM25 score depends on the index's size (under 1 in a toy
