@@ -501,11 +501,37 @@ searches FROM and TO, and return the text with its link."
         (set-buffer-modified-p nil)
         (kill-buffer)))))
 
+;; A change made narrowed, as evil-org's o makes it, leaves the other
+;; fields' hints.
+(ert-deftest org-varde-new-hints-survive-a-narrowed-change ()
+  (org-varde-test-with-varde
+    (save-window-excursion
+      (org-varde--new nil nil)
+      (with-current-buffer "*varde new*"
+        (let ((b (org-varde--form-bounds 'project)))
+          (save-restriction
+            (narrow-to-region (car b) (cdr b))
+            (goto-char (point-max))
+            (insert "\n")))
+        (should (equal (mapcar #'car org-varde--form-hints) '(when project title)))
+        (set-buffer-modified-p nil)
+        (kill-buffer)))))
+
+(defvar org-varde-test-org-minor-mode-map (make-sparse-keymap))
+(define-minor-mode org-varde-test-org-minor-mode
+  "Stands in for evil-org-mode, whose state maps bind C-j, C-k, RET and TAB.")
+
 (ert-deftest org-varde-new-form-under-evil ()
   "Run with evil on the load path to check this; skipped otherwise.
-Evil's line edits keep to a field, and C-j and C-k go between them."
+Evil's line edits keep to a field, and C-j and C-k go between them,
+from the first key: the form opens in insert state."
   (skip-unless (require 'evil nil t))
   (evil-mode 1)
+  (dolist (state '(normal insert))
+    (evil-define-key* state org-varde-test-org-minor-mode-map
+                      (kbd "C-j") #'ignore (kbd "C-k") #'ignore
+                      (kbd "RET") #'newline (kbd "TAB") #'ignore))
+  (add-hook 'org-mode-hook #'org-varde-test-org-minor-mode)
   (unwind-protect
       (org-varde-test-with-varde
         (save-window-excursion
@@ -514,6 +540,20 @@ Evil's line edits keep to a field, and C-j and C-k go between them."
             ;; Keys go to the selected window's buffer.
             (set-window-dedicated-p nil nil)
             (switch-to-buffer (current-buffer) nil t)
+            (should org-varde-test-org-minor-mode)
+            (should (evil-insert-state-p))
+            (execute-kbd-macro (kbd "C-j"))
+            (should (eq (org-varde--form-at) 'project))
+            (execute-kbd-macro (kbd "C-k RET"))
+            (should (eq (org-varde--form-at) 'project))
+            ;; In the context, RET and TAB are the maps' below.
+            (execute-kbd-macro (kbd "C-k C-k"))
+            (should (eq (org-varde--form-at) 'body))
+            (let ((size (buffer-size)))
+              (execute-kbd-macro (kbd "RET"))
+              (should (= (buffer-size) (1+ size))))
+            (delete-char -1)
+            (org-varde--form-goto 'title)
             (evil-normal-state)
             ;; cc changes the title, o opens a line that stays in it,
             ;; and dd takes the context's last line.
@@ -534,6 +574,7 @@ Evil's line edits keep to a field, and C-j and C-k go between them."
             (execute-kbd-macro (kbd "C-j"))
             (should (eq (org-varde--form-at) 'body))
             (set-buffer-modified-p nil))))
+    (remove-hook 'org-mode-hook #'org-varde-test-org-minor-mode)
     (evil-mode -1)))
 
 (ert-deftest org-varde-board-create-with-only-context-lets-varde-make-the-title ()

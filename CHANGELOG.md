@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org).
 
 ## Unreleased
 
+### Fixed
+
+- The new-task form under evil-org (as in Doom): C-j and C-k go between
+  fields from the first key, in insert state where the form opens, and
+  RET and TAB above the line too; evil-org's own bindings had shadowed
+  them, so C-j moved by org element instead. In the context they are
+  still org's.
+- The form's grey hints no longer vanish from the other fields after a
+  change made narrowed, such as evil-org's `o`.
+
 ## 1.3.0 - 2026-10-16
 
 ### Added

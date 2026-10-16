@@ -746,6 +746,24 @@ Asked for, offering the project of the task at point."
   "<remap> <evil-save-modified-and-close>" #'org-varde-new-create
   "<remap> <evil-quit>" #'org-varde-new-cancel)
 
+(defun org-varde--in-field (command)
+  "COMMAND as a key's binding above the line; in the context, the key
+is left to the maps below, as if it were not bound here."
+  `(menu-item "" ,command :filter ,(lambda (c) (unless (eq (org-varde--form-at) 'body) c))))
+
+(defvar-keymap org-varde-new-evil-map
+  :doc "The form's keys in evil's normal and insert states.
+They are the buffer's own, so evil-org's, such as C-j and C-k in
+insert state, do not shadow them."
+  "C-j" #'org-varde-new-next-field
+  "C-k" #'org-varde-new-previous-field
+  "<backtab>" #'org-varde-new-previous-field
+  "TAB" (org-varde--in-field #'org-varde-new-next-field)
+  "RET" (org-varde--in-field #'org-varde-new-next-field))
+
+(defvar evil-normal-state-local-map)
+(defvar evil-insert-state-local-map)
+
 (define-derived-mode org-varde-new-mode org-mode "varde new"
   "Write a new task, or change one, in a form, as `message-mode' writes
 a mail: its Title, which varde makes from the context when left empty;
@@ -759,17 +777,14 @@ evil, C-j and C-k too.  \\[org-varde-new-create] creates it, and
 back; cleared first, it is dropped."
   (add-hook 'after-change-functions #'org-varde--form-hints nil t)
   (add-hook 'kill-buffer-query-functions #'org-varde--keep-edit-p nil t)
-  ;; Normal state's own TAB would win, and C-j and C-k go between
-  ;; fields as between evil-collection's sections.  An empty field's
-  ;; place is the end of its line: normal state stays there, not on
-  ;; the field's name.
-  (setq-local evil-move-beyond-eol t)
-  (when (fboundp 'evil-define-key*)
-    (evil-define-key* 'normal org-varde-new-mode-map
-                      (kbd "TAB") #'org-varde-new-tab
-                      (kbd "<backtab>") #'org-varde-new-previous-field
-                      (kbd "C-j") #'org-varde-new-next-field
-                      (kbd "C-k") #'org-varde-new-previous-field)))
+  ;; C-j and C-k go between fields as between evil-collection's
+  ;; sections, in insert state too, where the form opens.  The
+  ;; buffer's own state maps, as minor modes' state maps, evil-org's,
+  ;; would win over the mode's.  An empty field's place is the end of
+  ;; its line: normal state stays there, not on the field's name.
+  (setq-local evil-move-beyond-eol t
+              evil-normal-state-local-map (make-composed-keymap nil org-varde-new-evil-map)
+              evil-insert-state-local-map (make-composed-keymap nil org-varde-new-evil-map)))
 
 (defface org-varde-form-label '((t :inherit bold))
   "A field's name in the form that writes a task."
@@ -857,26 +872,30 @@ at the end of the title."
 (defun org-varde--form-hints (&rest _)
   "Say in its place what an empty field is for, and keep the context
 below its line."
-  (when-let* ((b (org-varde--form-bounds 'body)))
-    (unless (eq (char-after (car b)) ?\n)
-      (save-excursion (goto-char (car b)) (insert "\n"))))
-  (pcase-dolist (`(,field . ,hint)
-                 `((title . ,(unless org-varde--new-task "left empty, varde names it from the context"))
-                   (project . "asked for on create, or M-TAB picks it")
-                   (when . "not scheduled: at mon 09:00, every weekday 09:00, every 4h")))
-    (let ((b (org-varde--form-bounds field))
-          (o (alist-get field org-varde--form-hints)))
-      (if (and hint b (string-blank-p (buffer-substring-no-properties (car b) (cdr b))))
-          (progn
-            (unless o
-              (setq o (make-overlay 1 1))
-              (overlay-put o 'org-varde-hint t)
-              (setf (alist-get field org-varde--form-hints) o))
-            (move-overlay o (car b) (car b))
-            ;; The cursor before it, not after.
-            (overlay-put o 'after-string (propertize hint 'face 'org-varde-form-hint 'cursor t)))
-        (when o (delete-overlay o))
-        (setf (alist-get field org-varde--form-hints nil t) nil)))))
+  ;; A change can be made narrowed, as evil-org's o makes it, where the
+  ;; other fields are not to be found.
+  (save-restriction
+    (widen)
+    (when-let* ((b (org-varde--form-bounds 'body)))
+      (unless (eq (char-after (car b)) ?\n)
+        (save-excursion (goto-char (car b)) (insert "\n"))))
+    (pcase-dolist (`(,field . ,hint)
+                   `((title . ,(unless org-varde--new-task "left empty, varde names it from the context"))
+                     (project . "asked for on create, or M-TAB picks it")
+                     (when . "not scheduled: at mon 09:00, every weekday 09:00, every 4h")))
+      (let ((b (org-varde--form-bounds field))
+            (o (alist-get field org-varde--form-hints)))
+        (if (and hint b (string-blank-p (buffer-substring-no-properties (car b) (cdr b))))
+            (progn
+              (unless o
+                (setq o (make-overlay 1 1))
+                (overlay-put o 'org-varde-hint t)
+                (setf (alist-get field org-varde--form-hints) o))
+              (move-overlay o (car b) (car b))
+              ;; The cursor before it, not after.
+              (overlay-put o 'after-string (propertize hint 'face 'org-varde-form-hint 'cursor t)))
+          (when o (delete-overlay o))
+          (setf (alist-get field org-varde--form-hints nil t) nil))))))
 
 (defun org-varde--form-blank-p ()
   "Whether nothing is written in this form: no title, and no context."
