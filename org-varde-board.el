@@ -753,13 +753,25 @@ is left to the maps below, as if it were not bound here."
 
 (defvar-keymap org-varde-new-evil-map
   :doc "The form's keys in evil's normal and insert states.
-They are the buffer's own, so evil-org's, such as C-j and C-k in
-insert state, do not shadow them."
-  "C-j" #'org-varde-new-next-field
-  "C-k" #'org-varde-new-previous-field
+They are the buffer's own, so evil-org's TAB and RET do not shadow them."
   "<backtab>" #'org-varde-new-previous-field
+  ;; A GUI Emacs looks <tab> up in every map before TAB, and evil-org
+  ;; binds it to `org-cycle'.
   "TAB" (org-varde--in-field #'org-varde-new-next-field)
+  "<tab>" (org-varde--in-field #'org-varde-new-next-field)
   "RET" (org-varde--in-field #'org-varde-new-next-field))
+
+(defvar-keymap org-varde-new-evil-normal-map
+  :doc "The form's keys in evil's normal state."
+  :parent org-varde-new-evil-map
+  "C-j" #'org-varde-new-next-field
+  "C-k" #'org-varde-new-previous-field)
+
+(defvar-keymap org-varde-new-evil-insert-map
+  :doc "The form's keys in evil's insert state.  In the context, C-j is
+org's newline; C-k is evil's everywhere."
+  :parent org-varde-new-evil-map
+  "C-j" (org-varde--in-field #'org-varde-new-next-field))
 
 (defvar evil-normal-state-local-map)
 (defvar evil-insert-state-local-map)
@@ -772,19 +784,22 @@ if at all (`at mon 09:00', `every weekday 09:00', `every 4h', an
 org timestamp); and below the line, the context for the agent, written
 in org: TAB and RET there are org's.
 \\[org-varde-new-tab] and \\[org-varde-new-return] go from a field to the next, and \\[org-varde-new-previous-field] back; under
-evil, C-j and C-k too.  \\[org-varde-new-create] creates it, and
+evil, C-j and C-k too, and in insert state C-j, which in the context
+is org's newline.  \\[org-varde-new-create] creates it, and
 \\[org-varde-new-cancel] puts it away, for `n' on the board to bring
 back; cleared first, it is dropped."
   (add-hook 'after-change-functions #'org-varde--form-hints nil t)
+  (add-hook 'post-command-hook #'org-varde--form-keep-line nil t)
   (add-hook 'kill-buffer-query-functions #'org-varde--keep-edit-p nil t)
   ;; C-j and C-k go between fields as between evil-collection's
-  ;; sections, in insert state too, where the form opens.  The
-  ;; buffer's own state maps, as minor modes' state maps, evil-org's,
-  ;; would win over the mode's.  An empty field's place is the end of
-  ;; its line: normal state stays there, not on the field's name.
+  ;; sections; in insert state, where the form opens, C-j does above
+  ;; the line.  The buffer's own state maps, as minor modes' state
+  ;; maps, evil-org's, would win over the mode's.  An empty field's
+  ;; place is the end of its line: normal state stays there, not on
+  ;; the field's name.
   (setq-local evil-move-beyond-eol t
-              evil-normal-state-local-map (make-composed-keymap nil org-varde-new-evil-map)
-              evil-insert-state-local-map (make-composed-keymap nil org-varde-new-evil-map)))
+              evil-normal-state-local-map (make-composed-keymap nil org-varde-new-evil-normal-map)
+              evil-insert-state-local-map (make-composed-keymap nil org-varde-new-evil-insert-map)))
 
 (defface org-varde-form-label '((t :inherit bold))
   "A field's name in the form that writes a task."
@@ -835,7 +850,7 @@ at the end of the title."
               (if project (abbreviate-file-name (directory-file-name project)) "")))
     (insert (org-varde--form-label 'when "\nWhen:    ") (or rule ""))
     ;; The line's newline is not its own, so evil's dd can take the
-    ;; context's last line; `org-varde--form-hints' puts it back.
+    ;; context's last line; `org-varde--form-keep-line' puts it back.
     (insert (org-varde--form-label 'body (concat "\n── context " (make-string 30 ?─))) "\n" body))
   (org-varde--form-hints)
   (set-buffer-modified-p nil)
@@ -869,16 +884,23 @@ at the end of the title."
   (let ((b (org-varde--form-bounds field)))
     (goto-char (if (eq field 'body) (1+ (car b)) (cdr b)))))
 
-(defun org-varde--form-hints (&rest _)
-  "Say in its place what an empty field is for, and keep the context
-below its line."
-  ;; A change can be made narrowed, as evil-org's o makes it, where the
-  ;; other fields are not to be found.
+(defun org-varde--form-keep-line ()
+  "Keep the context below its line, after a command that took the
+line's newline, as evil's dd on the context's last line does."
+  ;; Not from `after-change-functions': org's element cache does not
+  ;; see a change made there, and warns of it.
   (save-restriction
     (widen)
     (when-let* ((b (org-varde--form-bounds 'body)))
       (unless (eq (char-after (car b)) ?\n)
-        (save-excursion (goto-char (car b)) (insert "\n"))))
+        (save-excursion (goto-char (car b)) (insert "\n"))))))
+
+(defun org-varde--form-hints (&rest _)
+  "Say in its place what an empty field is for."
+  ;; A change can be made narrowed, as evil-org's o makes it, where the
+  ;; other fields are not to be found.
+  (save-restriction
+    (widen)
     (pcase-dolist (`(,field . ,hint)
                    `((title . ,(unless org-varde--new-task "left empty, varde names it from the context"))
                      (project . "asked for on create, or M-TAB picks it")

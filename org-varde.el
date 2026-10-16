@@ -174,8 +174,12 @@ given, is called with no arguments."
                  (unless called
                    (setq called t)
                    (when (process-live-p stderr) (delete-process stderr))
-                   (kill-buffer out)
-                   (kill-buffer err)
+                   (let ((said (with-current-buffer err (string-trim (buffer-string)))))
+                     (kill-buffer out)
+                     (kill-buffer err)
+                     ;; What varde says on a call that worked is a warning.
+                     (when (and ok (not (string-empty-p said)))
+                       (message "varde: %s" (string-remove-prefix "varde: " said))))
                    (condition-case e
                        (if ok
                            (funcall callback text)
@@ -499,6 +503,9 @@ TITLE names the task in the question."
     ('nil nil)
     (other (error "Varde asked again about the %s" other))))
 
+(defvar org-varde--starting nil
+  "The tasks whose start has been asked of varde and not yet answered.")
+
 (defun org-varde--start (task title want &optional finished)
   "Start, resume or go to TASK's session, titled TITLE, without waiting.
 WANT is as for `org-varde--plan'.  FINISHED, if given, is called with
@@ -509,10 +516,16 @@ or `quit'."
   (when (and want (org-varde--terminal-busy-p (org-varde--terminal task)))
     (user-error "%s is running in its terminal; end that session to start another"
                 (org-varde--named task title)))
+  ;; A key pressed again before varde answers would start it twice.
+  (when (member task org-varde--starting)
+    (user-error "%s is still starting" (org-varde--named task title)))
+  (push task org-varde--starting)
+  (message "Starting %s..." (org-varde--named task title))
   (let ((finished (or finished #'ignore)))
     (org-varde--plan
      task want title
      (lambda (plan)
+       (setq org-varde--starting (delete task org-varde--starting))
        (funcall finished
                 (condition-case e
                     (progn
@@ -522,6 +535,7 @@ or `quit'."
                   (error (message "org-varde: %s" (error-message-string e))
                          (error-message-string e)))))
      (lambda (why)
+       (setq org-varde--starting (delete task org-varde--starting))
        (when (eq why 'quit) (message "Quit"))
        (funcall finished why)))))
 

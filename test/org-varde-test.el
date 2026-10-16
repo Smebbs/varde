@@ -125,6 +125,37 @@
       (should-not (seq-find (lambda (c) (string-prefix-p "start" c)) (org-varde-test-calls)))
       (should-not org-varde-test-sent))))
 
+(ert-deftest org-varde-a-task-is-not-started-again-before-varde-answers ()
+  (org-varde-test-with-varde
+    (org-varde-test--run-plan)
+    (save-window-excursion
+      (org-varde--start org-varde-test--id "t" nil nil)
+      (should (equal org-varde--starting (list org-varde-test--id)))
+      (should-error (org-varde--start org-varde-test--id "t" nil nil) :type 'user-error)
+      (org-varde-test-wait)
+      (should-not org-varde--starting)
+      (should (= 1 (seq-count (lambda (c) (string-prefix-p "start" c)) (org-varde-test-calls))))
+      ;; Once varde has answered, even with a failure, it can be asked again.
+      (org-varde-test-fail-once "start" "varde: no such task")
+      (org-varde--start org-varde-test--id "t" nil nil)
+      (org-varde-test-wait)
+      (should-not org-varde--starting)
+      (should (= 2 (seq-count (lambda (c) (string-prefix-p "start" c)) (org-varde-test-calls)))))))
+
+(ert-deftest org-varde-what-varde-says-on-a-call-that-worked-is-shown ()
+  (org-varde-test-with-varde
+    (let ((org-varde-varde-program (expand-file-name "warns" org-varde-test-dir))
+          said got)
+      (with-temp-file org-varde-varde-program
+        (insert "#!/bin/sh\necho out\necho 'varde: the setup failed; the session starts anyway' >&2\n"))
+      (set-file-modes org-varde-varde-program #o755)
+      (cl-letf (((symbol-function 'message)
+                 (lambda (format &rest args) (push (apply #'format-message format args) said))))
+        (org-varde--varde-async '("start") (lambda (out) (setq got out)))
+        (org-varde-test-wait))
+      (should (equal got "out\n"))
+      (should (member "varde: the setup failed; the session starts anyway" said)))))
+
 (ert-deftest org-varde-the-project-question-comes-from-varde ()
   (org-varde-test-with-varde
     (org-varde-test--run-plan)

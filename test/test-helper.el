@@ -28,6 +28,7 @@
 (defvar org-varde--all)
 (defvar org-varde--all-due)
 (defvar org-varde--all-listing)
+(defvar org-varde--starting)
 
 ;; No test may read the user's org tree or call the real varde, even one
 ;; that forgets the macro below or leaves a timer behind.
@@ -82,6 +83,7 @@ from `<subcommand>.once-err', and a one-time answer from `<subcommand>.once-out'
           (org-varde--all nil)
           (org-varde--all-due nil)
           (org-varde--all-listing nil)
+          (org-varde--starting nil)
           (org-varde--too-new nil)
           (org-varde--due nil)
           (org-varde--last-needed nil)

@@ -523,20 +523,46 @@ searches FROM and TO, and return the text with its link."
         (set-buffer-modified-p nil)
         (kill-buffer)))))
 
+;; dd on the context's last line takes the line's newline: it is put
+;; back after the command, where org's element cache sees it.
+(ert-deftest org-varde-new-context-line-comes-back-after-the-command ()
+  (org-varde-test-with-varde
+    (save-window-excursion
+      (org-varde--new nil nil "Title\nline one\nline two")
+      (with-current-buffer "*varde new*"
+        (let (warned)
+          (cl-letf (((symbol-function 'display-warning)
+                     (lambda (_type message &rest _) (push message warned))))
+            (goto-char (point-max))
+            (org-element-at-point)
+            (let ((b (org-varde--form-bounds 'body)))
+              (delete-region (car b) (point-max)))
+            ;; The change alone leaves it to the command's end.
+            (should-not (eq (char-after (car (org-varde--form-bounds 'body))) ?\n))
+            (run-hooks 'post-command-hook)
+            (goto-char (point-max))
+            (org-element-at-point))
+          (should (eq (char-after (car (org-varde--form-bounds 'body))) ?\n))
+          (should (equal (org-varde--new-text) '("Title" . "")))
+          (should-not (seq-some (lambda (m) (string-match-p "Unregistered" m)) warned)))
+        (set-buffer-modified-p nil)
+        (kill-buffer)))))
+
 (defvar org-varde-test-org-minor-mode-map (make-sparse-keymap))
 (define-minor-mode org-varde-test-org-minor-mode
-  "Stands in for evil-org-mode, whose state maps bind C-j, C-k, RET and TAB.")
+  "Stands in for evil-org-mode, whose state maps bind RET, TAB and <tab>.")
 
 (ert-deftest org-varde-new-form-under-evil ()
   "Run with evil on the load path to check this; skipped otherwise.
-Evil's line edits keep to a field, and C-j and C-k go between them,
-from the first key: the form opens in insert state."
+Evil's line edits keep to a field, and C-j and C-k go between them; in
+insert state, where the form opens, C-j is a newline in the context,
+and C-k is the maps' below."
   (skip-unless (require 'evil nil t))
   (evil-mode 1)
   (dolist (state '(normal insert))
     (evil-define-key* state org-varde-test-org-minor-mode-map
-                      (kbd "C-j") #'ignore (kbd "C-k") #'ignore
-                      (kbd "RET") #'newline (kbd "TAB") #'ignore))
+                      (kbd "RET") #'newline (kbd "TAB") #'ignore
+                      (kbd "<tab>") #'ignore))
   (add-hook 'org-mode-hook #'org-varde-test-org-minor-mode)
   (unwind-protect
       (org-varde-test-with-varde
@@ -548,17 +574,23 @@ from the first key: the form opens in insert state."
             (switch-to-buffer (current-buffer) nil t)
             (should org-varde-test-org-minor-mode)
             (should (evil-insert-state-p))
-            (execute-kbd-macro (kbd "C-j"))
-            (should (eq (org-varde--form-at) 'project))
-            (execute-kbd-macro (kbd "C-k RET"))
-            (should (eq (org-varde--form-at) 'project))
-            ;; In the context, RET and TAB are the maps' below.
-            (execute-kbd-macro (kbd "C-k C-k"))
+            ;; In the context, C-j is org's own, and RET the maps' below.
             (should (eq (org-varde--form-at) 'body))
             (let ((size (buffer-size)))
+              (execute-kbd-macro (kbd "C-j"))
+              (should (= (buffer-size) (1+ size)))
+              (should (eq (org-varde--form-at) 'body))
               (execute-kbd-macro (kbd "RET"))
-              (should (= (buffer-size) (1+ size))))
-            (delete-char -1)
+              (should (= (buffer-size) (+ 2 size))))
+            (delete-char -2)
+            ;; Above the line C-j goes to the next field, and C-k is
+            ;; evil's own.
+            (org-varde--form-goto 'title)
+            (execute-kbd-macro (kbd "C-j"))
+            (should (eq (org-varde--form-at) 'project))
+            (should (eq (key-binding (kbd "C-k")) #'evil-insert-digraph))
+            (execute-kbd-macro (kbd "RET"))
+            (should (eq (org-varde--form-at) 'when))
             (org-varde--form-goto 'title)
             (evil-normal-state)
             ;; cc changes the title, o opens a line that stays in it,
@@ -570,12 +602,15 @@ from the first key: the form opens in insert state."
             (execute-kbd-macro (kbd "G o More <escape>"))
             (should (equal (org-varde--new-text) '("New title" . "More")))
             ;; C-j and C-k go between fields, and TAB, which is
-            ;; normal state's own, too.
+            ;; normal state's own, too, as <tab>, which a GUI Emacs
+            ;; looks up first.
             (execute-kbd-macro (kbd "<escape> C-k"))
             (should (eq (org-varde--form-at) 'when))
             (execute-kbd-macro (kbd "C-k <backtab>"))
             (should (eq (org-varde--form-at) 'title))
-            (execute-kbd-macro (kbd "TAB C-j"))
+            (execute-kbd-macro (kbd "<tab>"))
+            (should (eq (org-varde--form-at) 'project))
+            (execute-kbd-macro (kbd "TAB"))
             (should (eq (org-varde--form-at) 'when))
             (execute-kbd-macro (kbd "C-j"))
             (should (eq (org-varde--form-at) 'body))
