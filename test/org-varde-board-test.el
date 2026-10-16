@@ -388,7 +388,10 @@ searches FROM and TO, and return the text with its link."
         ;; Changed, it is kept as a draft, which n brings back as the
         ;; board's: made there, it links nothing here.
         (save-window-excursion (org-varde-new-here))
-        (with-current-buffer "*varde new*" (insert " soon") (org-varde-new-cancel))
+        (with-current-buffer "*varde new*"
+          (org-varde--form-goto 'title)
+          (insert " soon")
+          (org-varde-new-cancel))
         (save-window-excursion (org-varde-board-create))
         (with-current-buffer "*varde new*"
           (should (equal (org-varde--form-value 'title) "Fix it soon"))
@@ -420,6 +423,9 @@ searches FROM and TO, and return the text with its link."
     (save-window-excursion
       (org-varde--new "/tmp/offered" nil)
       (with-current-buffer "*varde new*"
+        ;; It opens in the context: most tasks are only that.
+        (should (eq (org-varde--form-at) 'body))
+        (org-varde--form-goto 'title)
         (should (looking-back "^Title: +" (line-beginning-position)))
         (should-error (delete-char -1) :type 'text-read-only)
         (should-error (progn (forward-line 1) (delete-char 1)) :type 'text-read-only)
@@ -610,6 +616,7 @@ from the first key: the form opens in insert state."
       (setq org-varde-board--project "/home/u/proj" org-varde-board--scoped t)
       (call-interactively #'org-varde-board-create)
       (with-current-buffer "*varde new*"
+        (org-varde--form-goto 'title)
         (insert "Straight in")
         (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) (error "Asked"))))
           (call-interactively #'org-varde-new-create)))
@@ -633,6 +640,7 @@ where a new task goes unasked."
       (setq org-varde-board--project "/home/u/notes" org-varde-board--scoped t)
       (call-interactively #'org-varde-board-create)
       (with-current-buffer "*varde new*"
+        (org-varde--form-goto 'title)
         (insert "Somewhere")
         (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) "/home/u/proj/")))
           (call-interactively #'org-varde-new-create)))

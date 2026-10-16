@@ -1083,7 +1083,7 @@ when it is asked for, and HERE the one its Project starts as, which it
 goes to without asking.  TEXT, when given, is what it starts with: its
 first line the title, and the rest the context; a draft there goes to
 the kill ring.  THEN is as `org-varde--new-then'.  RULE is what its When
-starts as."
+starts as.  Point starts in the context."
   (let ((buffer (get-buffer-create "*varde new*")))
     (with-current-buffer buffer
       (cond ((and (buffer-modified-p) (not text))
@@ -1097,6 +1097,8 @@ starts as."
                  ;; Unchanged, C-c C-k drops it.
                  (org-varde--form-fill (string-trim (substring text 0 nl)) here
                                        (if nl (string-trim (substring text nl)) "") rule))
+               ;; Most tasks are only their context: varde names them.
+               (org-varde--form-goto 'body)
                (setq org-varde--new-then then)))
       (setq org-varde--new-offer offer
             header-line-format (concat " " (org-varde--edit-keys "create" "later"))))

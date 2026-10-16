@@ -6,6 +6,12 @@ follow [Semantic Versioning](https://semver.org).
 
 ## Unreleased
 
+### Changed
+
+- The new-task form opens in the context, not the Title: most tasks are
+  only their context, and varde names them from it. Editing a task
+  still opens on its Title.
+
 ## 1.3.1 - 2026-10-16
 
 ### Fixed
