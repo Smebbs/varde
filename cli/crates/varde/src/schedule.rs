@@ -80,10 +80,19 @@ pub fn arm(store: &Store, task_id: &str, text: &str, worktree: Option<bool>) -> 
     // Scheduling a task is taking it on.
     store.conn.execute("UPDATE task SET inbox = 0 WHERE id = ?1", [task_id])?;
     let when = schedule::when(first, local);
+    // Without the heartbeat it starts only while a board is open.
+    let alone =
+        if heartbeat().is_none() { "; nothing wakes varde yet: varde schedule --install" } else { "" };
     Ok(if rule.repeats() {
-        format!("{short} repeats ({}); first {when}", text.trim())
+        // A series that has run goes on, from its next start.
+        let ran: bool = store.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM run WHERE task = ?1 AND background)",
+            [task_id],
+            |r| r.get(0),
+        )?;
+        format!("{short} repeats ({}); {} {when}{alone}", text.trim(), if ran { "next" } else { "first" })
     } else {
-        format!("{short} starts {when}")
+        format!("{short} starts {when}{alone}")
     })
 }
 
@@ -106,6 +115,43 @@ fn would_ask(project: &Path) -> bool {
         && git::has_commits(project)
 }
 
+/// `varde schedule <task> --now`: its next run starts now, as its time
+/// would, unless something holds it up, which it says.
+pub fn now(paths: &Paths, reference: &str) -> Result<()> {
+    let store = paths.open(BUSY)?;
+    let id = task::resolve(&store, reference)?;
+    let short = task::short(&id);
+    let Some(shown) = of(&store, &id)? else { bail!("{short} has no schedule") };
+    let state: String = store.conn.query_row("SELECT state FROM task WHERE id = ?1", [&id], |r| r.get(0))?;
+    if state != "open" {
+        bail!("{short} is {state}: varde reopen {short} first");
+    }
+    let runs = |s: &Store| -> Result<i64> {
+        Ok(s.conn.query_row("SELECT count(*) FROM run WHERE task = ?1", [&id], |r| r.get(0))?)
+    };
+    let before = runs(&store)?;
+    store.conn.execute(
+        "UPDATE schedule SET next_due = ?2, tried = NULL, error = NULL WHERE task = ?1",
+        params![id, now_ms()],
+    )?;
+    drop(store);
+    tick(paths)?;
+    let store = paths.open(BUSY)?;
+    if runs(&store)? > before {
+        println!(
+            "{short} started in the background; {}",
+            of(&store, &id)?.map_or(shown.rule, |s| s.text(&store, paths, &id).unwrap_or(s.rule))
+        );
+    } else {
+        let why = match of(&store, &id)?.and_then(|s| s.error) {
+            Some(e) => format!("failed to start: {e}"),
+            None => held(&store, paths, &id)?,
+        };
+        println!("{short} is due now, {why}");
+    }
+    Ok(())
+}
+
 /// `varde schedule <task> [RULE | --off]`.
 pub fn set(
     paths: &Paths,
@@ -119,9 +165,13 @@ pub fn set(
     let short = task::short(&id);
     if off {
         let gone = store.conn.execute("DELETE FROM schedule WHERE task = ?1", [&id])?;
+        let state: String =
+            store.conn.query_row("SELECT state FROM task WHERE id = ?1", [&id], |r| r.get(0))?;
         println!(
             "{}",
-            if gone > 0 {
+            if gone > 0 && state == "open" {
+                format!("{short} is no longer scheduled; varde done {short} closes it")
+            } else if gone > 0 {
                 format!("{short} is no longer scheduled")
             } else {
                 format!("{short} had no schedule")
@@ -132,7 +182,7 @@ pub fn set(
     match rule {
         Some(rule) => println!("{}", arm(&store, &id, &rule, worktree)?),
         None => match of(&store, &id)? {
-            Some(s) => println!("{}", s.text()),
+            Some(s) => println!("{}", s.text(&store, paths, &id)?),
             None => println!("{short} has no schedule"),
         },
     }
@@ -156,20 +206,79 @@ pub fn of(store: &Store, id: &str) -> Result<Option<Shown>> {
         .optional()?)
 }
 
+/// A task's schedule, if it repeats: `done` then ends the run, not the
+/// series.
+pub fn repeating(store: &Store, id: &str) -> Result<Option<Shown>> {
+    Ok(of(store, id)?
+        .filter(|s| schedule::parse(&s.rule, schedule::from_ms(now_ms())).is_ok_and(|r| r.repeats())))
+}
+
 impl Shown {
     pub fn json(&self) -> serde_json::Value {
         serde_json::json!({"rule": self.rule, "due": self.due, "error": self.error})
     }
 
-    /// `every weekday 09:00; next Mon 09:00`, and a failure.
-    pub fn text(&self) -> String {
-        let now = schedule::from_ms(now_ms());
-        let mut s = format!("{}; next {}", self.rule, schedule::when(schedule::from_ms(self.due), now));
-        if let Some(e) = &self.error {
-            s.push_str(&format!("; failed to start: {e}"));
+    /// `every weekday 09:00; next Mon 09:00`, and a failure, or what
+    /// holds up a start that is due.
+    pub fn text(&self, store: &Store, paths: &Paths, id: &str) -> Result<String> {
+        let now = now_ms();
+        let at = schedule::when(schedule::from_ms(self.due), schedule::from_ms(now));
+        let state: String =
+            store.conn.query_row("SELECT state FROM task WHERE id = ?1", [id], |r| r.get(0))?;
+        match state.as_str() {
+            "open" => {}
+            "parked" => return Ok(format!("{}; paused while it is parked", self.rule)),
+            _ => return Ok(format!("{}; not while it is {state}, and again if it is reopened", self.rule)),
         }
-        s
+        if let Some(e) = &self.error {
+            return Ok(format!("{}; due {at}, failed to start: {e}", self.rule));
+        }
+        if self.due > now {
+            return Ok(format!("{}; next {at}", self.rule));
+        }
+        Ok(match held(store, paths, id)? {
+            // Nothing holds it: what happens comes first.
+            h if h == STARTING => format!("{}; {h} (due {at})", self.rule),
+            h => format!("{}; due {at}, {h}", self.rule),
+        })
     }
+}
+
+/// A tick this recent starts what is due within a minute, as the
+/// heartbeat runs every minute; past due by this much, the board says
+/// `late`.
+const LATE_MS: i64 = 5 * 60 * 1000;
+
+/// What a start nothing holds up does.
+const STARTING: &str = "starts within a minute";
+
+/// Why a start that is due has not happened, as [`fire`] decides.
+fn held(store: &Store, paths: &Paths, id: &str) -> Result<String> {
+    let updating: bool = store.conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM job j JOIN run r ON r.id = j.run
+                        WHERE r.task = ?1 AND j.state IN ('queued', 'running'))",
+        [id],
+        |r| r.get(0),
+    )?;
+    if updating {
+        return Ok("waiting for its cairn update".into());
+    }
+    if let Some(r) = start::run_facts(store, id)?.into_iter().find(|r| r.live()) {
+        let ours = crate::done::live_runs(store, id)?.iter().any(|(run, _, _)| *run == r.id);
+        let what = match r.status {
+            Some(Status::Waiting) if ours => {
+                let last = varde_core::store::view(&store.conn, &r.id)?.last.unwrap_or(0);
+                let at = schedule::when(schedule::from_ms(last + IDLE_MS), schedule::from_ms(now_ms()));
+                format!(", which is stopped at {at} if it is still idle")
+            }
+            _ => String::new(),
+        };
+        return Ok(format!("waiting for session {} to end{what}", task::short(&r.id)));
+    }
+    Ok(match since_tick(paths) {
+        Some(d) if d.as_millis() as i64 <= LATE_MS => STARTING.into(),
+        _ => "but varde tick is not running: varde doctor".into(),
+    })
 }
 
 /// The tick's lock: one at a time, and its file's age says when one last
@@ -264,6 +373,7 @@ fn fire(store: &mut Store, task: &str, rule: &str, worktree: Option<bool>, now: 
         agent: None,
         project: None,
         take_over: false,
+        run: None,
     };
     let (run, cwd) = match start::prepare(store, task, opts, false)? {
         start::Outcome::Ready { run, cwd, .. } => (run, cwd),

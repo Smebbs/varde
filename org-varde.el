@@ -411,7 +411,7 @@ TITLE names a workspace made for it."
 WANT is nil, \"--fresh\" or \"--fork\".  TITLE names the task in a
 question.  THEN and FAIL are as for `org-varde--plan-answering'."
   (org-varde--plan-answering (append (list "start" task "--json")
-                                     (and want (list want))
+                                     (if (listp want) want (list want))
                                      (pcase org-varde-use-worktree
                                        ('always '("--worktree" "always"))
                                        ('never '("--worktree" "never"))))
@@ -695,6 +695,9 @@ waiting for your answer\", or what its last turn left running, as \"has
                                      (funcall count :shells "a shell" "shells")))))
            (if left (format "has %s running" (string-join left " and ")) "is working"))))))
 
+(defvar org-varde--series-ended nil
+  "Non-nil while d ends a repeating task's series: its message says so.")
+
 (defvar org-varde--on-board nil
   "Non-nil while the board or a view closes a task, where u reopens it.")
 
@@ -709,17 +712,43 @@ was settled when it was closed."
       (progn (org-varde--put-away-idle task)
              (org-varde-refresh))
     (let ((keep (eq (org-varde--ask-stop task title "Done") 'keep))
-          (board org-varde--on-board))
+          (board org-varde--on-board)
+          (series org-varde--series-ended))
       ;; Removing a worktree can take seconds: Emacs need not wait.
       (org-varde--varde-async
        (append (list "done" task "--json") (and keep '("--keep-running")))
        (lambda (out)
-         (let ((wt (plist-get (org-varde--json out) :worktree)))
-           (message "Done %s%s%s" (org-varde--named task title)
-                    (if board "; u reopens" "")
-                    (if (equal (plist-get wt :action) "kept")
-                        (format "; %s is kept until its work lands" (plist-get wt :branch))
-                      "")))
+         (let* ((report (org-varde--json out))
+                (wt (plist-get report :worktree)))
+           (if (plist-get report :repeats)
+               ;; A repeating task stays open: its run ended, not the series.
+               (let ((live (+ (length (plist-get report :stopped)) (length (plist-get report :left))
+                              (length (plist-get report :kept))))
+                     (read (or (plist-get report :read) 0))
+                     (runs (lambda (n) (if (= n 1) "1 unread run" (format "%d unread runs" n)))))
+                 (message "%s%s; it repeats (%s)"
+                          (cond ((and (= live 0) (> read 0)) (format "Marked %s of %s read" (funcall runs read)
+                                                    (org-varde--named task title)))
+                                (t (format "Ended %s of %s%s"
+                                           (if (<= live 1) "this run" (format "%d runs" live))
+                                           (org-varde--named task title)
+                                           (if (> read 0) (format " and marked %s read" (funcall runs read)) ""))))
+                          ;; What it did to sessions, as the terminal says it.
+                          (let ((n (lambda (k) (length (plist-get report k)))))
+                            (concat (pcase (funcall n :stopped)
+                                      (0 "") (1 "; its session was stopped") (_ "; its sessions were stopped"))
+                                    (pcase (funcall n :left)
+                                      (0 "") (1 "; a session of it is left running")
+                                      (k (format "; %d sessions of it are left running" k)))
+                                    (pcase (funcall n :kept)
+                                      (0 "") (1 "; its session keeps running") (_ "; its sessions keep running"))))
+                          (plist-get report :repeats)))
+             (message "Done %s%s%s%s" (org-varde--named task title)
+                      (if series "; it no longer repeats" "")
+                      (if board "; u reopens" "")
+                      (if (equal (plist-get wt :action) "kept")
+                          (format "; %s is kept until its work lands" (plist-get wt :branch))
+                        ""))))
          (if keep (org-varde--put-away-idle task) (org-varde--put-away task))
          (org-varde-refresh))))))
 
@@ -738,7 +767,11 @@ recovered."
     (when (or asked
               (if (org-varde--has-work-p task)
                   (yes-or-no-p (format "Drop %s and its work (kept under refs/varde/discarded/)? " named))
-                (y-or-n-p (format "Drop %s? " named))))
+                (y-or-n-p (format "Drop %s%s? " named
+                                  (let ((schedule (plist-get (org-varde--row task) :schedule)))
+                                    (if (plist-get schedule :repeats)
+                                        (format ", which repeats (%s)" (plist-get schedule :rule))
+                                      ""))))))
       ;; Keeping the work and removing the worktree can take a while, and
       ;; a session first has seconds to stop: Emacs does not wait.
       (message "Dropping %s…" named)
@@ -813,9 +846,16 @@ stopped only if you agree, as you press the key."
     (let ((keep (eq (org-varde--ask-stop task title "Park") 'keep))
           (board org-varde--on-board))
       (org-varde--varde-async (append (list "park" task "--json") (and keep '("--keep-running")))
-                              (lambda (_)
-                                (message "Parked %s%s" (org-varde--named task title)
-                                         (if board "; u reopens" ""))
+                              (lambda (out)
+                                (let* ((report (org-varde--json out))
+                                       (paused (plist-get report :paused))
+                                       (unread (or (plist-get report :unread) 0)))
+                                  (message "Parked %s%s%s%s" (org-varde--named task title)
+                                           (if paused (format "; its schedule (%s) waits until it is reopened" paused) "")
+                                           (cond ((= unread 1) "; 1 unread run waits in it")
+                                                 ((> unread 1) (format "; %d unread runs wait in it" unread))
+                                                 (t ""))
+                                           (if board "; u reopens" "")))
                                 (unless keep (org-varde--put-away task))
                                 (org-varde-refresh))))))
 
@@ -1659,10 +1699,35 @@ Return what a cairn is when it did not fit, for the line below."
                (line (org-varde--with-about facts org-varde--about-cairn)))
           (insert (or line facts) "\n")
           (unless line org-varde--about-cairn))
-      (insert (org-varde--quiet (format "project cairn: what %s's tasks learned, handed to each new session"
+      (insert (org-varde--quiet (format "project cairn: what holds across %s, handed to each new session"
                                         (or name "its project")))
               "\n")
       nil)))
+
+(defun org-varde--schedule-mark (row now)
+  "What ROW's schedule says at time NOW in ms, as the terminal's rows say
+it, or nil.  Waiting for its schedule: when it starts (`late' once past
+due).  At work and repeating: that d ends this run, not the task, how many
+of its runs wait to be read, and that its next start is due, waiting for
+this session, late once that has gone on a day."
+  (let ((schedule (plist-get row :schedule))
+        (results (or (plist-get row :results) 0)))
+    (cond
+     ((not schedule) nil)
+     ((not (member (plist-get row :status) '("working" "delegated" "waiting" "blocked")))
+      (propertize (plist-get schedule :label)
+                  'face (if (plist-get schedule :late) 'org-varde-board-blocked 'org-varde-quiet)))
+     ((plist-get schedule :repeats)
+      (let ((long (and (plist-get schedule :late)
+                       (> (- now (plist-get schedule :due)) (* 24 3600000)))))
+        (propertize (concat "↻"
+                            (if (or (> results 1) (and (= results 1) (not (plist-get row :unread))))
+                                (format " %d unread" results)
+                              "")
+                            (cond ((not (plist-get schedule :late)) "")
+                                  (long " late")
+                                  (t " due")))
+                    'face (if long 'org-varde-board-blocked 'org-varde-quiet)))))))
 
 (defun org-varde--view-facts (data)
   "Where the task DATA shows stands, on one line, as the terminal's view
@@ -1693,6 +1758,7 @@ project), then the Inbox, its worktree's branch and its link."
                                              ((equal (plist-get git :stage) "landed") 'org-varde-board-working)
                                              (t 'org-varde-quiet))))
                       (org-varde--project-name (or (plist-get row :project) (plist-get data :project)))
+                      (org-varde--schedule-mark row (truncate (* 1000 (float-time))))
                       (and (plist-get row :inbox) "in the Inbox")
                       (and (equal (plist-get worktree :state) "active") (plist-get worktree :branch)
                            (concat "worktree " (plist-get worktree :branch)))
@@ -1760,13 +1826,58 @@ where it fits."
                                             (propertize (or (match-string 2 l) (match-string 1 l)) 'face 'org-link)))
               (put-text-property start (point) 'org-varde-from (substring l 6)))
           (org-varde--view-line l)))))
-  (let ((runs (plist-get data :runs)))
-    (when (and runs (org-varde--view-heading "sessions" "Sessions" nil t))
-      (dolist (r (seq-take (reverse runs) 3))
-        (org-varde--view-line
-         (format "%s · %s %s" (org-varde--status-word (plist-get r :status)) (plist-get r :relation)
-                 (org-varde--quiet (format-time-string "%b %e %H:%M" (/ (plist-get r :started) 1000))))))))
+  (org-varde--view-sessions data)
   (org-varde--view-git data))
+
+(defun org-varde--view-sessions (data)
+  "Insert DATA's sessions, a conversation a line, newest first: every one
+when the task repeats, under its schedule, or ever ran on one, else the
+last few.  Of a schedule's, those that found nothing are only the newest
+few: a task every 30 minutes would bury the rest under them.  RET on one
+opens it."
+  (let* ((all (plist-get data :conversations))
+         (schedule (plist-get (org-varde--row (plist-get data :id)) :schedule))
+         (repeats (plist-get schedule :repeats))
+         ;; One its schedule ran keeps them all once the series ends.
+         (every (or repeats (seq-some (lambda (r) (plist-get r :background)) (plist-get data :runs))))
+         (quiet 0)
+         (shown (if every
+                    (seq-filter (lambda (c)
+                                  (or (not (plist-get c :quiet)) (plist-get c :unread)
+                                      (plist-get c :status) (plist-get c :continued)
+                                      (<= (setq quiet (1+ quiet)) 10)))
+                                all)
+                  (seq-take all 3)))
+         (folded (if every (- (length all) (length shown)) 0))
+         (said (concat
+                (cond (repeats (format "· %s, %s %s" (plist-get schedule :rule)
+                                       (if (plist-get schedule :late) "due" "next")
+                                       (string-remove-suffix
+                                        " late" (string-trim-left (plist-get schedule :label) "[↻◷] "))))
+                      ((and (not every) (> (length all) 3)) (format "· %d earlier: varde show %s"
+                                                                  (- (length all) 3) (plist-get data :short))))
+                (if (> folded 0) (format "%s· %d earlier found nothing" (if repeats " " "") folded) "")))
+         (said (and (not (string-empty-p said)) said)))
+    (when (and all (org-varde--view-heading "sessions" "Sessions" said t))
+      (dolist (c shown)
+        (let ((start (point))
+              (word (cond ((not (plist-get c :launched)) "not launched yet")
+                          ((plist-get c :status) (org-varde--status-word (plist-get c :status)))
+                          ((plist-get c :quiet) "quiet")))
+              (at (format-time-string "%a %b %-d %H:%M" (/ (plist-get c :started) 1000)))
+              (continued (and every (plist-get c :continued))))
+          (org-varde--view-line
+           (concat (if (plist-get c :unread) (propertize "●" 'face 'org-varde-board-waiting) " ")
+                   " " (if (plist-get c :quiet) (org-varde--quiet at) at)
+                   (if word (org-varde--quiet (concat "  " word)) "")
+                   ;; When it was last resumed, as RET on a task with nothing
+                   ;; unread goes on from the newest.
+                   (if continued
+                       (org-varde--quiet
+                        (format "  %s %s" (if (equal (cadr continued) "fork") "forked" "resumed")
+                                (format-time-string "%a %b %-d %H:%M" (/ (car continued) 1000))))
+                     "")))
+          (put-text-property start (point) 'org-varde-run (plist-get c :run)))))))
 
 (defun org-varde--status-word (status)
   "STATUS as the board says it."
@@ -1803,7 +1914,7 @@ where it fits."
       (insert "\n" (org-varde--quiet "This task has no project yet: its first start picks one.\n"))
     (org-varde--view-usage (plist-get data :usage))
     (when (org-varde--cairn-empty-p cairn)
-      (insert (org-varde--quiet "No project cairn yet: tasks closed as done add to it; a adds a line.\n")))
+      (insert (org-varde--quiet "No project cairn yet: it holds only what you add; a adds a line.\n")))
     (insert "\n")
     (org-varde--view-cairn cairn)))
 
@@ -1825,7 +1936,8 @@ where it fits."
 or where the task came from."
   (or (get-text-property (point) 'org-varde-section)
       (get-text-property (point) 'org-varde-item)
-      (get-text-property (point) 'org-varde-from)))
+      (get-text-property (point) 'org-varde-from)
+      (get-text-property (point) 'org-varde-run)))
 
 (defun org-varde-show-next (&optional n)
   "Move to the Nth next heading or line of the cairn."
@@ -2155,7 +2267,7 @@ to it."
 
 (defun org-varde-cairn-remove ()
   "Remove the line of the cairn at point, asking nothing.
-Recall still finds it, and \\<org-varde-show-mode-map>\\[org-varde-cairn-undo] brings it back.
+Recall no longer finds it, and \\<org-varde-show-mode-map>\\[org-varde-cairn-undo] brings it back.
 On a Status you set, hand it back: it stays, and the next update may
 change it."
   (interactive)
@@ -2178,7 +2290,7 @@ change it."
          (user-error "varde: %s" why))
        (org-varde--draft-to-add section id)
        (setq org-varde--removed (cons org-varde--editing id))
-       (message (substitute-command-keys "Removed: \\<org-varde-show-mode-map>\\[org-varde-cairn-undo] brings it back, and recall still finds it"))))
+       (message (substitute-command-keys "Removed: \\<org-varde-show-mode-map>\\[org-varde-cairn-undo] brings it back, and recall no longer finds it"))))
     (_ (user-error "No line of the cairn here"))))
 
 (defun org-varde-cairn-undo ()
@@ -2214,15 +2326,22 @@ lines at once."
 (defun org-varde-show-go (&optional arg)
   "Go to the session of the task shown, starting or resuming it if needed.
 A closed task is reopened once you confirm.  Prefix ARG is as for
-`org-varde-start-task'.  On its From line, go where the task came from."
+`org-varde-start-task'.  On its From line, go where the task came from;
+on a session, open that one."
   (interactive "P")
   (unless org-varde--task (user-error "A project cairn has no session; RET on a task goes to it"))
   (let ((title (plist-get org-varde--task-data :title))
-        (from (get-text-property (point) 'org-varde-from)))
-    (if from
-        (org-link-open-from-string from)
+        (from (get-text-property (point) 'org-varde-from))
+        (run (get-text-property (point) 'org-varde-run)))
+    (cond
+     (from (org-link-open-from-string from))
+     ;; On a session, open that one, not the newest.
+     (run (org-varde--confirm-reopen org-varde--task title (plist-get org-varde--task-data :state))
+          (let ((org-varde--background nil))
+            (org-varde--start org-varde--task title (list "--run" run))))
+     (t
       (org-varde--confirm-reopen org-varde--task title (plist-get org-varde--task-data :state))
-      (org-varde-go-task org-varde--task title arg))))
+      (org-varde-go-task org-varde--task title arg)))))
 
 (defun org-varde--view-row ()
   "The task this view shows, as a board row; nil in a project's view.

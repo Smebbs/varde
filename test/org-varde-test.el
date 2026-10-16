@@ -381,6 +381,79 @@ DONE was lost, asks nothing again: no worktree choice, no second close."
     (with-current-buffer "*varde show*"
       (should (string-match-p "^  committed · on varde/fix$" (buffer-string))))))
 
+(ert-deftest org-varde-show-lists-a-repeating-tasks-sessions-and-ret-opens-one ()
+  (org-varde-test-with-varde
+    (org-varde-test-reply
+     "show" (concat (string-remove-suffix "}" org-varde-test--shown)
+                    ",\"conversations\":["
+                    "{\"run\":\"RUN3\",\"started\":1760000000000,\"status\":null,\"unread\":true,\"quiet\":false,\"launched\":true},"
+                    "{\"run\":\"RUN2\",\"started\":1759900000000,\"status\":null,\"unread\":false,\"quiet\":true,\"launched\":true},"
+                    "{\"run\":\"RUN1\",\"started\":1759800000000,\"status\":null,\"unread\":true,\"quiet\":false,\"launched\":true},"
+                    "{\"run\":\"RUN0\",\"started\":1759700000000,\"status\":null,\"unread\":false,\"quiet\":false,\"launched\":true}]}"))
+    (setq org-varde-board-data
+          `(:groups ((:key "needs_you"
+                      :rows ((:task ,org-varde-test--id
+                              :schedule (:rule "every day 06:00" :label "↻ Fri 06:00" :repeats t)))))))
+    (org-varde-test--run-plan)
+    (save-window-excursion (org-varde-show org-varde-test--id))
+    (with-current-buffer "*varde show*"
+      ;; Every one, under its schedule: two unread, one that found nothing.
+      (should (string-match-p "^Sessions · every day 06:00, next Fri 06:00$" (buffer-string)))
+      (should (= 4 (how-many "^  [● ] [A-Z][a-z][a-z] " (point-min) (point-max))))
+      (should (= 2 (how-many "^  ● " (point-min) (point-max))))
+      (should (= 1 (how-many "  quiet$" (point-min) (point-max))))
+      (goto-char (point-min))
+      (re-search-forward "  quiet$")
+      (save-window-excursion (org-varde-show-go)))
+    (should (member (format "start %s --json --run RUN2" org-varde-test--id) (org-varde-test-calls)))))
+
+(ert-deftest org-varde-show-folds-a-schedules-older-quiet-sessions ()
+  (org-varde-test-with-varde
+    (org-varde-test-reply
+     "show" (concat (string-remove-suffix
+                     "}" (string-replace "\"runs\":[]" "\"runs\":[{\"id\":\"RUN0\",\"background\":true}]"
+                                         org-varde-test--shown))
+                    ",\"conversations\":["
+                    (mapconcat (lambda (i)
+                                 (format "{\"run\":\"RUN%d\",\"started\":%d,\"status\":null,\"unread\":false,\"quiet\":%s,\"launched\":true}"
+                                         i (- 1760000000000 (* i 1800000)) (if (= i 15) "false" "true")))
+                               (number-sequence 1 30) ",")
+                    "]}"))
+    (save-window-excursion (org-varde-show org-varde-test--id))
+    (with-current-buffer "*varde show*"
+      ;; The newest ten, and an older one that found something.
+      (should (string-match-p "^Sessions · 19 earlier found nothing$" (buffer-string)))
+      (should (= 11 (how-many "^  [● ] [A-Z][a-z][a-z] " (point-min) (point-max)))))))
+
+(ert-deftest org-varde-show-lists-every-session-once-its-series-ended ()
+  (org-varde-test-with-varde
+    (org-varde-test-reply
+     "show" (concat (string-remove-suffix
+                     "}" (string-replace "\"runs\":[]" "\"runs\":[{\"id\":\"RUN0\",\"background\":true}]"
+                                         org-varde-test--shown))
+                    ",\"conversations\":["
+                    "{\"run\":\"RUN3\",\"started\":1760000000000,\"status\":null,\"unread\":false,\"quiet\":true,\"launched\":true},"
+                    "{\"run\":\"RUN2\",\"started\":1759900000000,\"status\":null,\"unread\":false,\"quiet\":true,\"launched\":true},"
+                    "{\"run\":\"RUN1\",\"started\":1759800000000,\"status\":null,\"unread\":false,\"quiet\":true,\"launched\":true},"
+                    "{\"run\":\"RUN0\",\"started\":1759700000000,\"status\":null,\"unread\":false,\"quiet\":false,\"launched\":true,"
+                    "\"continued\":[1760100000000,\"resume\"]}]}"))
+    (save-window-excursion (org-varde-show org-varde-test--id))
+    (with-current-buffer "*varde show*"
+      (should (string-match-p "^Sessions$" (buffer-string)))
+      (should (= 1 (how-many "  resumed [A-Z][a-z][a-z] " (point-min) (point-max))))
+      (should (= 4 (how-many "^  [● ] [A-Z][a-z][a-z] " (point-min) (point-max)))))))
+
+(ert-deftest org-varde-done-on-a-repeating-task-ends-its-run ()
+  (org-varde-test-with-varde
+    (org-varde-test-reply "show" org-varde-test--shown)
+    (org-varde-test-reply "done" (concat "{\"v\":1,\"task\":\"" org-varde-test--id
+                                         "\",\"repeats\":\"every day 06:00\",\"stopped\":[],\"left\":[]}"))
+    (let ((org-varde--on-board t))
+      (org-varde--finish org-varde-test--id "Scan"))
+    (org-varde-test-wait)
+    (with-current-buffer "*Messages*"
+      (should (string-match-p "Ended this run of .*; it repeats (every day 06:00)\n\\'" (buffer-string))))))
+
 (ert-deftest org-varde-show-keys-stay-in-the-show-buffer ()
   (org-varde-test-with-varde
     (org-varde-test-reply "show" org-varde-test--shown)
@@ -693,7 +766,7 @@ not a hook's commit to the -wal a running session keeps open."
       (with-current-buffer "*varde show*"
         ;; A project's cairn alone: its tab, and no task's.
         (should (eq org-varde--tab 'project))
-        (should (string-match-p "\\`app\nproject cairn: what app's tasks learned, handed to each new session\nNo project cairn yet"
+        (should (string-match-p "\\`app\nproject cairn: what holds across app, handed to each new session\nNo project cairn yet"
                                 (buffer-string)))
         ;; An empty section is its heading, dimmed.
         (should (string-match-p "^Gotchas$" (buffer-string)))
@@ -724,7 +797,7 @@ not a hook's commit to the -wal a running session keeps open."
       (org-varde-show-next-tab)
       (should (eq org-varde--tab 'project))
       (should (equal org-varde--editing '("--project" "/p/app")))
-      (should (string-match-p "\\`app\nproject cairn: what app's" (buffer-string)))
+      (should (string-match-p "\\`app\nproject cairn: what holds across app" (buffer-string)))
       (should (string-match-p "^How-to\n  - Shared$" (buffer-string)))
       (should (equal (get-text-property (point) 'org-varde-item) '("howto" 2 "Shared")))
       (should (eq (get-text-property 0 'face (org-varde--view-header)) 'org-varde-quiet))

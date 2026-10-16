@@ -148,7 +148,7 @@ pub struct Write<'a> {
 /// for none yet). Returns false, writing nothing, when someone else
 /// updated it first. A bullet of the current document that `new` leaves
 /// out moves to history with its reason; one whose text changed keeps its
-/// id, and its old words go to history as `edited`. A bullet with id 0 is
+/// id, and its old words go to history as `edited`, or `edited by you`. A bullet with id 0 is
 /// new. All of it is written, or none of it.
 pub fn save_doc(conn: &Connection, owner: Owner, expected: i64, new: &Cairn, w: &Write) -> Result<bool> {
     // A savepoint: inside a caller's transaction, or one of its own.
@@ -248,9 +248,9 @@ fn write_doc(conn: &Connection, owner: Owner, expected: i64, new: &Cairn, w: &Wr
                             "INSERT INTO cairn_item (task, project, section, pos, text, anchor, mine, author, run,
                                                      created, confirmed, state, reason, left_at, of)
                              SELECT task, project, section, pos, text, anchor, mine, author, run, created,
-                                    confirmed, 'history', 'edited', ?2, id
+                                    confirmed, 'history', ?3, ?2, id
                              FROM cairn_item WHERE id = ?1",
-                            params![i.id, w.now],
+                            params![i.id, w.now, if w.author == "user" { EDITED_BY_YOU } else { "edited" }],
                         )?;
                         conn.execute(
                             "UPDATE cairn_item SET text = ?2, anchor = ?3, stale = NULL, checked = NULL,

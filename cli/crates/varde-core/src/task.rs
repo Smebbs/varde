@@ -310,7 +310,32 @@ pub struct Detail {
     /// When its state, Inbox or link last changed, unix ms.
     pub changed: i64,
     pub runs: Vec<RunDetail>,
+    /// Its runs as conversations, newest first, as the view lists its
+    /// sessions.
+    pub conversations: Vec<Conversation>,
     pub worktree: Option<WorktreeDetail>,
+}
+
+/// A conversation of the task: a run and every run that continued it,
+/// resumed or forked.
+#[derive(Debug, Serialize)]
+pub struct Conversation {
+    /// Its first run, which `start --run` opens.
+    pub run: String,
+    pub started: i64,
+    /// The status of a live run of it: `working`, `delegated`, `waiting`
+    /// or `blocked`.
+    pub status: Option<&'static str>,
+    /// A background run of it ended, and what it found is not yet opened.
+    pub unread: bool,
+    /// A background run of it ended with its own `varde done`: it found
+    /// nothing to report.
+    pub quiet: bool,
+    /// False while `start` has prepared it and `varde run` not launched it.
+    pub launched: bool,
+    /// When it was last continued, and how: `resume` or `fork`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub continued: Option<(i64, String)>,
 }
 
 #[derive(Debug, Serialize)]
@@ -334,6 +359,13 @@ pub struct RunDetail {
     /// Started by its schedule in the background, with no terminal.
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub background: bool,
+    /// When its own session ran `varde done`: it needs nothing more of
+    /// you, and a background run so ended found nothing to report.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub done: Option<i64>,
+    /// A background run that ended, with what it found not yet opened.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub unread: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -369,15 +401,17 @@ pub fn detail(store: &Store, id: &str, alive: &dyn Fn(i64, i64) -> bool) -> Resu
                 changed: r.get(10)?,
                 prompt_title: r.get(11)?,
                 runs: Vec::new(),
+                conversations: Vec::new(),
                 worktree: None,
             })
         },
     )?;
-    let mut stmt = store.conn.prepare_cached(
+    let mut stmt = store.conn.prepare_cached(&format!(
         "SELECT id, native_id, relation, parent_run, launch, cwd, started, exit_code, pid, pid_start,
-                coalesce(holdout, 0), tty, tty_ctime, background
-         FROM run WHERE task = ?1 ORDER BY started, rowid",
-    )?;
+                coalesce(holdout, 0), tty, tty_ctime, background, done, {}
+         FROM run r WHERE task = ?1 ORDER BY started, rowid",
+        store::UNREAD_RESULT
+    ))?;
     let runs = stmt.query_map([id], |r| {
         let process: (Option<i64>, Option<i64>, Option<String>, Option<i64>) =
             (r.get(8)?, r.get(9)?, r.get(11)?, r.get(12)?);
@@ -397,6 +431,8 @@ pub fn detail(store: &Store, id: &str, alive: &dyn Fn(i64, i64) -> bool) -> Resu
                 launched: true,
                 held_out: r.get(10)?,
                 background: r.get(13)?,
+                done: r.get(14)?,
+                unread: r.get(15)?,
             },
         ))
     })?;
@@ -442,13 +478,99 @@ pub fn detail(store: &Store, id: &str, alive: &dyn Fn(i64, i64) -> bool) -> Resu
             },
         )
         .optional()?;
+    d.conversations = conversations(&d.runs);
     Ok(d)
+}
+
+/// `runs`, oldest first, as conversations, newest first.
+fn conversations(runs: &[RunDetail]) -> Vec<Conversation> {
+    let mut out: Vec<Conversation> = Vec::new();
+    // Each run's conversation, by its first run.
+    let mut root: std::collections::HashMap<&str, usize> = Default::default();
+    for r in runs {
+        let i = match r.parent_run.as_deref().and_then(|p| root.get(p)) {
+            Some(&i) => i,
+            None => {
+                out.push(Conversation {
+                    run: r.id.clone(),
+                    started: r.started,
+                    status: None,
+                    unread: false,
+                    quiet: false,
+                    launched: false,
+                    continued: None,
+                });
+                out.len() - 1
+            }
+        };
+        root.insert(&r.id, i);
+        let c = &mut out[i];
+        // One whose own session said it was done needs nothing of you.
+        let done = r.done.is_some();
+        if let Some(s) = r.status.filter(|s| !(*s == "exited" || done && matches!(*s, "waiting" | "blocked")))
+        {
+            c.status = Some(s);
+        }
+        c.unread |= r.unread;
+        c.quiet |= r.background && r.done.is_some();
+        c.launched |= r.launched;
+        if c.run != r.id {
+            c.continued = Some((r.started, r.relation.clone()));
+        }
+    }
+    out.reverse();
+    out
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::store::temp as store;
+
+    #[test]
+    fn its_runs_are_listed_as_conversations_newest_first() {
+        let (_d, s) = store();
+        let id = create(&s, "Scan", None, Some("/p"), None, 1).unwrap();
+        for (run, parent, relation, started, background) in [
+            ("R1", None, "fresh", 10, 1),
+            ("R2", Some("R1"), "resume", 20, 0),
+            ("R3", None, "fresh", 30, 1),
+            ("R4", Some("R3"), "fork", 40, 0),
+            ("R5", None, "fresh", 50, 1),
+        ] {
+            s.conn
+                .execute(
+                    "INSERT INTO run (id, task, agent, native_id, parent_run, relation, started, launch, background, pid)
+                     VALUES (?1, ?2, 'claude', ?1, ?3, ?4, ?5, 'managed', ?6, 1)",
+                    rusqlite::params![run, id, parent, relation, started, background],
+                )
+                .unwrap();
+        }
+        for (run, kind, ts) in [
+            ("R1", "ended", 11),
+            ("R2", "ended", 21),
+            ("R3", "ended", 31),
+            ("R4", "prompt", 41),
+            ("R5", "ended", 51),
+        ] {
+            s.conn
+                .execute(
+                    "INSERT INTO event (run, kind, ts, raw) VALUES (?1, ?2, ?3, '{}')",
+                    rusqlite::params![run, kind, ts],
+                )
+                .unwrap();
+        }
+        s.conn.execute("UPDATE run SET done = 51 WHERE id = 'R5'", []).unwrap();
+        let d = detail(&s, &id, &|_, _| true).unwrap();
+        let got: Vec<_> =
+            d.conversations.iter().map(|c| (c.run.as_str(), c.status, c.unread, c.quiet)).collect();
+        assert_eq!(
+            got,
+            [("R5", None, false, true), ("R3", Some("working"), true, false), ("R1", None, true, false)]
+        );
+        let continued: Vec<_> = d.conversations.iter().map(|c| c.continued.clone()).collect();
+        assert_eq!(continued, [None, Some((40, "fork".into())), Some((20, "resume".into()))]);
+    }
 
     #[test]
     fn a_task_is_found_by_its_short_id() {

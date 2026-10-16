@@ -46,10 +46,10 @@ the contract. What org-varde does beyond it is Emacs's own business.
 | `varde accept TASK…` | Moves Inbox tasks into Open, printing `accepted <short>` for each. When none of the tasks named is in the Inbox it exits 1 (`<short> is not in the Inbox: accept is for Inbox tasks`, or for several `none of them is in the Inbox: …`); beside ones that are, the others are named on a last line (`not in the Inbox, so left as they are: …`). |
 | `varde link TASK SOURCE`, `varde unlink TASK` | Records or forgets where the task lives in your client. Linking takes the task out of the Inbox. |
 | `varde drop TASK [--json]` | Drops a task. Work in its worktree is kept under `refs/varde/discarded/`, and starting the task again brings it back. |
-| `varde show TASK --json [--no-git]` | The task, its cairn, its runs, its worktree and its git status. `--no-git` skips git and `gh`, which can take a second. `prompt_title`, present only on a task a model has named, is the title varde cut from its first prompt or context (or the agent wrote, for deferred work). `schedule` is `{"rule", "due", "error"}`, or `null` for a task with none: the rule as typed, when it is next due (Unix ms), and why its last try to start failed. |
+| `varde show TASK --json [--no-git]` | The task, its cairn, its runs, its worktree and its git status. `--no-git` skips git and `gh`, which can take a second. `prompt_title`, present only on a task a model has named, is the title varde cut from its first prompt or context (or the agent wrote, for deferred work). `schedule` is `{"rule", "due", "error"}`, or `null` for a task with none: the rule as typed, when it is next due (Unix ms), and why its last try to start failed. `conversations` lists its sessions, newest first, a conversation each (a run and those that resumed or forked it): `{"run", "started", "status", "unread", "quiet", "launched"}`, `status` a live run's or `null`, `unread` while a background run of it is not opened, `quiet` when one ended with nothing to report. Show them under the cairn, every one for a repeating task; RET on one is `start --run`. |
 | `varde agent --json` | `{"v": 1, "agent", "command"}`: the agent a new conversation uses (`$VARDE_AGENT`, else `agent` in the config, else `claude`) and the argv that runs it (`$VARDE_CLAUDE` or `$VARDE_PI`, else `[agents.NAME] command`, else its name). Run `command` in a terminal for a session of the user's own, which becomes an Inbox task on its first prompt; never hardcode `claude`. Exit 1 for an agent varde does not know. Without `--json`, the command line, quoted for a shell. |
-| `varde start TASK --json [--fresh\|--fork] [--worktree always\|never] [--project DIR] [--context-file F] [--agent A]` | A plan: see below. |
-| `varde done TASK --json [--remove [--force]] [--keep-running]` | What happened to the worktree and which sessions were stopped. |
+| `varde start TASK --json [--fresh\|--fork\|--run RUN] [--worktree always\|never] [--project DIR] [--context-file F] [--agent A]` | A plan: see below. `--run` continues that run's conversation (a `conversations` entry's `run`, from `show`) rather than the newest. |
+| `varde done TASK --json [--remove [--force]] [--keep-running]` | What happened to the worktree and which sessions were stopped. On a repeating task it ends the run, not the series, and the task stays open: the reply has `repeats` (the rule), `next` (Unix ms), `stopped`, `left` and `read` (how many unread runs it read), and no `worktree`. With nothing to end it exits 1, and `--remove` is refused. A client offers no undo for it. |
 | `varde park TASK --json [--keep-running]` | Which sessions were stopped. |
 | `varde reopen TASK` | Back to Open from done, parked or dropped, without starting. |
 | `varde edit TASK --add SECTION TEXT… [--json]` | Adds a line to the cairn, as the user's: `findings`, `decisions` or `open`; `status` replaces the Status. See below. |
@@ -60,7 +60,7 @@ the contract. What org-varde does beyond it is Emacs's own business.
 | `varde edit --project [DIR] --add SECTION TEXT…`, `--set`, `--rm`, `--restore`, `--print`, `--stdin` | The project cairn, as for a task's; its sections are `conventions`, `gotchas` and `howto`. |
 | `varde recall --json [--all \| --project DIR] WORDS…` | Search hits over cairns, former bullets, notes and project cairns, one per task (or project), best first: `{"v": 1, "everywhere", "hits": [{"task", "short", "title", "project", "status", "snippet", "kind", "ref", "score", "state", "stale", "more"}]}`. `snippet` is the text that matched, a bullet or note before the title whenever one matched; `kind` says what it is (`findings`, `decisions`, `open`, `history` for a bullet that has left its cairn, `notes`, `title`, or `id` for a task named by its id, whose `snippet` is its Status); `ref` is the bullet's or note's id, as a string; `state` is the task's (`open`, `done`, `parked`, `dropped`; absent for a project cairn); `stale: true` (absent otherwise) marks a bullet whose code is gone. `more` (absent when 0) counts the other lines of the same task, or project cairn, that matched among the best rows: one hit a task shows only the best of them (`varde recall` says `(+2 more in this task)`). A hit in a project's cairn has `kind` `conventions`, `gotchas` or `howto` (or `history`), an empty `task`, `short` `project` and `title` `project cairn`: there is no task to go to. `everywhere` is true when nothing matched in this project and the hits come from every project. `--project DIR` searches the project DIR is in first, in place of the current directory's. A task's id or short id among the words finds that task first. `status` is the task's cairn Status (empty without one); `ref` is absent when there is none; `score` is `null` for an `id` hit. At most 10 hits. |
 | `varde doctor --json` | `{"v": 1, "checks": [{"name", "ok", "detail", "fix"}]}`. `fix` says what to do, on a failed check only. It exits 1 when any check failed, after printing the report. |
-| `varde seen TASK` | Marks what the task's sessions finished as read. Call it when the user looks at the task's terminal. A `start` that answers `focus` already does it. Calling it again is harmless. |
+| `varde seen TASK` | Marks what the task's sessions finished as read. Call it when the user looks at the task's terminal. A `start` that answers `focus` already does it. Calling it again is harmless. A background run's result is not read by it: only opening that run (`start`) is. |
 
 `--external` and `link` take free text naming where the task lives
 outside varde. Pick a short name for your client. org-varde 1.0
@@ -143,7 +143,9 @@ names the task it came from: put it next to that one if you can.
   `{"rule", "due", "label", "repeats", "late", "error"}`. Such a task is
   in `scheduled`, soonest first, unless a session of it is in Needs you
   or Working. Show `label` (`↻ Mon 09:00`, `◷ Thu 06:00`, with `late`
-  when it should have started by now) where a row shows its age.
+  when it should have started by now) where a row shows its age; in
+  Needs you or Working, a repeating one shows a bare `↻` beside its age,
+  since `done` then ends its run, not the task.
 - `origin` is `{"task", "short", "title"}` of the task deferred work
   came from, or `null`.
 - `inbox` holds tasks that arrived without the user creating them:
@@ -229,18 +231,22 @@ context instead.
 
 A schedule makes varde start a task in the background: `start --fresh`
 and `varde run` with no terminal, the agent in its print mode. It is
-tracked as any session, with its hooks, status and row; once it has
-ended, its row is in Needs you, unread, until `seen`, and starting the
-task resumes it, as any task's. While it works, `start` asks
-`takeover` (above). In `show`, its runs have `"background": true`. A
-repeating task starts a fresh conversation each time, given its cairn.
+tracked as any session, with its hooks, status and row. Once it has
+ended, its row is in Needs you, unread, until that run is opened, unless
+it ran `varde done` itself (it found nothing to report); every such run
+counts, not only the newest, and the row's `run` is the newest of them.
+`start` opens that one. While it works, `start` asks `takeover`
+(above). In `show`, its runs have `"background": true`, and `done`
+(Unix ms) when the run's own session ran `varde done`. A repeating task
+starts a fresh conversation each time, given its cairn.
 
 Nothing runs in the background but `varde tick`, which the heartbeat
 (`varde schedule --install`: a systemd user timer or a LaunchAgent)
 runs every minute, and `list` starts when a row it returns is due. A
-client does nothing to make schedules fire. `done`, `park` and `drop`
-stop a schedule, since it fires only for open tasks; `reopen` lets it
-fire again, at once if it was due meanwhile.
+client does nothing to make schedules fire. `park` and `drop` stop a
+schedule, since it fires only for open tasks; `reopen` lets it fire
+again, at once if it was due meanwhile. `done` on a repeating task ends
+its run and leaves it open; the series ends with `schedule --off`.
 
 ## Closing and parking
 
@@ -354,7 +360,7 @@ without the `#`. `anchor`, when present, is the path
 or identifier the bullet is about, and `stale: true` (absent otherwise)
 says that anchor is no longer found in the project's code; `varde show`
 marks such a bullet `(stale?)`. A bullet that leaves the cairn is kept,
-and `recall` still finds it. `notes` lists the texts pinned
+and `recall` still finds it, unless the user removed or rewrote it. `notes` lists the texts pinned
 with `varde note` that no update has taken in yet.
 
 `usage` says how the cairn is used, for a client to show beside it:
@@ -369,7 +375,8 @@ last change, or `null`; `run` is the run whose update made it (`null`
 for the user's); `sessions` is how many sessions were handed it whole in
 the last 30 days, and `handed` the last time, or `null`; `notes` and
 `stale` count the notes waiting and the bullets whose code is gone. A
-project's `usage` has `task`, the task whose promotion last changed it,
+project's `usage` has `task`, the task whose promotion last changed it
+(before Q38, which stopped promotion),
 and `notes` 0. `varde show` words these the way the board does:
 `updated 20m ago by session k3m9qz · handed to 3 sessions, last 9m ago · 1 stale`.
 
@@ -403,7 +410,9 @@ TEXT is the rest of the line, its words joined by one space, or `-` to
 read it from stdin (for text that starts with `-`). The line written is
 the user's (`mine`), and so is a Status set with `--add status`. `--rm`
 moves the line to history with the reason `removed by you`, where
-`recall` still finds it, and `--restore ID` brings it back where it was.
+`recall` does not find it, and `--restore ID` brings it back where it was.
+The old words of a line changed with `--set` go to history as `edited by
+you`, which `recall` does not find either.
 `--set` with the words a line already has makes it the user's and
 changes nothing else. `--rm status` hands a Status the user set back to
 the updates (`status_mine` in `show --json` goes), keeping its words

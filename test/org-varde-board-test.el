@@ -469,6 +469,38 @@ searches FROM and TO, and return the text with its link."
                     (org-varde-test-calls)))
     (should (equal (org-varde-test-stdin "new") "Line one\ntwo"))))
 
+;; The context is written in org: drawn as org draws it, its keys are
+;; org's, and TAB there is too, while above the line it still goes from
+;; field to field.
+(ert-deftest org-varde-new-context-is-org ()
+  (org-varde-test-with-varde
+    (save-window-excursion
+      (org-varde--new "/tmp/offered" nil)
+      (with-current-buffer "*varde new*"
+        (should (derived-mode-p 'org-mode))
+        (org-varde--form-goto 'body)
+        (insert "* Steps\nSee *this* first.\n- one")
+        (font-lock-ensure)
+        (goto-char (point-min))
+        (search-forward "*this*")
+        (should (memq 'bold (ensure-list (get-text-property (1- (point)) 'face))))
+        ;; M-RET on a list item makes the next.
+        (goto-char (point-max))
+        (execute-kbd-macro (kbd "M-RET"))
+        (should (looking-back "^- " (line-beginning-position)))
+        (insert "two")
+        ;; TAB on a heading folds it.
+        (goto-char (point-min))
+        (search-forward "* Steps")
+        (org-varde-new-tab)
+        (should (org-fold-folded-p (line-end-position)))
+        (should (equal (org-varde--form-value 'body) "* Steps\nSee *this* first.\n- one\n- two"))
+        (org-varde--form-goto 'title)
+        (org-varde-new-tab)
+        (should (eq (org-varde--form-at) 'project))
+        (set-buffer-modified-p nil)
+        (kill-buffer)))))
+
 (ert-deftest org-varde-new-form-under-evil ()
   "Run with evil on the load path to check this; skipped otherwise.
 Evil's line edits keep to a field, and C-j and C-k go between them."
@@ -792,6 +824,79 @@ where a new task goes unasked."
       (org-varde-board--render))
     (org-varde-board--render)
     (should (string-match-p "^ ○ One" (buffer-string)))))
+
+(ert-deftest org-varde-board-a-repeating-task-says-how-many-runs-wait-and-that-its-next-is-due ()
+  (let ((data (org-varde-board-test--data
+               '(("needs_you" "Needs you" ("T0000000000000000000AAA111" "Scan" "waiting" nil))))))
+    (let ((row (car (plist-get (car (plist-get data :groups)) :rows))))
+      (plist-put row :results 3)
+      (plist-put row :schedule `(:rule "every day 06:00" :label "↻ Fri 06:00 late" :repeats t :late t
+                                 :due ,(- (* 1000 (float-time)) 600000))))
+    (org-varde-board-test--with data
+      (should (string-match-p "↻ 3 unread due · " (buffer-string))))
+    ;; Held up a day and more, it is late.
+    (let ((row (car (plist-get (car (plist-get data :groups)) :rows))))
+      (plist-put (plist-get row :schedule) :due (- (* 1000 (float-time)) (* 2 86400000))))
+    (org-varde-board-test--with data
+      (should (string-match-p "↻ 3 unread late · " (buffer-string))))))
+
+(ert-deftest org-varde-board-d-between-runs-asks-to-end-the-series ()
+  (let ((data (org-varde-board-test--data
+               '(("scheduled" "Scheduled" ("T0000000000000000000AAA111" "Scan" "open" nil))))))
+    (let ((row (car (plist-get (car (plist-get data :groups)) :rows))))
+      (plist-put row :schedule '(:rule "every day 06:00" :label "↻ Fri 06:00" :repeats t)))
+    (org-varde-board-test--with data
+      (org-varde-board-test--first-row)
+      (let (asked finished)
+        (cl-letf (((symbol-function 'y-or-n-p) (lambda (q) (setq asked q) t))
+                  ((symbol-function 'org-varde--varde) (lambda (&rest args) (push args finished) ""))
+                  ((symbol-function 'org-varde--finish) (lambda (task _) (push (list "finish" task) finished))))
+          (org-varde-board-done))
+        (should (equal asked "\"Scan\" repeats (every day 06:00): stop repeating and close it? "))
+        (should (equal (reverse finished)
+                       '(("schedule" "T0000000000000000000AAA111" "--off")
+                         ("finish" "T0000000000000000000AAA111"))))
+        ;; Nothing for u: reopening would not bring the schedule back.
+        (should-not org-varde-board--closed)))))
+
+(ert-deftest org-varde-board-d-on-a-region-asks-once-and-closes-all ()
+  (let ((series '(:task "T1" :title "Scan" :status "open" :schedule (:rule "every day 06:00" :repeats t)))
+        (plain '(:task "T2" :title "Fix it" :status "open"))
+        asked finished)
+    (cl-letf (((symbol-function 'org-varde-board--rows) (lambda () (list series plain)))
+              ((symbol-function 'org-varde-board--keep-place) #'ignore)
+              ((symbol-function 'y-or-n-p) (lambda (q) (push q asked) t))
+              ((symbol-function 'org-varde--varde) (lambda (&rest args) (push args finished) ""))
+              ((symbol-function 'org-varde--finish) (lambda (task _) (push (list "finish" task) finished))))
+      (org-varde-board-done))
+    (should (equal asked '("Of the 2 marked tasks, 1 stops repeating and closes. Go ahead? ")))
+    (should (equal (reverse finished)
+                   '(("schedule" "T1" "--off") ("finish" "T1") ("finish" "T2"))))))
+
+(ert-deftest org-varde-board-d-asks-before-marking-runs-read-nobody-opened ()
+  (let ((row '(:task "T1" :title "Scan" :status "waiting" :unread t :results 3
+               :schedule (:rule "every day 06:00" :repeats t)))
+        asked finished)
+    (cl-letf (((symbol-function 'org-varde-board--rows) (lambda () (list row)))
+              ((symbol-function 'org-varde-board--keep-place) #'ignore)
+              ((symbol-function 'y-or-n-p) (lambda (q) (push q asked) nil))
+              ((symbol-function 'org-varde--finish) (lambda (task _) (push task finished))))
+      (org-varde-board-done))
+    (should (equal asked '("\"Scan\" has 3 unread runs you have not opened: mark them read? ")))
+    (should-not finished)))
+
+(ert-deftest org-varde-board-a-repeating-task-at-work-says-so-and-d-leaves-nothing-to-reopen ()
+  (let ((data (org-varde-board-test--data
+               '(("needs_you" "Needs you" ("T0000000000000000000AAA111" "Scan" "waiting" nil))))))
+    (let ((row (car (plist-get (car (plist-get data :groups)) :rows))))
+      (plist-put row :schedule '(:rule "every day 06:00" :label "↻ Fri 06:00" :repeats t)))
+    (org-varde-board-test--with data
+      (should (string-match-p "↻ · " (buffer-string)))
+      (org-varde-board-test--first-row)
+      (cl-letf (((symbol-function 'org-varde--finish) #'ignore))
+        (org-varde-board-done))
+      ;; d ended its run: the task is still open, nothing for u to reopen.
+      (should-not org-varde-board--closed))))
 
 (ert-deftest org-varde-board-keeps-its-place-when-a-task-leaves ()
   "As the terminal board: after d, point stays on the line, now the next task."
@@ -1348,9 +1453,11 @@ where a new task goes unasked."
 
 (ert-deftest org-varde-board-menu-says-what-each-group-holds ()
   (let ((lines (split-string (org-varde-board--legend) "\n")))
-    (should (equal (mapcan (lambda (l) (list (string-trim (substring l 0 11)) (string-trim (substring l 36 47))))
+    (should (equal (mapcan (lambda (l) (delete "" (list (string-trim (substring l 0 11))
+                                                         (string-trim (substring l (min 36 (length l))
+                                                                                 (min 47 (length l)))))))
                            lines)
-                   '("Needs you" "Inbox" "Working" "Done" "Open" "Parked")))
+                   '("Needs you" "Inbox" "Working" "Done" "Open" "Parked" "Scheduled")))
     ;; Each fits 80 columns.
     (should (seq-every-p (lambda (l) (<= (string-width l) 80)) lines))))
 

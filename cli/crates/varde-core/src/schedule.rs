@@ -297,7 +297,7 @@ pub fn from_ms(ms: i64) -> NaiveDateTime {
 }
 
 /// When it is next due, short, for a board row: `09:00` today, `Mon
-/// 09:00` this week, `Oct 21` after; a midnight shows no time.
+/// 09:00` this week, `Oct 21 09:00` after; a midnight shows no time.
 pub fn when(due: NaiveDateTime, now: NaiveDateTime) -> String {
     let time = if due.time() == NaiveTime::MIN { String::new() } else { due.format(" %H:%M").to_string() };
     let days = (due.date() - now.date()).num_days();
@@ -308,7 +308,7 @@ pub fn when(due: NaiveDateTime, now: NaiveDateTime) -> String {
     } else if (1..7).contains(&days) || (days < 0 && days > -7) {
         format!("{}{time}", due.format("%a"))
     } else {
-        due.format("%b %-d").to_string()
+        format!("{}{time}", due.format("%b %-d"))
     }
 }
 
@@ -410,7 +410,7 @@ mod tests {
         assert_eq!(when(t("2026-10-14 11:00"), now), "11:00");
         assert_eq!(when(t("2026-10-15 00:00"), now), "Thu");
         assert_eq!(when(t("2026-10-19 09:00"), now), "Mon 09:00");
-        assert_eq!(when(t("2026-11-02 09:00"), now), "Nov 2");
+        assert_eq!(when(t("2026-11-02 09:00"), now), "Nov 2 09:00");
         assert_eq!(when(t("2026-10-14 00:00"), now), "today");
     }
 }

@@ -660,3 +660,43 @@ fn a_store_from_before_bare_titles_indexes_them_once() {
     };
     assert_eq!((rows("BARE"), rows("KEPT")), (1, 1));
 }
+
+#[test]
+fn a_store_from_before_taking_back_forgets_what_was_taken_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("varde.db");
+    let c = Connection::open(&path).unwrap();
+    for sql in &MIGRATIONS[..6] {
+        c.execute_batch(sql).unwrap();
+    }
+    c.pragma_update(None, "user_version", 6).unwrap();
+    // Removed by the user, rewritten by the user, rewritten by an update,
+    // and pushed out by the cap: only the user's are taken back.
+    c.execute_batch(
+        "INSERT INTO cairn_item (id, project, section, pos, text, author, created, confirmed, state, reason, left_at)
+         VALUES (1, '/p', 'gotchas', 0, 'removed', 'job', 1, 1, 'history', 'removed by you', 5),
+                (2, '/p', 'gotchas', 0, 'mine', 'job', 1, 1, 'history', 'edited', 6),
+                (3, '/p', 'gotchas', 0, 'theirs', 'job', 1, 1, 'history', 'edited', 7),
+                (4, '/p', 'gotchas', 0, 'capped', 'job', 1, 1, 'history', 'cap', 8);
+         INSERT INTO project_cairn_history (project, doc, author, ts) VALUES ('/p', '{}', 'user', 6), ('/p', '{}', 'job', 7);
+         INSERT INTO memory_fts (history, kind, ref, scope) VALUES
+           ('removed', 'history', '1', '/p'), ('mine', 'history', '2', '/p'),
+           ('theirs', 'history', '3', '/p'), ('capped', 'history', '4', '/p');",
+    )
+    .unwrap();
+    drop(c);
+    let s = Store::open(&path, Duration::from_millis(200)).unwrap();
+    let indexed: Vec<String> = s
+        .conn
+        .prepare("SELECT history FROM memory_fts ORDER BY rowid")
+        .unwrap()
+        .query_map([], |r| r.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(indexed, ["theirs", "capped"]);
+    let reason = |id: i64| -> String {
+        s.conn.query_row("SELECT reason FROM cairn_item WHERE id = ?1", [id], |r| r.get(0)).unwrap()
+    };
+    assert_eq!((reason(2), reason(3)), ("edited by you".into(), "edited".into()));
+}

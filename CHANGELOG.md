@@ -14,6 +14,12 @@ follow [Semantic Versioning](https://semver.org).
   without anyone there to approve them. Interactive sessions are
   unchanged.
 
+### Changed
+
+- org-varde: the context in the new-task and edit form is written in
+  org-mode. It is drawn as org draws it, its keys are org's, and `TAB`
+  in it is org's while `TAB` above the line still goes between fields.
+
 ## 1.2.0 - 2026-10-15
 
 ### Added

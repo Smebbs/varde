@@ -614,23 +614,37 @@ fn non_idle_kinds() -> String {
         .join(",")
 }
 
-/// Someone looked at `task`'s sessions: what they finished is read.
-/// Returns how many runs that changed.
-/// Whether `run` is one a schedule started in the background that has
-/// ended with nobody looking since: what it did is yours to read, as a
-/// turn that ended is.
+/// A run a schedule started in the background that has ended, never
+/// said it was done, and that nobody has opened since: what it found is
+/// yours to read, as a turn that ended is.
+pub const UNREAD_RESULT: &str = "r.background AND r.done IS NULL
+    AND coalesce((SELECT max(ts) FROM event WHERE run = r.id AND kind = 'ended'), 0)
+      > coalesce((SELECT max(ts) FROM event WHERE run = r.id AND kind = 'seen'), 0)";
+
+/// Whether `run` is an unread result: see [`UNREAD_RESULT`].
 pub fn ended_unseen(conn: &Connection, run: &str) -> Result<bool> {
     Ok(conn
-        .prepare_cached(
-            "SELECT background AND coalesce((SELECT max(ts) FROM event WHERE run = r.id AND kind = 'ended'), 0)
-                 > coalesce((SELECT max(ts) FROM event WHERE run = r.id AND kind = 'seen'), 0)
-             FROM run r WHERE id = ?1",
-        )?
+        .prepare_cached(&format!("SELECT {UNREAD_RESULT} FROM run r WHERE id = ?1"))?
         .query_row([run], |r| r.get(0))
         .optional()?
         .unwrap_or(false))
 }
 
+/// `task`'s unread results, newest first. Each keeps its row in Needs
+/// you, not only the newest, so a run that fires before you read the
+/// last buries nothing.
+pub fn unread_results(conn: &Connection, task: &str) -> Result<Vec<String>> {
+    Ok(conn
+        .prepare_cached(&format!(
+            "SELECT id FROM run r WHERE task = ?1 AND {UNREAD_RESULT} ORDER BY started DESC, rowid DESC"
+        ))?
+        .query_map([task], |r| r.get(0))?
+        .collect::<Result<_, _>>()?)
+}
+
+/// Someone looked at `task`'s sessions: what they finished is read.
+/// Returns how many runs that changed. An unread result is not: only
+/// opening its run reads it ([`read_result`]).
 pub fn mark_seen(conn: &Connection, task: &str, now: i64) -> Result<usize> {
     let runs: Vec<String> = conn
         .prepare_cached("SELECT id FROM run WHERE task = ?1")?
@@ -638,15 +652,29 @@ pub fn mark_seen(conn: &Connection, task: &str, now: i64) -> Result<usize> {
         .collect::<Result<_, _>>()?;
     let mut n = 0;
     for run in runs {
-        if view(conn, &run)?.unread || ended_unseen(conn, &run)? {
-            conn.execute(
-                "INSERT INTO event (run, kind, ts, raw) VALUES (?1, 'seen', ?2, '{\"source\":\"varde seen\"}')",
-                params![run, now],
-            )?;
+        if view(conn, &run)?.unread && !ended_unseen(conn, &run)? {
+            seen(conn, &run, now)?;
             n += 1;
         }
     }
     Ok(n)
+}
+
+/// `run`'s result was opened: it is read. Returns whether it was unread.
+pub fn read_result(conn: &Connection, run: &str, now: i64) -> Result<bool> {
+    let unread = ended_unseen(conn, run)?;
+    if unread {
+        seen(conn, run, now)?;
+    }
+    Ok(unread)
+}
+
+fn seen(conn: &Connection, run: &str, now: i64) -> Result<()> {
+    conn.execute(
+        "INSERT INTO event (run, kind, ts, raw) VALUES (?1, 'seen', ?2, '{\"source\":\"varde seen\"}')",
+        params![run, now],
+    )?;
+    Ok(())
 }
 
 /// The events behind a run's status, for when it looks wrong.

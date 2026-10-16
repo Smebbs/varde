@@ -118,14 +118,14 @@ id.  In Needs you, GROUP says it is your turn: the row does not again."
                                              ((equal (plist-get git :stage) "landed") 'org-varde-board-working)
                                              (t 'org-varde-board-git))))
                       (and project (not kept) (file-name-nondirectory (directory-file-name project)))
-                      ;; Waiting for its schedule, it shows when it starts.
-                      (let ((schedule (plist-get row :schedule)))
-                        (if (and schedule (not (member (plist-get row :status)
-                                                       '("working" "delegated" "waiting" "blocked"))))
-                            (propertize (plist-get schedule :label)
-                                        'face (if (plist-get schedule :late) 'org-varde-board-blocked
-                                                'org-varde-board-empty))
-                          (org-varde--age (- now (plist-get row :last)))))))))
+                      ;; Waiting for its schedule, it shows when it starts,
+                      ;; not its age.
+                      (let ((mark (org-varde--schedule-mark row now)))
+                        (if (and mark (not (member (plist-get row :status)
+                                                   '("working" "delegated" "waiting" "blocked"))))
+                            mark
+                          (concat (if mark (concat mark (propertize " · " 'face 'org-varde-board-empty)) "")
+                                  (org-varde--age (- now (plist-get row :last))))))))))
     (concat (mapconcat (lambda (p) (if (get-text-property 0 'face p) p (propertize p 'face 'org-varde-board-empty)))
                        parts (propertize " · " 'face 'org-varde-board-empty))
             (propertize (concat "  " (plist-get row :short)) 'face 'org-varde-board-empty))))
@@ -538,22 +538,66 @@ for \\<org-varde-board-mode-map>\\[org-varde-board-reopen] to reopen.")
   "Keep CLOSED, the rows closed last first, for u to reopen.
 In a view, u then reopens it, rather than bring back a line removed
 before."
-  (when closed
-    (setq org-varde-board--closed (nreverse closed))
-    (when (derived-mode-p 'org-varde-show-mode) (setq org-varde--removed nil))))
+  ;; Nothing u can bring back: not what an earlier key closed either.
+  (setq org-varde-board--closed (nreverse closed))
+  (when (and closed (derived-mode-p 'org-varde-show-mode)) (setq org-varde--removed nil)))
 
 (defun org-varde-board-done ()
-  "Close the task at point, or every task in the region."
+  "Close the task at point, or every task in the region.
+On a repeating task it ends the run, not the series; with no run to
+end, it asks to stop the task repeating and close it.  Marking read runs
+nobody opened, it asks first too."
   (interactive)
-  (let ((rows (org-varde-board--rows))
-        (closed nil))
-    (org-varde-board--keep-place)
-    (unwind-protect
-        (let ((org-varde--on-board t))
-          (dolist (row rows)
-            (org-varde--finish (plist-get row :task) (plist-get row :title))
-            (push row closed)))
-      (org-varde-board--note-closed closed))))
+  (let* ((rows (org-varde-board--rows))
+         (between (lambda (row)
+                    (and (plist-get (plist-get row :schedule) :repeats)
+                         (not (member (plist-get row :status) '("working" "delegated" "waiting" "blocked")))
+                         (not (plist-get row :results)))))
+         ;; Runs waiting unread that d would mark read, besides the row's own.
+         (unopened (lambda (row)
+                     (let ((n (or (plist-get row :results) 0)))
+                       (if (or (> n 1) (and (= n 1) (not (plist-get row :unread)))) n 0))))
+         (series (seq-filter between rows))
+         (reads (apply #'+ (mapcar unopened rows)))
+         (runs (lambda (n) (if (= n 1) "1 unread run" (format "%d unread runs" n))))
+         (closed nil))
+    (if (and (or series (> reads 0))
+             (not (y-or-n-p
+                   (cond ((and (not (cdr rows)) series)
+                          (format "\"%s\" repeats (%s): stop repeating and close it? "
+                                  (plist-get (car rows) :title)
+                                  (plist-get (plist-get (car rows) :schedule) :rule)))
+                         ((not (cdr rows))
+                          (format "\"%s\" has %s you have not opened: mark them read? "
+                                  (plist-get (car rows) :title) (funcall runs reads)))
+                         (t (format "Of the %d marked tasks, %s. Go ahead? " (length rows)
+                                    (string-join
+                                     (delq nil (list (cond ((= (length series) 1) "1 stops repeating and closes")
+                                                           (series (format "%d stop repeating and close"
+                                                                           (length series))))
+                                                     (and (> reads 0)
+                                                          (format "%s you have not opened are marked read"
+                                                                  (funcall runs reads)))))
+                                     "; ")))))))
+        (message "Cancelled")
+      (org-varde-board--keep-place)
+      (unwind-protect
+          (let ((org-varde--on-board t))
+            (dolist (row rows)
+              (if (memq row series)
+                  (progn
+                    (condition-case e
+                        (org-varde--varde "schedule" (plist-get row :task) "--off")
+                      (org-varde-varde-error (user-error "varde: %s" (cadr e))))
+                    ;; Not for u, which would not bring its schedule back.
+                    (let ((org-varde--on-board nil)
+                          (org-varde--series-ended t))
+                      (org-varde--finish (plist-get row :task) (plist-get row :title))))
+                (org-varde--finish (plist-get row :task) (plist-get row :title))
+                ;; A repeating task stays open: d ended its run.
+                (unless (plist-get (plist-get row :schedule) :repeats)
+                  (push row closed)))))
+        (org-varde-board--note-closed closed)))))
 
 (defun org-varde-board-park ()
   "Park the task at point, or every task in the region.
@@ -581,15 +625,20 @@ The board is then on the first of them."
                   (user-error "Nothing closed here to reopen"))))
     (dolist (row rows)
       (condition-case e
-          (org-varde--varde "reopen" (plist-get row :task))
+          (let ((said (org-varde--varde "reopen" (plist-get row :task))))
+            ;; What its schedule does now, after varde's `reopened abc123'.
+            (when (string-match "; scheduled .*" said)
+              (setq said (string-trim (match-string 0 said)))
+              (plist-put row :said said)))
         (org-varde-varde-error (user-error "varde: %s" (cadr e)))))
     (setq org-varde-board--closed nil)
     (when-let* ((board (get-buffer org-varde-board-buffer)))
       (with-current-buffer board
         (setq org-varde-board--select (plist-get (car rows) :task))))
-    (message "Reopened %s" (if (cdr rows)
-                               (format "%d tasks" (length rows))
-                             (org-varde--named (plist-get (car rows) :task) (plist-get (car rows) :title)))))
+    (message "Reopened %s%s" (if (cdr rows)
+                                 (format "%d tasks" (length rows))
+                               (org-varde--named (plist-get (car rows) :task) (plist-get (car rows) :title)))
+             (if (cdr rows) "" (or (plist-get (car rows) :said) ""))))
   (org-varde-refresh))
 
 (defun org-varde-board-accept ()
@@ -697,12 +746,13 @@ Asked for, offering the project of the task at point."
   "<remap> <evil-save-modified-and-close>" #'org-varde-new-create
   "<remap> <evil-quit>" #'org-varde-new-cancel)
 
-(define-derived-mode org-varde-new-mode text-mode "varde new"
+(define-derived-mode org-varde-new-mode org-mode "varde new"
   "Write a new task, or change one, in a form, as `message-mode' writes
 a mail: its Title, which varde makes from the context when left empty;
 its Project, which \\[org-varde-new-complete] picks; When varde starts it,
 if at all (`at mon 09:00', `every weekday 09:00', `every 4h', an
-org timestamp); and below the line, the context for the agent.
+org timestamp); and below the line, the context for the agent, written
+in org: TAB and RET there are org's.
 \\[org-varde-new-tab] and \\[org-varde-new-return] go from a field to the next, and \\[org-varde-new-previous-field] back; under
 evil, C-j and C-k too.  \\[org-varde-new-create] creates it, and
 \\[org-varde-new-cancel] puts it away, for `n' on the board to bring
@@ -834,17 +884,18 @@ below its line."
        (string-empty-p (org-varde--form-value 'body))))
 
 (defun org-varde-new-return ()
-  "In a field above the line, go to the next; in the context, a new line."
+  "In a field above the line, go to the next; in the context, org's RET."
   (interactive)
   (if (eq (org-varde--form-at) 'body)
-      (call-interactively #'newline)
+      (call-interactively #'org-return)
     (org-varde-new-next-field)))
 
 (defun org-varde-new-tab ()
-  "In a field above the line, go to the next; in the context, indent."
+  "In a field above the line, go to the next; in the context, org's TAB,
+which folds a heading and indents elsewhere."
   (interactive)
   (if (eq (org-varde--form-at) 'body)
-      (call-interactively #'indent-for-tab-command)
+      (call-interactively #'org-cycle)
     (org-varde-new-next-field)))
 
 (defun org-varde-new-next-field (&optional n)
@@ -1073,12 +1124,16 @@ buffer that edits a task saves its title and context instead."
   (pcase-let ((`(,title . ,body) (org-varde--new-text))
               (rule (or (org-varde--form-value 'when) "")))
     (org-varde--call body (list "set" org-varde--new-task (concat "--title=" title) "--body" "-"))
-    (cond ((equal rule org-varde--new-when))
-          ((string-empty-p rule) (org-varde--varde "schedule" org-varde--new-task "--off"))
-          (t (org-varde--scheduled (list "schedule" org-varde--new-task "--" rule))))
-    (set-buffer-modified-p nil)
-    (org-varde--close-edit)
-    (message "Saved \"%s\"" title))
+    ;; What its schedule does now, as the terminal's form says it.
+    (let ((said (cond ((equal rule org-varde--new-when) nil)
+                      ((string-empty-p rule)
+                       (org-varde--varde "schedule" org-varde--new-task "--off")
+                       "no longer scheduled")
+                      (t (string-trim (org-varde--scheduled
+                                       (list "schedule" org-varde--new-task "--" rule)))))))
+      (set-buffer-modified-p nil)
+      (org-varde--close-edit)
+      (message "Saved \"%s\"%s" title (if said (concat "; " said) ""))))
   (org-varde-refresh))
 
 (defun org-varde--scheduled (args &optional input)
@@ -1176,12 +1231,14 @@ the terminal board's help has it."
         (groups '(("Needs you" . "turn ended, or it asks")
                   ("Working" . "a session at work")
                   ("Open" . "no session running")
+                  ("Scheduled" . "↻ again and again, ◷ once")
                   ("Inbox" . "not made by you; a accepts")
                   ("Done" . "closed today, or work not landed")
                   ("Parked" . "put aside for later, folded"))))
     (mapconcat (lambda (i)
-                 (concat (string-pad (funcall say (nth i groups)) 36) (funcall say (nth (+ i 3) groups))))
-               '(0 1 2) "\n")))
+                 (concat (string-pad (funcall say (nth i groups)) 36)
+                         (if (nth (+ i 4) groups) (funcall say (nth (+ i 4) groups)) "")))
+               '(0 1 2 3) "\n")))
 
 (defun org-varde-board--menu-head ()
   "The head of the board's menu: what its groups hold, and what done and

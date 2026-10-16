@@ -556,7 +556,7 @@ fn fidelity(conn: &Connection, scope: Option<&str>, from: i64) -> Result<Value> 
     let mut drops: HashMap<&str, usize> = HashMap::new();
     for r in &reasons {
         let kind = match r.as_deref() {
-            Some("edited") | Some("left in a rewrite, before bullets had ids") => continue,
+            Some("edited" | "edited by you") | Some("left in a rewrite, before bullets had ids") => continue,
             Some("cap") => "cap",
             Some("removed by an edit" | "removed in varde edit") => "by_user",
             None | Some("" | "left out by an update") => "without_reason",

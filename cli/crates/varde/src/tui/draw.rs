@@ -341,8 +341,12 @@ impl App<'_> {
                 let kept = ids.iter().any(|id| self.row_of(id).is_some_and(|r| r.worktree));
                 ask(match ids.as_slice() {
                     [id] => format!(
-                        "Drop {}?{}{} Starting it again brings it back.  y/N",
+                        "Drop {}{}?{}{} Starting it again brings it back.  y/N",
                         self.named(id),
+                        self.row_of(id)
+                            .and_then(|r| r.schedule.as_ref())
+                            .filter(|s| s.repeats)
+                            .map_or(String::new(), |s| format!(", which repeats ({})", s.rule)),
                         if working { " Its working session is stopped." } else { "" },
                         if kept { " Its work is kept under refs/varde/discarded/." } else { "" }
                     ),
@@ -386,6 +390,38 @@ impl App<'_> {
                             "are working"
                         };
                         format!("{verb} the {} marked tasks? Some {doing}.  {keys}", ids.len())
+                    }
+                })
+            }
+            Mode::EndSeries(ids) => {
+                let series = ids.iter().filter(|id| self.between_runs(id)).count();
+                let unopened: u32 = ids.iter().map(|id| self.unopened(id)).sum();
+                let runs =
+                    |n: u32| if n == 1 { "1 unread run".to_string() } else { format!("{n} unread runs") };
+                ask(match ids.as_slice() {
+                    [id] if series == 1 => format!(
+                        "{} repeats ({}): stop repeating and close it?  y/N",
+                        self.named(id),
+                        self.row_of(id).and_then(|r| r.schedule.as_ref()).map_or("", |s| s.rule.as_str())
+                    ),
+                    [id] => format!(
+                        "{} has {} you have not opened: mark them read?  y/N",
+                        self.named(id),
+                        runs(unopened)
+                    ),
+                    _ => {
+                        let mut parts = Vec::new();
+                        if series > 0 {
+                            parts.push(if series == 1 {
+                                "1 stops repeating and closes".to_string()
+                            } else {
+                                format!("{series} stop repeating and close")
+                            });
+                        }
+                        if unopened > 0 {
+                            parts.push(format!("{} you have not opened are marked read", runs(unopened)));
+                        }
+                        format!("Of the {} marked tasks, {}. Go ahead?  y/N", ids.len(), parts.join("; "))
                     }
                 })
             }
@@ -557,7 +593,7 @@ fn draw_help(f: &mut Frame, keys: &Keys, area: Rect, scroll: &mut u16) -> u16 {
         let mut out = vec![
             Line::from(vec![
                 heading("Groups"),
-                "   ● working or unread  ○ seen or idle  ✓ done  ‖ parked".dark_gray(),
+                "   ● working or unread  ○ seen or idle  ✓ done  ‖ parked  ↻◷ scheduled".dark_gray(),
             ]),
             Line::from(vec![heading("Cairn"), clip(cairn, inner.saturating_sub(5)).dark_gray()]),
         ];

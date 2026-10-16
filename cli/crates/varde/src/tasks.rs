@@ -226,6 +226,10 @@ pub fn show(paths: &Paths, reference: &str, history: bool, with_git: bool, as_js
     let notes: Vec<String> = memory::pending_notes(&store.conn, &id)?.into_iter().map(|(_, t)| t).collect();
     let versions = if history { memory::history(&store.conn, &id)? } else { Vec::new() };
     let schedule = crate::schedule::of(&store, &id)?;
+    let said = match &schedule {
+        Some(s) if !as_json => Some(s.text(&store, paths, &id)?),
+        _ => None,
+    };
     // A conversation left by `/clear` or `/resume` has ended while its
     // process goes on: where the session went.
     let moved: Vec<(String, String)> = d
@@ -272,7 +276,7 @@ pub fn show(paths: &Paths, reference: &str, history: bool, with_git: bool, as_js
         let checks = p.checks.map(|c| format!(", checks {c}")).unwrap_or_default();
         format!("#{} {}{draft}{checks}  {}", p.number, p.state, p.url)
     });
-    let view = View { git, pr, moved, sessions: usize::MAX, schedule: schedule.map(|s| s.text()) };
+    let view = View { git, pr, moved, sessions: usize::MAX, schedule: said, home: paths.home.clone() };
     let add = format!("varde edit {} --add findings TEXT adds a line now", d.short);
     let block =
         cairn_view::lines(cairn_view::Whose::Task, cairn.as_ref(), &usage, &notes, &add, false, now_ms());
@@ -308,6 +312,8 @@ pub struct View {
     pub sessions: usize,
     /// Its schedule, as `varde schedule` says it.
     pub schedule: Option<String>,
+    /// The store's directory, under which a background run's log is.
+    pub home: std::path::PathBuf,
 }
 
 impl View {
@@ -370,14 +376,38 @@ impl View {
         if !runs.is_empty() {
             out.push((Part::Heading, "Sessions".into()));
         }
+        // Of a schedule's runs that found nothing, the newest few: one every
+        // 30 minutes would bury the rest.
+        let (mut quiet, mut folded) = (0, 0);
         for r in runs.iter().take(self.sessions) {
+            if r.background && r.done.is_some() {
+                quiet += 1;
+                if quiet > 10 {
+                    folded += 1;
+                    continue;
+                }
+            }
             let status = match r.status {
                 _ if !r.launched => "not launched yet",
                 Some(s) => crate::look::word(s).map_or(if s == "exited" { "ended" } else { s }, |(w, _)| w),
                 None => "starting",
             };
             let held = if r.held_out { " · held out of memory" } else { "" };
-            let held = if r.background { format!("{held} · in the background") } else { held.to_string() };
+            // What a run its schedule started left you: a result, or nothing.
+            // One that failed to start, or died, says so, and where it said why.
+            let failed = r.background && r.exit_code.is_some_and(|c| c != 0 && c != 143);
+            let held = match (r.background, r.done.is_some(), r.unread) {
+                (false, ..) => held.to_string(),
+                _ if failed => format!(
+                    "{held} · in the background{} · failed (exit {}): {}",
+                    if r.unread { " · unread" } else { "" },
+                    r.exit_code.unwrap_or_default(),
+                    tilde(&self.home.join("background").join(format!("{}.log", r.id)).to_string_lossy())
+                ),
+                (true, true, _) => format!("{held} · in the background · nothing to report"),
+                (true, _, true) => format!("{held} · in the background · unread"),
+                (true, ..) => format!("{held} · in the background"),
+            };
             out.push((
                 Part::Text,
                 format!(
@@ -402,6 +432,9 @@ impl View {
                 let moved = self.moved.iter().find(|(run, _)| *run == r.id).map(|(_, to)| format!("; {to}"));
                 out.push((Part::Quiet, format!("          {why}{}", moved.unwrap_or_default())));
             }
+        }
+        if folded > 0 {
+            out.push((Part::Quiet, format!("  and {folded} earlier that found nothing")));
         }
         if runs.len() > self.sessions {
             out.push((

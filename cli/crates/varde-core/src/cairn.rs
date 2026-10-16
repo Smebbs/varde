@@ -2,7 +2,7 @@
 //! are items with stable ids. An update answers with edits to them, which
 //! code applies, so a bullet nobody has a reason to touch keeps its words.
 //! What is shown is capped in code; what leaves the cairn stays in its
-//! history, where recall still finds it.
+//! history, where recall still finds it unless the user took it back.
 
 use serde::{Deserialize, Serialize};
 

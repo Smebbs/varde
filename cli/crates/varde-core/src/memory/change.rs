@@ -3,7 +3,8 @@
 //! one they removed. Each is
 //! one transaction on the document as it is now: bullets keep their ids,
 //! so no version needs to travel with it. The caps hold, the line written
-//! is the user's, and what leaves goes to history, where recall finds it.
+//! is the user's, and what leaves goes to history, which recall does not
+//! search: the user took it back.
 
 use anyhow::{anyhow, bail, Result};
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
@@ -14,6 +15,12 @@ use crate::store::Store;
 
 /// Why a bullet the user removed left its cairn.
 pub const REMOVED: &str = "removed by you";
+/// Why the words of a bullet the user changed left it.
+pub const EDITED_BY_YOU: &str = "edited by you";
+/// Why a bullet left when the user took it out or rewrote it, in a line's
+/// edit or the whole document's: what it said is taken back, so recall
+/// does not find it. It stays in history, and `--restore` brings it back.
+pub const TAKEN_BACK: [&str; 3] = [REMOVED, EDITED_BY_YOU, "removed in varde edit"];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Change<'a> {

@@ -52,6 +52,9 @@ pub struct Row {
     /// In Needs you: its session finished a turn, or asked for a decision,
     /// that nobody has looked at yet. These come first.
     pub unread: bool,
+    /// How many results its schedule's runs left that nobody has opened.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub results: u32,
     /// Arrived without you creating it, from a session or deferred from
     /// one, and not yet acted on.
     pub inbox: bool,
@@ -160,7 +163,7 @@ pub fn build(
                 g.stage, g.label, g.checks, g.checked, o.id, o.title,
                 coalesce(t.changed, t.created), r.tty, r.tty_ctime,
                 CASE WHEN ?1 THEN (SELECT nullif(status, '') FROM cairn WHERE task = t.id) END,
-                s.rule, s.next_due, s.error, coalesce(r.background, 0)
+                s.rule, s.next_due, s.error, coalesce(r.background, 0), r.done IS NOT NULL
          FROM task t
          LEFT JOIN task o ON o.id = t.origin
          LEFT JOIN schedule s ON s.task = t.id
@@ -173,7 +176,7 @@ pub fn build(
     // A task can have more than one live run: a session varde did not
     // start keeps running beside the fork `start` made of it. The row
     // shows whichever run is most urgent, not just the newest.
-    let (others, busy_older) = urgent_older_runs(store, now, alive)?;
+    let (others, busy_older, results) = urgent_older_runs(store, now, alive)?;
 
     let mut stmt = store.conn.prepare_cached(sql)?;
     let mut rows = stmt.query(params![all, day_start])?;
@@ -208,8 +211,15 @@ pub fn build(
         let mut status = store::effective_status(view.status, r.get(11)?, r.get(12)?, tty, alive);
         let mut counts = (view.agents, view.shells);
         let mut unread = view.unread;
+        // Its own session said it was done: it needs nothing more of you,
+        // though it may still be open at its prompt.
+        let done: bool = r.get(29)?;
+        if done && status.is_some_and(Status::needs_you) {
+            status = Some(Status::Exited);
+            unread = false;
+        }
         // A run its schedule started in the background, ended and not
-        // looked at: your turn, as a turn that ended in a terminal is.
+        // opened: your turn, as a turn that ended in a terminal is.
         let background: bool = r.get(28)?;
         if background
             && status == Some(Status::Exited)
@@ -223,7 +233,10 @@ pub fn build(
             None => None,
         };
         if let Some(other) = others.get(&task) {
-            if urgency(Some(other.status)) < urgency(status) {
+            // A run at work is where the task is: one waiting to be read
+            // shows on its row (`results`), and has it once that run ends.
+            let at_work_now = other.result && status.is_some_and(|s| s.mid_turn());
+            if urgency(Some(other.status)) < urgency(status) && !at_work_now {
                 status = Some(other.status);
                 counts = other.counts;
                 unread = other.unread;
@@ -231,6 +244,7 @@ pub fn build(
             }
         }
         let busy = at_work(status, counts) || busy_older.contains(&task);
+        let results = results.get(&task).copied().unwrap_or(0);
         let worktree: bool = r.get(14)?;
         let schedule = match r.get::<_, Option<String>>(25)? {
             Some(rule) if state == "open" => Some(schedule_of(rule, r.get(26)?, r.get(27)?, now)),
@@ -284,6 +298,7 @@ pub fn build(
             shells,
             busy,
             unread: unread && group == 0,
+            results,
             inbox,
             external: r.get(13)?,
             origin,
@@ -313,6 +328,10 @@ pub fn build(
         });
     }
     Ok(Board { v: 2, groups })
+}
+
+fn is_zero(n: &u32) -> bool {
+    *n == 0
 }
 
 /// Past due by this much, a schedule should have started: the heartbeat
@@ -381,21 +400,28 @@ struct Other {
     counts: (u32, u32),
     unread: bool,
     run: RunRef,
+    /// A result nobody has opened, not a live session.
+    result: bool,
 }
 
 /// For each open task, its most urgent live run other than the newest,
-/// among runs active in the last week; and the tasks one of those runs
-/// is mid-turn in.
+/// among runs active in the last week, or else its newest unread result;
+/// the tasks one of those runs is mid-turn in; and how many unread
+/// results each has.
 #[allow(clippy::type_complexity)]
 fn urgent_older_runs(
     store: &Store,
     now: i64,
     alive: &dyn Fn(i64, i64) -> bool,
-) -> Result<(std::collections::HashMap<String, Other>, std::collections::HashSet<String>)> {
+) -> Result<(
+    std::collections::HashMap<String, Other>,
+    std::collections::HashSet<String>,
+    std::collections::HashMap<String, u32>,
+)> {
     // From the few open tasks to their runs (CROSS JOIN keeps that order),
     // and a run's newest event straight from the index.
     let mut stmt = store.conn.prepare_cached(
-        "SELECT r.task, r.id, r.native_id, r.cwd, r.pid, r.pid_start, r.tty, r.tty_ctime
+        "SELECT r.task, r.id, r.native_id, r.cwd, r.pid, r.pid_start, r.tty, r.tty_ctime, r.done IS NOT NULL
          FROM task t CROSS JOIN run r ON r.task = t.id
          WHERE t.state = 'open'
            AND r.id != (SELECT id FROM run WHERE task = t.id ORDER BY started DESC, rowid DESC LIMIT 1)
@@ -414,6 +440,8 @@ fn urgent_older_runs(
         let tty_ctime: Option<i64> = r.get(7)?;
         let tty = tty.as_deref().map(|t| (t, tty_ctime));
         let status = store::effective_status(view.status, r.get(4)?, r.get(5)?, tty, alive);
+        let done: bool = r.get(8)?;
+        let status = status.filter(|s| !(done && s.needs_you()));
         let Some(status) = status.filter(|s| urgency(Some(*s)) < 2) else { continue };
         let task: String = r.get(0)?;
         if at_work(Some(status), (view.agents, view.shells)) {
@@ -421,10 +449,38 @@ fn urgent_older_runs(
         }
         if out.get(&task).is_none_or(|o| urgency(Some(status)) < urgency(Some(o.status))) {
             let run = RunRef { id, native_id: r.get(2)?, cwd: r.get(3)? };
-            out.insert(task, Other { status, counts: (view.agents, view.shells), unread: view.unread, run });
+            out.insert(
+                task,
+                Other { status, counts: (view.agents, view.shells), unread: view.unread, run, result: false },
+            );
         }
     }
-    Ok((out, busy))
+    // Results nobody has opened, however old: the newest of each task's,
+    // where nothing live needs you more.
+    let mut stmt = store.conn.prepare_cached(&format!(
+        "SELECT r.task, r.id, r.native_id, r.cwd,
+                r.id = (SELECT id FROM run WHERE task = t.id ORDER BY started DESC, rowid DESC LIMIT 1)
+         FROM task t CROSS JOIN run r ON r.task = t.id
+         WHERE t.state = 'open' AND {}
+         ORDER BY r.started DESC, r.rowid DESC",
+        store::UNREAD_RESULT
+    ))?;
+    let mut rows = stmt.query([])?;
+    let mut results: std::collections::HashMap<String, u32> = Default::default();
+    while let Some(r) = rows.next()? {
+        let task: String = r.get(0)?;
+        *results.entry(task.clone()).or_default() += 1;
+        let newest: bool = r.get(4)?;
+        // Not over a run at work, which is where the task is.
+        if !newest && out.get(&task).is_none_or(|o| urgency(Some(o.status)) > 0 && !o.status.mid_turn()) {
+            let run = RunRef { id: r.get(1)?, native_id: r.get(2)?, cwd: r.get(3)? };
+            out.insert(
+                task,
+                Other { status: Status::Waiting, counts: (0, 0), unread: true, run, result: true },
+            );
+        }
+    }
+    Ok((out, busy, results))
 }
 
 #[cfg(test)]
@@ -536,6 +592,55 @@ mod tests {
         };
         assert_eq!(rows("working"), [("delegated", 2, 1)]);
         assert_eq!(rows("needs_you"), [("waiting", 0, 1)]);
+    }
+
+    #[test]
+    fn every_unread_result_keeps_its_row_in_needs_you_and_a_run_done_needs_nothing() {
+        let (_d, s) = store();
+        let task = crate::task::create(&s, "Scan", None, Some("/p"), None, 1).unwrap();
+        let run = |id: &str, started: i64| {
+            s.conn
+                .execute(
+                    "INSERT INTO run (id, task, agent, native_id, relation, started, launch, background)
+                     VALUES (?1, ?2, 'claude', ?1, 'fresh', ?3, 'managed', 1)",
+                    params![id, task, started],
+                )
+                .unwrap();
+        };
+        let event = |run: &str, kind: &str, ts: i64| {
+            s.conn
+                .execute(
+                    "INSERT INTO event (run, kind, ts, raw) VALUES (?1, ?2, ?3, '{}')",
+                    params![run, kind, ts],
+                )
+                .unwrap();
+        };
+        let needs = |now: i64| -> Vec<(String, bool)> {
+            let b = build(&s, now, 0, false, &|_, _| true).unwrap();
+            b.groups[0].rows.iter().map(|r| (r.run.as_ref().unwrap().id.clone(), r.unread)).collect()
+        };
+        run("R1", 20);
+        event("R1", "ended", 22);
+        run("R2", 30);
+        event("R2", "ended", 32);
+        event("R2", "seen", 33);
+        // The newest was read; the one before it was not, and is not buried.
+        assert_eq!(needs(40), [("R1".to_string(), true)]);
+        event("R1", "seen", 34);
+        assert!(needs(40).is_empty());
+
+        // A session at its prompt that said it was done needs nothing.
+        run("R3", 50);
+        event("R3", "prompt", 52);
+        event("R3", "turn_end", 53);
+        assert_eq!(needs(60), [("R3".to_string(), true)]);
+        s.conn.execute("UPDATE run SET done = 54 WHERE id = 'R3'", []).unwrap();
+        assert!(needs(60).is_empty());
+        // Nor does one that said so in the background before it ended.
+        run("R4", 70);
+        event("R4", "ended", 72);
+        s.conn.execute("UPDATE run SET done = 71 WHERE id = 'R4'", []).unwrap();
+        assert!(needs(80).is_empty());
     }
 
     #[test]

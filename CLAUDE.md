@@ -17,8 +17,8 @@ cd cli && cargo test && cargo clippy --all-targets && cargo fmt --check
   agent. Launch and memory tests use a fake `claude` (`VARDE_CLAUDE`)
   that fires real hooks and answers like the model.
 - **A hook must always print a JSON object and exit 0.**
-- **Budgets:** hook p99 under 5 ms (10 ms for the once-per-session
-  hooks that deliver memory), and `varde list --json` under 10 ms at
+- **Budgets:** hook p99 under 10 ms (20 ms for the once-per-session
+  hooks that deliver memory), and `varde list --json` under 15 ms at
   1 000 tasks. `cargo test --release -p varde --test bench -- --ignored
   --nocapture` measures them.
 

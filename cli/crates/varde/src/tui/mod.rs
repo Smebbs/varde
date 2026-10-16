@@ -65,6 +65,9 @@ enum Mode {
     Stop(Close, Vec<String>),
     /// Asked to confirm starting a done or parked task, which reopens it.
     Reopen(Start, String),
+    /// Asked to confirm `d` where it does more than the row shows: ends a
+    /// series between runs, or marks runs read nobody opened.
+    EndSeries(Vec<String>),
     /// Typing a recall query.
     Recall(Field),
     /// Typing the directory of the project to move the task to.
@@ -98,12 +101,14 @@ enum Close {
 }
 
 /// How to start a task: which conversation, and whether to go to it.
-#[derive(Clone, Copy)]
+#[derive(Clone, Default)]
 struct Start {
     want: Want,
     go: bool,
     /// Stop a session working in the background and carry it on.
     take_over: bool,
+    /// Continue this run's conversation rather than the newest.
+    run: Option<String>,
 }
 
 /// What a key asks for that takes the screen from the board.
@@ -843,6 +848,10 @@ impl<'a> App<'a> {
                 KeyCode::Char('y' | 'Y') => self.drop_tasks(&ids),
                 _ => self.unasked(ids),
             },
+            Mode::EndSeries(ids) => match key.code {
+                KeyCode::Char('y' | 'Y') => self.end_series(ids),
+                _ => self.unasked(ids),
+            },
             Mode::Reopen(start, task) => match key.code {
                 KeyCode::Char('y' | 'Y') if self.current_id().as_deref() == Some(task.as_str()) => {
                     return self.begin(start)
@@ -897,7 +906,7 @@ impl<'a> App<'a> {
                     self.pending_g = true;
                     return None;
                 }
-                let start = |want, go| Some(Start { want, go, take_over: false });
+                let start = |want, go| Some(Start { want, go, ..Start::default() });
                 let start = match act {
                     // On a folded group, RET opens it.
                     Some(Act::Start) if self.group_at.is_some() => {
@@ -1061,7 +1070,7 @@ impl<'a> App<'a> {
         let state: String = self.paths.open(BUSY).ok().and_then(|s| {
             s.conn.query_row("SELECT state FROM task WHERE id = ?1", [&task], |r| r.get(0)).ok()
         })?;
-        let start = Start { want: Want::Continue, go: true, take_over: false };
+        let start = Start { want: Want::Continue, go: true, ..Start::default() };
         if matches!(state.as_str(), "done" | "parked" | "dropped") {
             self.mode = Mode::Reopen(start, task);
             return None;
@@ -1640,6 +1649,18 @@ impl<'a> App<'a> {
     /// in the middle of something.
     fn close(&mut self, how: Close) {
         let ids = self.targets();
+        // `d` on a repeating task ends its run; with none to end, it asks
+        // to end the series. Marking read runs nobody opened, it asks too.
+        if matches!(how, Close::Done) && ids.iter().any(|id| self.between_runs(id) || self.unopened(id) > 0) {
+            self.mode = Mode::EndSeries(ids);
+            return;
+        }
+        self.close_asking(how, ids);
+    }
+
+    /// Close or park `ids`, asking first when that stops a session in the
+    /// middle of something.
+    fn close_asking(&mut self, how: Close, ids: Vec<String>) {
         if ids.iter().any(|id| self.mid_turn(id)) {
             self.mode = Mode::Stop(how, ids);
         } else {
@@ -1647,10 +1668,75 @@ impl<'a> App<'a> {
         }
     }
 
-    fn close_now(&mut self, how: Close, ids: Vec<String>, stop: bool) {
+    /// A repeating task waiting for its next start: no session of it at
+    /// work, and nothing of its runs left to read.
+    pub(super) fn between_runs(&self, id: &str) -> bool {
+        self.row_of(id).is_some_and(|r| {
+            r.schedule.as_ref().is_some_and(|s| s.repeats)
+                && crate::look::word(r.status).is_none()
+                && r.results == 0
+        })
+    }
+
+    /// Runs of `id` waiting unread that `d` would mark read, besides the
+    /// one its row is.
+    pub(super) fn unopened(&self, id: &str) -> u32 {
+        self.row_of(id)
+            .map_or(0, |r| if r.results > 1 || (r.results == 1 && !r.unread) { r.results } else { 0 })
+    }
+
+    /// End the series of those of `ids` between runs, closing them, and
+    /// close the rest as `d` does.
+    fn end_series(&mut self, ids: Vec<String>) {
+        let (series, rest): (Vec<String>, Vec<String>) =
+            ids.into_iter().partition(|id| self.between_runs(id));
+        // What ended a series is not for `u`: reopening would not bring
+        // its schedule back.
+        self.closed.clear();
+        self.each(&series, "done and no longer repeat", |s, id| {
+            s.conn.execute("DELETE FROM schedule WHERE task = ?1", [id])?;
+            done::close(s, id, closing(false))
+                .map(|r| format!("{}; it no longer repeats", done::describe(&r)))
+        });
+        let said = std::mem::take(&mut self.message);
+        if !rest.is_empty() {
+            self.close_asking(Close::Done, rest);
+        }
+        // Both said, the rest's first: `u` reopens those.
+        self.message = match (said.is_empty(), self.message.is_empty()) {
+            (true, _) => std::mem::take(&mut self.message),
+            (false, true) => said,
+            (false, false) => format!("{said}; {}", self.message),
+        };
+    }
+
+    fn close_now(&mut self, how: Close, mut ids: Vec<String>, stop: bool) {
         match how {
-            Close::Done => self
-                .each(&ids, "done", |s, id| done::close(s, id, closing(!stop)).map(|r| done::describe(&r))),
+            Close::Done => {
+                self.each(&ids, "done", |s, id| {
+                    done::close(s, id, closing(!stop)).map(|r| done::describe(&r))
+                });
+                // A repeating task stays open: `done` ended its run.
+                let all = ids.len();
+                ids.retain(|id| {
+                    !self.row_of(id).is_some_and(|r| r.schedule.as_ref().is_some_and(|s| s.repeats))
+                });
+                // Of several, which closed and which only ended runs.
+                let repeating = all - ids.len();
+                if all > 1 && repeating > 0 && !self.message.starts_with("error:") {
+                    let tasks = |n: usize, what: &str| format!("{n} {what}{}", if n == 1 { "" } else { "s" });
+                    let mut parts = Vec::new();
+                    if !ids.is_empty() {
+                        parts.push(format!("{} done", tasks(ids.len(), "task")));
+                    }
+                    parts.push(if repeating == 1 {
+                        "1 repeating task ended its run".to_string()
+                    } else {
+                        format!("{repeating} repeating tasks ended their runs")
+                    });
+                    self.message = parts.join("; ");
+                }
+            }
             Close::Park => {
                 self.each(&ids, "parked", |s, id| done::shelve(s, id, !stop).map(|r| done::describe_park(&r)))
             }
@@ -1666,7 +1752,9 @@ impl<'a> App<'a> {
     /// `ids` were closed: `u` reopens them, as it says. In the view, the
     /// close is the last thing done, so `u` undoes it before a line.
     fn closed_now(&mut self, ids: Vec<String>) {
+        // Nothing `u` can bring back: not what an earlier key closed either.
         if ids.is_empty() {
+            self.closed.clear();
             return;
         }
         if !self.message.starts_with("error:") {
@@ -1693,7 +1781,9 @@ impl<'a> App<'a> {
                 crate::start::reopen(&store.conn, id)?;
             }
             Ok(match ids.as_slice() {
-                [id] => format!("reopened {}", self.named(id)),
+                [id] => {
+                    format!("reopened {}{}", self.named(id), done::reopened_schedule(&store, self.paths, id)?)
+                }
                 _ => format!("{} tasks reopened", ids.len()),
             })
         })();
@@ -2106,6 +2196,97 @@ mod tests {
     }
 
     #[test]
+    fn a_repeating_tasks_view_lists_every_session_and_ret_opens_the_one_picked() {
+        let (_dir, paths) = temp_paths();
+        let mut app = board(&paths, &["Scan"]);
+        in_a_project(&paths);
+        let id = app.current_id().unwrap();
+        let store = paths.open(BUSY).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO schedule (task, rule, next_due, worktree, created)
+                 VALUES (?1, 'every day 06:00', ?2, 0, 1)",
+                rusqlite::params![id, now_ms() + 3_600_000],
+            )
+            .unwrap();
+        for (run, started) in [("RUN1", 10), ("RUN2", 20), ("RUN3", 30), ("RUN4", 40)] {
+            let transcript = paths.home.join(format!("{run}.jsonl"));
+            std::fs::write(&transcript, "").unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO run (id, task, agent, native_id, relation, cwd, transcript, started, launch, background)
+                     VALUES (?1, ?2, 'claude', ?1, 'fresh', ?3, ?4, ?5, 'managed', 1)",
+                    rusqlite::params![
+                        run,
+                        id,
+                        paths.home.to_string_lossy(),
+                        transcript.to_string_lossy(),
+                        started
+                    ],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO event (run, kind, ts, raw) VALUES (?1, 'ended', ?2, '{}')",
+                    rusqlite::params![run, started + 1],
+                )
+                .unwrap();
+        }
+        store.conn.execute("UPDATE run SET done = 31 WHERE id = 'RUN3'", []).unwrap();
+        app.refresh().unwrap();
+        key(&mut app, KeyCode::Char('v'));
+        key(&mut app, KeyCode::Char('G'));
+        let s = screen(&mut app, 100, 40);
+        assert!(s.contains("Sessions · every day 06:00, next "), "{s}");
+        // Every one, more than a task that does not repeat lists: three
+        // unread, one that found nothing.
+        let listed = s.split("Sessions ·").nth(1).unwrap();
+        assert_eq!(listed.matches(" ● ").count(), 3, "{s}");
+        assert_eq!(listed.matches("  quiet").count(), 1, "{s}");
+        // G picks the last, the oldest: RET opens its conversation.
+        let Some(Away::Attach { run, .. }) = key(&mut app, KeyCode::Enter) else { panic!("{}", app.message) };
+        let parent: String =
+            store.conn.query_row("SELECT parent_run FROM run WHERE id = ?1", [&run], |r| r.get(0)).unwrap();
+        assert_eq!(parent, "RUN1");
+        assert!(!varde_core::store::ended_unseen(&store.conn, "RUN1").unwrap(), "opened, it is read");
+        assert!(varde_core::store::ended_unseen(&store.conn, "RUN2").unwrap());
+
+        // Its series ended, it still lists every one.
+        store.conn.execute("DELETE FROM schedule", []).unwrap();
+        app.refresh().unwrap();
+        let s = screen(&mut app, 100, 40);
+        assert!(!s.contains("earlier"), "{s}");
+        let listed = s.split("Sessions").nth(1).unwrap();
+        assert_eq!(listed.matches("Jan 1 ").count(), 4, "{s}");
+
+        // Of many that found nothing, only the newest few.
+        for i in 0..12 {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO run (id, task, agent, native_id, relation, started, launch, background, done)
+                     VALUES (?1, ?2, 'claude', ?1, 'fresh', ?3, 'managed', 1, ?3)",
+                    rusqlite::params![format!("Q{i}"), id, 100 + i],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO event (run, kind, ts, raw) VALUES (?1, 'ended', ?2, '{}')",
+                    rusqlite::params![format!("Q{i}"), 101 + i],
+                )
+                .unwrap();
+        }
+        app.refresh().unwrap();
+        let s = screen(&mut app, 100, 40);
+        // The newest ten and, older, what found something or was resumed.
+        assert!(s.contains("Sessions · 3 earlier found nothing"), "{s}");
+    }
+
+    #[test]
     fn starting_a_closed_task_asks_first() {
         let (_dir, paths) = temp_paths();
         let mut app = board(&paths, &["Finished"]);
@@ -2426,7 +2607,7 @@ mod tests {
         let long = format!("/srv/{}/project", "deep/".repeat(30));
         let dir = Field::new(&long);
         app.mode = Mode::Project(
-            Start { want: Want::Continue, go: true, take_over: false },
+            Start { want: Want::Continue, go: true, ..Start::default() },
             asked("T"),
             vec![long],
             0,
@@ -2441,8 +2622,8 @@ mod tests {
         let (_dir, paths) = temp_paths();
         let mut app = board(&paths, &["Where"]);
         let choices = vec!["/srv/a".to_string(), "/srv/b".to_string()];
-        let start = Start { want: Want::Continue, go: true, take_over: false };
-        app.mode = Mode::Project(start, asked("T"), choices, 0, Field::new("/srv/a"));
+        let start = Start { want: Want::Continue, go: true, ..Start::default() };
+        app.mode = Mode::Project(start.clone(), asked("T"), choices, 0, Field::new("/srv/a"));
         let dir = |app: &App| match &app.mode {
             Mode::Project(.., i, d) => (*i, d.text().to_string()),
             _ => panic!("not asking the project"),
@@ -2820,7 +3001,7 @@ mod tests {
         // Parked elsewhere while the question was up: nothing starts.
         done::shelve(&paths.open(BUSY).unwrap(), gone, false).unwrap();
         app.mode =
-            Mode::Worktree(Start { want: Want::Continue, go: false, take_over: false }, asked(gone), None);
+            Mode::Worktree(Start { want: Want::Continue, go: false, ..Start::default() }, asked(gone), None);
         key(&mut app, KeyCode::Char('y'));
         assert!(app.message.ends_with("is parked now; not started"), "{}", app.message);
 
@@ -2829,7 +3010,7 @@ mod tests {
         assert_eq!(app.current_id().as_ref(), Some(other));
         let project = dir.path().join("p");
         std::fs::create_dir(&project).unwrap();
-        let start = Start { want: Want::Continue, go: false, take_over: false };
+        let start = Start { want: Want::Continue, go: false, ..Start::default() };
         // A directory typed, not one of the choices, is the project.
         let elsewhere = vec!["/srv/elsewhere".to_string()];
         app.mode = Mode::Project(start, asked(wanted), elsewhere, 0, Field::new(""));
@@ -2951,7 +3132,7 @@ mod tests {
             }
         }
         app.mode = Mode::Project(
-            Start { want: Want::Continue, go: true, take_over: false },
+            Start { want: Want::Continue, go: true, ..Start::default() },
             asked("T"),
             vec!["/srv/p".into()],
             0,
@@ -3063,7 +3244,7 @@ mod tests {
         }
         app.refresh().unwrap();
         let s = screen(&mut app, 80, 24);
-        assert!(s.contains(" Task   Project ") && s.contains("what p's tasks learned"), "{s}");
+        assert!(s.contains(" Task   Project ") && s.contains("what holds across p"), "{s}");
         assert!(s.contains("Gotchas") && s.contains("tests fail on macOS"), "{s}");
         key(&mut app, KeyCode::Char('['));
         assert!(!screen(&mut app, 80, 24).contains("tests fail on macOS"), "[ shows the task again");
@@ -3128,6 +3309,131 @@ mod tests {
         key(&mut app, KeyCode::Enter);
         assert!(app.message.ends_with("no longer scheduled"), "{}", app.message);
         assert_eq!(rule(), None);
+    }
+
+    #[test]
+    fn d_on_a_repeating_task_between_runs_asks_to_end_its_series() {
+        let (_dir, paths) = temp_paths();
+        let mut app = board(&paths, &["Scan"]);
+        let id = app.current_id().unwrap();
+        let store = paths.open(BUSY).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO schedule (task, rule, next_due, worktree, created) VALUES (?1, 'every day 06:00', ?2, 0, 1)",
+                rusqlite::params![id, now_ms() + 3_600_000],
+            )
+            .unwrap();
+        app.refresh().unwrap();
+        let state =
+            || -> String { store.conn.query_row("SELECT state FROM task", [], |r| r.get(0)).unwrap() };
+
+        key(&mut app, KeyCode::Char('d'));
+        let s = screen(&mut app, 100, 24);
+        assert!(
+            s.contains("\"Scan\" repeats (every day 06:00): stop repeating and close it?"),
+            "{s}\n{}",
+            app.message
+        );
+        key(&mut app, KeyCode::Char('n'));
+        assert_eq!(state(), "open");
+        key(&mut app, KeyCode::Char('d'));
+        key(&mut app, KeyCode::Char('y'));
+        assert_eq!(state(), "done", "{}", app.message);
+        assert!(app.message.ends_with("is done; it no longer repeats"), "{}", app.message);
+        let left: bool =
+            store.conn.query_row("SELECT EXISTS (SELECT 1 FROM schedule)", [], |r| r.get(0)).unwrap();
+        assert!(!left);
+    }
+
+    #[test]
+    fn d_on_marked_tasks_some_repeating_asks_once_and_closes_all() {
+        let (_dir, paths) = temp_paths();
+        let mut app = board(&paths, &["Scan", "Fix it"]);
+        let store = paths.open(BUSY).unwrap();
+        let scan: String =
+            store.conn.query_row("SELECT id FROM task WHERE title = 'Scan'", [], |r| r.get(0)).unwrap();
+        store
+            .conn
+            .execute(
+                "INSERT INTO schedule (task, rule, next_due, worktree, created) VALUES (?1, 'every day 06:00', ?2, 0, 1)",
+                rusqlite::params![scan, now_ms() + 3_600_000],
+            )
+            .unwrap();
+        app.refresh().unwrap();
+        key(&mut app, KeyCode::Char(' '));
+        key(&mut app, KeyCode::Char('j'));
+        key(&mut app, KeyCode::Char(' '));
+        key(&mut app, KeyCode::Char('d'));
+        let s = screen(&mut app, 100, 24);
+        assert!(s.contains("Of the 2 marked tasks, 1 stops repeating and closes. Go ahead?"), "{s}");
+        key(&mut app, KeyCode::Char('y'));
+        let open: i64 =
+            store.conn.query_row("SELECT count(*) FROM task WHERE state = 'open'", [], |r| r.get(0)).unwrap();
+        assert_eq!(open, 0, "{}", app.message);
+    }
+
+    #[test]
+    fn d_asks_before_marking_runs_read_nobody_opened_and_u_reopens_nothing_else() {
+        let (_dir, paths) = temp_paths();
+        let mut app = board(&paths, &["Scan", "Other"]);
+        let store = paths.open(BUSY).unwrap();
+        let id = |t: &str| -> String {
+            store.conn.query_row("SELECT id FROM task WHERE title = ?1", [t], |r| r.get(0)).unwrap()
+        };
+        let scan = id("Scan");
+        store
+            .conn
+            .execute(
+                "INSERT INTO schedule (task, rule, next_due, worktree, created) VALUES (?1, 'every day 06:00', ?2, 0, 1)",
+                rusqlite::params![scan, now_ms() + 3_600_000],
+            )
+            .unwrap();
+        for (run, at) in [("R1", 10), ("R2", 20), ("R3", 30)] {
+            store
+                .conn
+                .execute(
+                    "INSERT INTO run (id, task, agent, native_id, relation, started, launch, background)
+                     VALUES (?1, ?2, 'claude', ?1, 'fresh', ?3, 'managed', 1)",
+                    rusqlite::params![run, scan, at],
+                )
+                .unwrap();
+            store
+                .conn
+                .execute(
+                    "INSERT INTO event (run, kind, ts, raw) VALUES (?1, 'ended', ?2, '{}')",
+                    rusqlite::params![run, at + 1],
+                )
+                .unwrap();
+        }
+        app.refresh().unwrap();
+        let unread = || varde_core::store::unread_results(&store.conn, &scan).unwrap().len();
+
+        // Park another task first: `u` must not reopen it after `d` here.
+        while app.current().map(|r| r.title.as_str()) != Some("Other") {
+            key(&mut app, KeyCode::Char('j'));
+        }
+        key(&mut app, KeyCode::Char('P'));
+        while app.current().map(|r| r.title.as_str()) != Some("Scan") {
+            key(&mut app, KeyCode::Char('k'));
+        }
+        key(&mut app, KeyCode::Char('d'));
+        let s = screen(&mut app, 100, 24);
+        assert!(s.contains("\"Scan\" has 3 unread runs you have not opened: mark them read?"), "{s}");
+        key(&mut app, KeyCode::Char('n'));
+        assert_eq!(unread(), 3, "nothing read on no");
+        key(&mut app, KeyCode::Char('d'));
+        key(&mut app, KeyCode::Char('y'));
+        assert_eq!(unread(), 0, "{}", app.message);
+        assert!(
+            app.message.starts_with(&format!("marked 3 unread runs of {} read", task::short(&scan))),
+            "{}",
+            app.message
+        );
+        key(&mut app, KeyCode::Char('u'));
+        let other: String =
+            store.conn.query_row("SELECT state FROM task WHERE title = 'Other'", [], |r| r.get(0)).unwrap();
+        assert_eq!(other, "parked", "u reopened what an earlier key closed: {}", app.message);
     }
 
     #[test]

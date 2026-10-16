@@ -47,9 +47,10 @@ pub struct WorktreeFacts {
     pub exists: bool,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Want {
     /// Resume or attach where possible.
+    #[default]
     Continue,
     /// Always a new conversation.
     Fresh,

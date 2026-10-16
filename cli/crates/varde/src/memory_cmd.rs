@@ -313,7 +313,7 @@ pub fn edit_line(
         Line::Add(..) => println!("added line #{id}"),
         Line::Set(..) => println!("changed line #{id}"),
         Line::Rm(_) => {
-            println!("removed line #{id}; recall still finds it, and --restore {id} brings it back")
+            println!("removed line #{id}; recall no longer finds it, and --restore {id} brings it back")
         }
         Line::Restore(_) => println!("brought back line #{id}"),
     }

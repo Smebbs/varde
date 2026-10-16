@@ -34,11 +34,6 @@ if [ "$1" = "-p" ] && [ -z "$VARDE_BACKGROUND" ]; then
   if [ -n "$FAKE_FAIL" ]; then printf 'starting up\n%s\n' "$FAKE_FAIL" >&2; exit 1; fi
   # The update is killed mid-way, as by a shutdown.
   if [ -n "$FAKE_KILL_JOB" ]; then kill -9 "$PPID"; exit 1; fi
-  # A promotion into the project's cairn has an answer of its own.
-  if [ -n "$FAKE_PROMOTE" ] && grep -q '^Current project cairn:' "$FAKE_HOME/model-prompt.$$"; then
-    printf '{"type":"result","subtype":"success","is_error":false,"result":"%s","usage":{"input_tokens":700,"output_tokens":20}}' "$FAKE_PROMOTE"
-    exit 0
-  fi
   # A chatty model: far more output than a pipe holds, before the answer.
   if [ -n "$FAKE_BIG" ]; then head -c "$FAKE_BIG" /dev/zero | tr '\0' x; echo; fi
   # A reply as plain text, as a wrapper may print it; else as the CLI
@@ -217,6 +212,7 @@ impl Env {
             .env_remove("VARDE_INTERNAL")
             .env_remove("VARDE_AGENT")
             .env_remove("CLAUDE_CODE_ENTRYPOINT")
+            .env_remove("CLAUDECODE")
             .stdin(Stdio::null())
     }
 

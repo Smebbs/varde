@@ -53,13 +53,14 @@ impl Whom {
     }
 }
 
-/// A line that can be picked: the Status, a section's heading, or a
-/// bullet by its id.
+/// A line that can be picked: the Status, a section's heading, a
+/// bullet by its id, or a session by its place in the list.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub(super) enum Pick {
     Status,
     Heading(Section),
     Bullet(i64),
+    Session(usize),
 }
 
 /// What a line being typed will be.
@@ -108,8 +109,11 @@ struct Doc {
     notes: Vec<String>,
     /// The branch of a task's worktree.
     worktree: Option<String>,
-    /// A task's context and sessions, under it.
+    /// A task's context, under it.
     rest: Vec<(Part, String)>,
+    /// Its sessions under that: their heading, and a conversation a line,
+    /// newest first.
+    sessions: Option<(String, Vec<varde_core::task::Conversation>)>,
 }
 
 #[derive(Clone)]
@@ -193,7 +197,15 @@ impl View {
             out.push(Pick::Heading(s));
             out.extend(c.into_iter().flat_map(|c| c.section(s)).map(|i| Pick::Bullet(i.id)));
         }
+        let sessions = doc.sessions.as_ref().map_or(0, |(_, c)| c.len());
+        out.extend((0..sessions).map(Pick::Session));
         out
+    }
+
+    /// The run RET opens: the picked session's.
+    fn session(&self) -> Option<String> {
+        let Some(Pick::Session(i)) = self.at else { return None };
+        Some(self.doc.as_ref()?.sessions.as_ref()?.1.get(i)?.run.clone())
     }
 
     fn step(&mut self, by: isize) {
@@ -246,7 +258,7 @@ impl View {
     /// The section the picked line is in.
     fn section(&self) -> Option<Section> {
         match self.at? {
-            Pick::Status => None,
+            Pick::Status | Pick::Session(_) => None,
             Pick::Heading(s) => Some(s),
             Pick::Bullet(id) => self.bullet(id).map(|(s, _)| s),
         }
@@ -353,6 +365,18 @@ impl App<'_> {
                 v.step(isize::MAX / 2);
                 (v.scroll, v.follow) = (u16::MAX, false);
             }
+            // RET on a session opens it, not the task's newest.
+            KeyCode::Enter if v.session().is_some() => {
+                let start = super::Start { go: true, run: v.session(), ..Default::default() };
+                // A closed task is asked about first, as RET on its row asks.
+                if let Some(r) =
+                    self.current().filter(|r| matches!(r.state.as_str(), "done" | "parked" | "dropped"))
+                {
+                    self.mode = super::Mode::Reopen(start, r.task.clone());
+                    return Some(None);
+                }
+                return Some(self.begin(start));
+            }
             KeyCode::Char('d') if ctrl => v.half(true),
             KeyCode::Char('u') if ctrl => v.half(false),
             KeyCode::PageDown => v.half(true),
@@ -377,6 +401,9 @@ impl App<'_> {
             },
             // On a heading, `e` adds under it as `o` does: a heading has no
             // words of its own to change.
+            KeyCode::Char('o') | KeyCode::Char('e') if matches!(v.at, Some(Pick::Session(_))) => {
+                self.message = "a session is not a line of the cairn: RET opens it".into()
+            }
             KeyCode::Char('o') | KeyCode::Char('e') => match v.section() {
                 Some(s) => self.add_line(s),
                 None => v.picking = true,
@@ -518,8 +545,11 @@ impl App<'_> {
         let next = at.and_then(|i| picks.get(i + 1).or_else(|| i.checked_sub(1).and_then(|j| picks.get(j))));
         let next = next.copied();
         let section = self.view.bullet(id).map(|(s, _)| s);
-        if self.change_line(&whom, Change::Remove(id), "removed: u brings it back, and recall still finds it")
-        {
+        if self.change_line(
+            &whom,
+            Change::Remove(id),
+            "removed: u brings it back, and recall no longer finds it",
+        ) {
             self.view.undo = Some((whom.clone(), Undo::Line(id)));
             self.view.at = next;
             // A change being typed to it is a line to add now.
@@ -568,8 +598,13 @@ impl App<'_> {
         if self.view.doc.as_ref().is_some_and(|d| d.whom != whom) {
             self.view.open();
         }
-        // The status word the view's facts already say.
-        let shown = self.current().and_then(|r| look::word(r.status)).map(|(w, _)| w);
+        // A repeating task lists every session, under its schedule.
+        let schedule = self.current().and_then(|r| r.schedule.as_ref()).filter(|s| s.repeats);
+        let schedule = schedule.map(|s| {
+            use varde_core::schedule::{from_ms, when};
+            let next = if s.due <= now_ms() { "due" } else { "next" };
+            format!("{}, {next} {}", s.rule, when(from_ms(s.due), from_ms(now_ms())))
+        });
         let read = || -> anyhow::Result<(Doc, Vec<(i64, Section)>)> {
             let s = self.paths.open(BUSY)?;
             let owner = whom.owner();
@@ -590,17 +625,17 @@ impl App<'_> {
                     }
                 }
             }
-            let (notes, worktree, rest) = match owner {
-                Owner::Project(_) => (Vec::new(), None, Vec::new()),
+            let (notes, worktree, rest, sessions) = match owner {
+                Owner::Project(_) => (Vec::new(), None, Vec::new(), None),
                 Owner::Task(id) => {
                     let notes = memory::pending_notes(&s.conn, id)?.into_iter().map(|(_, t)| t).collect();
                     let d = varde_core::task::detail(&s, id, &process::alive)?;
                     let worktree =
                         d.worktree.as_ref().filter(|w| w.state == "active").map(|w| w.branch.clone());
-                    (notes, worktree, rest(&d, shown, now_ms()))
+                    (notes, worktree, rest(&d), sessions(d, schedule.as_deref()))
                 }
             };
-            Ok((Doc { whom: whom.clone(), cairn, usage, notes, worktree, rest }, gone))
+            Ok((Doc { whom: whom.clone(), cairn, usage, notes, worktree, rest, sessions }, gone))
         };
         match read() {
             Ok((doc, gone)) => {
@@ -703,9 +738,9 @@ impl App<'_> {
             Some(Some(p)) => {
                 let name = clean(project_name(Some(p)));
                 vec![
-                    format!("project cairn: what {name}'s tasks learned, handed to each new session"),
-                    format!("what {name}'s tasks learned, handed to each new session"),
-                    format!("what {name}'s tasks learned"),
+                    format!("project cairn: what holds across {name}, handed to each new session"),
+                    format!("what holds across {name}, handed to each new session"),
+                    format!("what holds across {name}"),
                 ]
             }
             _ => Vec::new(),
@@ -779,7 +814,7 @@ impl App<'_> {
                 cairn_view::Line::About(_) | cairn_view::Line::Usage(_) => continue,
                 cairn_view::Line::Empty(_) => {
                     let s = if doc.whom.project {
-                        "No project cairn yet: tasks closed as done add to it; a adds a line."
+                        "No project cairn yet: it holds only what you add; a adds a line."
                     } else {
                         "No cairn yet: its first session's update writes one; a adds a line."
                     };
@@ -879,6 +914,17 @@ impl App<'_> {
                     .map(|r| Line::from(Span::styled(format!("{}{r}", " ".repeat(indent)), style))),
             );
         }
+        if let Some((heading, all)) = &doc.sessions {
+            out.push(Line::default());
+            out.push(Line::from(clip(heading, width).bold()));
+            for (i, c) in all.iter().enumerate() {
+                spots.push((Pick::Session(i), out.len() as u16));
+                if hl == Some(Pick::Session(i)) {
+                    picked = Some((out.len() as u16, out.len() as u16));
+                }
+                out.push(session_line(c, hl == Some(Pick::Session(i))));
+            }
+        }
         (out, picked, spots)
     }
 
@@ -891,8 +937,11 @@ impl App<'_> {
         let mut parts = Vec::new();
         if let Some(r) = r {
             parts = look::meta(r, now_ms(), true);
-            // How long ago is the board's to say.
-            parts.pop();
+            // How long ago is the board's to say; when it starts, the
+            // view's too.
+            if r.schedule.is_none() || look::word(r.status).is_some() {
+                parts.pop();
+            }
             if look::word(r.status).is_none() {
                 parts.insert(0, (r.state.clone(), Tone::Quiet));
             }
@@ -997,7 +1046,7 @@ impl App<'_> {
         let all = [
             // A reminder: marks are the board's, and the view acts on its task.
             (marked.as_str(), "marked", 0, !self.marked.is_empty()),
-            ("RET", "go", 1, true),
+            ("RET", if matches!(at, Some(Pick::Session(_))) { "open" } else { "go" }, 1, true),
             ("e", "edit", 1, matches!(at, Some(Pick::Bullet(_) | Pick::Status))),
             ("a", "add", 1, self.whom().is_some()),
             ("x", "remove", 2, matches!(at, Some(Pick::Bullet(_)))),
@@ -1054,37 +1103,97 @@ fn usage(u: &Usage) -> Vec<(String, bool)> {
     out
 }
 
-/// What follows the cairn: the task's context, then its last sessions,
-/// a line each: `7njqys  2m · ended`. A live one's status is said only
-/// when the facts over the cairn do not say it already; the rest of what
-/// is known of a session is `varde show`'s.
-fn rest(d: &varde_core::task::Detail, shown: Option<&str>, now: i64) -> Vec<(Part, String)> {
-    const SESSIONS: usize = 3;
+/// What follows the cairn: the task's context; the rest of what is
+/// known of the task is `varde show`'s.
+fn rest(d: &varde_core::task::Detail) -> Vec<(Part, String)> {
     let mut out = Vec::new();
     if let Some(b) = d.body.as_deref().filter(|b| !b.trim().is_empty()) {
         out.push((Part::Heading, "Context".into()));
         out.extend(b.lines().map(|l| (Part::Text, format!("  {l}"))));
     }
-    if !d.runs.is_empty() {
-        out.push((Part::Heading, "Sessions".into()));
-    }
-    for r in d.runs.iter().rev().take(SESSIONS) {
-        let state = match r.status {
-            _ if !r.launched => Some("not launched yet"),
-            None => Some("starting"),
-            Some("exited") => Some("ended"),
-            Some(s) => look::word(s).map(|(w, _)| w).filter(|w| Some(*w) != shown),
-        };
-        let state = state.map(|s| format!(" · {s}")).unwrap_or_default();
-        out.push((
-            Part::Text,
-            format!("  {}  {}{state}", varde_core::task::short(&r.id), age(now - r.started)),
-        ));
-    }
-    if d.runs.len() > SESSIONS {
-        out.push((Part::Quiet, format!("  and {} earlier: varde show {}", d.runs.len() - SESSIONS, d.short)));
-    }
     out
+}
+
+/// A task's sessions, a conversation a line: every one when it repeats,
+/// under its `schedule`, or ever ran on one, else the last few. Of a
+/// schedule's, those that found nothing are only the newest few: a task
+/// every 30 minutes would bury the rest under them.
+fn sessions(
+    d: varde_core::task::Detail,
+    schedule: Option<&str>,
+) -> Option<(String, Vec<varde_core::task::Conversation>)> {
+    const SESSIONS: usize = 3;
+    const QUIET: usize = 10;
+    // One its schedule ran keeps them all once the series ends.
+    let scheduled = d.runs.iter().any(|r| r.background);
+    let mut all = d.conversations;
+    if all.is_empty() {
+        return None;
+    }
+    let mut heading = match schedule {
+        Some(s) => format!("Sessions · {s}"),
+        None if all.len() > SESSIONS && !scheduled => {
+            let more = all.len() - SESSIONS;
+            all.truncate(SESSIONS);
+            format!("Sessions · {more} earlier: varde show {}", d.short)
+        }
+        None => "Sessions".into(),
+    };
+    // When each was last resumed says where RET goes among a schedule's
+    // many; a task of yours has no such question.
+    if schedule.is_none() && !scheduled {
+        all.iter_mut().for_each(|c| c.continued = None);
+    } else {
+        let before = all.len();
+        let mut quiet = 0;
+        all.retain(|c| {
+            if !c.quiet || c.unread || c.status.is_some() || c.continued.is_some() {
+                return true;
+            }
+            quiet += 1;
+            quiet <= QUIET
+        });
+        if all.len() < before {
+            heading.push_str(&format!(" · {} earlier found nothing", before - all.len()));
+        }
+    }
+    Some((heading, all))
+}
+
+/// `● Thu Oct 15 09:00`: a conversation by when it started, marked while
+/// what it found is unread, dim when it found nothing, with a live one's
+/// status and when it was last resumed: with nothing unread, RET on the
+/// task goes on from the newest.
+fn session_line(c: &varde_core::task::Conversation, picked: bool) -> Line<'static> {
+    use chrono::{Local, TimeZone};
+    let at = |ms: i64| {
+        Local
+            .timestamp_millis_opt(ms)
+            .single()
+            .map_or_else(|| ms.to_string(), |t| t.format("%a %b %-d %H:%M").to_string())
+    };
+    let when = at(c.started);
+    let word = match c.status.and_then(look::word) {
+        _ if !c.launched => Some(("not launched yet", Tone::Quiet)),
+        Some(w) => Some(w),
+        None if c.quiet => Some(("quiet", Tone::Quiet)),
+        None => None,
+    };
+    let mut spans = vec![
+        if c.unread { Span::styled("  ● ", tone_style(Tone::YourTurn)) } else { Span::raw("    ") },
+        if c.quiet { Span::styled(when, tone_style(Tone::Quiet)) } else { Span::raw(when) },
+    ];
+    if let Some((w, tone)) = word {
+        spans.push(Span::styled(format!("  {w}"), tone_style(tone)));
+    }
+    if let Some((t, how)) = &c.continued {
+        let how = if how == "fork" { "forked" } else { "resumed" };
+        spans.push(Span::styled(format!("  {how} {}", at(*t)), tone_style(Tone::Quiet)));
+    }
+    if picked {
+        spans[1] = spans[1].clone().reversed();
+    }
+    Line::from(spans)
 }
 
 /// A line [`View::drafts`] wrote: whose, what it is, and its words.
@@ -1594,11 +1703,11 @@ mod tests {
         press(&mut app, KeyCode::Char('G'));
         let s = screen(&mut app);
         assert!(s.contains("line 39") && !s.contains("C-d more"), "{s}");
-        let session = s.lines().find(|l| l.contains(" · ended")).unwrap_or_default();
-        assert!(
-            session.trim_end_matches(['│', ' ']).ends_with(" · ended") && !session.contains("started"),
-            "{s}"
-        );
+        // An ended session is when it started, and nothing more.
+        let session = s.lines().skip_while(|l| !l.contains("Sessions")).nth(1).unwrap_or_default();
+        use chrono::TimeZone;
+        let when = chrono::Local.timestamp_millis_opt(1).unwrap().format("%a %b %-d %H:%M").to_string();
+        assert_eq!(session.trim_matches(['│', ' ']), when, "{s}");
     }
 
     #[test]

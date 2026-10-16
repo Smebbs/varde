@@ -51,7 +51,7 @@ pub fn lines<'a>(
     let mut out = vec![Line::About(match whose {
         Whose::Task => "Cairn · what its sessions learned, handed to the next one".into(),
         Whose::Project(p) => format!(
-            "Project cairn · what {}'s tasks learned, handed to each of their sessions",
+            "Project cairn · what holds across {}, handed to each of its sessions",
             crate::list::project_name(Some(p))
         ),
     })];
@@ -87,7 +87,7 @@ pub fn lines<'a>(
     if c.is_none() {
         out.push(Line::Empty(match whose {
             Whose::Task => format!("No cairn yet: its first session's update writes one; {add}."),
-            Whose::Project(_) => format!("No project cairn yet: tasks closed as done add to it; {add}."),
+            Whose::Project(_) => format!("No project cairn yet: it holds only what you add; {add}."),
         }));
     }
     if c.is_some() || shape {

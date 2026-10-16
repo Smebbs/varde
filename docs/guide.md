@@ -127,9 +127,10 @@ are not tracked.
 
 **Scheduled and repeating tasks.** `varde schedule <task> RULE` makes
 varde start the task itself, in the background: a fresh session with
-no terminal (the agent's print mode), on the board as any other. Once
-it is done it waits in Needs you, and RET (or `varde attach`) carries
-it on in your terminal, as any task. RET while it still works asks
+no terminal (the agent's print mode), on the board as any other. A run
+that found nothing to report says so (`varde done` on its own task) and
+goes quietly back to Scheduled; one that found something waits in Needs
+you, and RET (or `varde attach`) opens it in your terminal. RET while it still works asks
 whether to take it over: it stops there and carries on with you. Nobody
 is there to approve a tool your settings do not allow, so such a tool
 is refused, and the session says what it could not do. To let it decide
@@ -149,8 +150,22 @@ on, once, however many were missed. Each run of a repeating task is a
 fresh conversation, given the task's cairn, so tell it what to do in
 its context and let the cairn carry how far it got. The next run waits
 for the last one's cairn update, and stops a session of it left idle
-for 15 minutes; one you are still in is left alone. `done`, `park` and
-`drop` stop the schedule, and `reopen` resumes it. Nobody is there to
+for 15 minutes; one you are still in is left alone.
+
+On a repeating task, `d` (`varde done`) ends this run, not the series:
+its session stops, what it found counts as read, and the task waits
+for its next time. Its row shows `↻` while a run is at work or waiting
+for you, to say so. To end the series, take the schedule off (`varde
+schedule <task> --off`, or `e` and clear `When:`), then `done` closes
+the task as any. `park` and `drop` stop the schedule, and `reopen`
+resumes it.
+
+Every run you have not opened keeps the row in Needs you, so a week
+away buries nothing: RET opens the newest one, and the next RET the one
+before. The view (`v`) lists every run of a repeating task under its
+cairn, newest first: `●` one you have not opened, `quiet` one that
+found nothing. RET on one opens it (`varde attach <task> --run <run>`).
+Nobody is there to
 answer when it starts, so a first start that would ask about a
 worktree needs `--worktree always|never` up front.
 
@@ -263,7 +278,7 @@ prints:
 ```sh
 varde edit k3m9qz --add findings The cache key omits the locale.
 varde edit k3m9qz --set 12 The cache key omits locale and region.
-varde edit k3m9qz --rm 12          # recall still finds it
+varde edit k3m9qz --rm 12          # recall no longer finds it
 varde edit k3m9qz --restore 12
 varde edit k3m9qz --rm status      # hand your Status back to the updates
 varde edit --project --add gotchas 'launch.rs tests need tmux.'

@@ -58,6 +58,9 @@ struct Task {
     repeats: Option<String>,
     /// Its schedule started this run in the background, with nobody at it.
     background: bool,
+    /// You continue a run its schedule started: what that one was told of
+    /// nobody watching is in the conversation, and no longer holds.
+    after_background: bool,
 }
 
 fn task_of(conn: &Connection, run: &str) -> Result<Option<Task>> {
@@ -66,7 +69,8 @@ fn task_of(conn: &Connection, run: &str) -> Result<Option<Task>> {
             "SELECT t.id, t.title, t.project, t.origin, t.created, coalesce(r.holdout, 0),
                (SELECT w.branch FROM worktree w WHERE w.task = t.id AND w.state = 'active'
                   AND (r.cwd = w.path OR substr(r.cwd, 1, length(w.path) + 1) = w.path || '/')),
-               s.rule, r.background
+               s.rule, r.background,
+               coalesce((SELECT p.background FROM run p WHERE p.id = r.parent_run), 0)
              FROM run r JOIN task t ON t.id = r.task LEFT JOIN schedule s ON s.task = t.id
              WHERE r.id = ?1",
         )?
@@ -84,6 +88,7 @@ fn task_of(conn: &Connection, run: &str) -> Result<Option<Task>> {
                         .is_ok_and(|r| r.repeats())
                 }),
                 background: r.get(8)?,
+                after_background: r.get::<_, bool>(9)? && !r.get::<_, bool>(8)?,
             })
         })
         .optional()?)
@@ -270,6 +275,12 @@ fn guidance(run: &str, task: Option<&Task>, held: bool, updates: bool) -> String
     }
     // By its id, not a bare `varde done`: that resolves to this task only in
     // a session varde launched, and a session left to guess tried `--run`.
+    if task.is_some_and(|t| t.after_background) {
+        out.push_str(
+            " The user is here now: this conversation began in the background, and what it was \
+             told then about nobody watching no longer holds. Ask when you need to.",
+        );
+    }
     if task.is_some_and(|t| t.background) {
         out.push_str(
             " Nobody is watching: its schedule started this session in the background, and the user \
@@ -280,14 +291,22 @@ fn guidance(run: &str, task: Option<&Task>, held: bool, updates: bool) -> String
     match task {
         // Each run of a repeating task is one occurrence: closing the task
         // ends them all.
-        Some(Task { id, repeats: Some(rule), .. }) => out.push_str(&format!(
-            " This task repeats ({}): varde starts it again, each time in a fresh session that has \
-             only its cairn, so note how far you got and what the next run must not redo. When this \
-             run's work is done, say so and stop. Close it (varde done {}) only when the user asks to \
-             end the series.",
-            clip(rule, TITLE_CHARS),
-            task::short(id)
-        )),
+        Some(Task { id, repeats: Some(rule), background, .. }) => {
+            let short = task::short(id);
+            out.push_str(&format!(
+                " This task repeats ({}): varde starts it again, each time in a fresh session that \
+                 has only its cairn, so note how far you got and what the next run must not redo. \
+                 varde done {short} ends this run, not the series: run it when the user says this run \
+                 is finished.",
+                clip(rule, TITLE_CHARS),
+            ));
+            if *background {
+                out.push_str(&format!(
+                    " If you found nothing the user needs to see, run varde done {short} as your last \
+                     step, and they are not asked to look at this run."
+                ));
+            }
+        }
         Some(t) => out.push_str(&format!(
             " When the user asks you to finish this task, close it: varde done {}.",
             task::short(&t.id)

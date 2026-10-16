@@ -58,11 +58,87 @@ fn act(
 }
 
 /// Close task `id`, doing what `opts` asks with its worktree, and queue
-/// its cairn's last update. Returns the report `--json` prints.
+/// its cairn's last update. Returns the report `--json` prints. A
+/// repeating task is not closed: its run ends, and the series goes on.
 pub fn close(store: &Store, id: &str, opts: Options) -> Result<Value> {
+    if let Some(schedule) = crate::schedule::repeating(store, id)? {
+        return end_run(store, id, opts, &schedule);
+    }
     let report = close_task(store, id, opts)?;
     settle(store, id);
     Ok(report)
+}
+
+/// `done` on a repeating task: end this run, not the series. Its
+/// sessions are stopped as `done` stops any and what they found is read,
+/// so its row goes back to Scheduled. A session running this on its own
+/// task is left running, and its run is marked done: it needs nothing
+/// more of you, which is how a background run says it found nothing.
+fn end_run(store: &Store, id: &str, opts: Options, schedule: &crate::schedule::Shown) -> Result<Value> {
+    let short = task::short(id);
+    if opts.remove {
+        bail!(
+            "{short} repeats ({}): its worktree is the series'; varde schedule {short} --off ends the series, and then done --remove can remove it",
+            schedule.rule
+        );
+    }
+    let live = live_runs(store, id)?;
+    let unread = store::unread_results(&store.conn, id)?;
+    if live.is_empty() && unread.is_empty() {
+        bail!(
+            "{short} has no run to end: it repeats ({}); varde schedule {short} --off ends the series",
+            schedule.rule
+        );
+    }
+    let own: Vec<String> = live
+        .into_iter()
+        .filter(|(run, pid, start)| is_own(run, *pid, *start))
+        .map(|(run, _, _)| run)
+        .collect();
+    let now = now_ms();
+    // Run from inside a session of the task, as its agent says this run is
+    // through or found nothing: that run ends, and no other. Another run's
+    // finding stays unread, and a session of yours keeps running.
+    if !own.is_empty() {
+        for run in &own {
+            store
+                .conn
+                .execute("UPDATE run SET done = ?2 WHERE id = ?1 AND done IS NULL", params![run, now])?;
+        }
+        return Ok(json!({"v": 1, "task": id, "repeats": schedule.rule, "next": schedule.due,
+                         "stopped": [], "left": own, "read": 0}));
+    }
+    // From an agent's session that may be one of this task's own, which
+    // varde cannot tell apart, ending every run would read findings
+    // nobody opened. One of another task's sessions acts for you.
+    let elsewhere = crate::run_env().is_some_and(|run| {
+        store
+            .conn
+            .query_row("SELECT task FROM run WHERE id = ?1", [&run], |r| r.get::<_, String>(0))
+            .is_ok_and(|t| t != id)
+    });
+    if in_agent() && !elsewhere {
+        bail!("{short} repeats: varde cannot tell which of its runs this session is; run varde done {short} from your terminal");
+    }
+    // Kept running, its runs still end: each needs nothing more of you.
+    let (stopped, left, kept) = if opts.keep_running {
+        let kept: Vec<String> = live_runs(store, id)?.into_iter().map(|(run, _, _)| run).collect();
+        for run in &kept {
+            store
+                .conn
+                .execute("UPDATE run SET done = ?2 WHERE id = ?1 AND done IS NULL", params![run, now])?;
+        }
+        (vec![], vec![], kept)
+    } else {
+        let (stopped, left) = stop_sessions(store, id, false)?;
+        (stopped, left, vec![])
+    };
+    for run in &unread {
+        store::read_result(&store.conn, run, now)?;
+    }
+    store::mark_seen(&store.conn, id, now)?;
+    Ok(json!({"v": 1, "task": id, "repeats": schedule.rule, "next": schedule.due,
+              "stopped": stopped, "left": left, "kept": kept, "read": unread.len()}))
 }
 
 /// The task's last cairn update, which brings Status to where it ended.
@@ -162,12 +238,20 @@ fn close_task(store: &Store, id: &str, opts: Options) -> Result<Value> {
                     );
                 }
             } else if opts.discard {
-                // Dropping takes the worktree away, and this session would
-                // be left running in a directory that is gone.
-                let me = std::process::id();
-                if live_runs(store, &id)?.iter().any(|(_, pid, start)| process::descends(me, (*pid, *start)))
-                {
-                    bail!("this session runs in {path}; end it, then drop the task");
+                // Dropping takes the worktree away, and this session, or one
+                // of yours an agent may not stop, would be left running in
+                // a directory that is gone.
+                for (run, pid, start) in live_runs(store, &id)? {
+                    if is_own(&run, pid, start) {
+                        bail!("this session runs in {path}; end it, then drop the task");
+                    }
+                    let background: bool =
+                        store
+                            .conn
+                            .query_row("SELECT background FROM run WHERE id = ?1", [&run], |r| r.get(0))?;
+                    if in_agent() && !background {
+                        bail!("a session of yours runs in {path}; end it, then drop the task");
+                    }
                 }
                 if !l.stranded.is_empty() {
                     bail!(
@@ -288,7 +372,11 @@ pub fn shelve(store: &Store, id: &str, keep_running: bool) -> Result<Value> {
     )?;
     let (stopped, left) = if keep_running { Default::default() } else { stop_sessions(store, id, false)? };
     settle(store, id);
-    Ok(json!({"v": 1, "task": id, "stopped": stopped, "left": left}))
+    // Parked, its schedule waits: it is how a series is paused.
+    let paused = crate::schedule::of(store, id)?.map(|s| s.rule);
+    // What waits unread goes with it, folded away: said, not hidden.
+    let unread = store::unread_results(&store.conn, id)?.len();
+    Ok(json!({"v": 1, "task": id, "stopped": stopped, "left": left, "paused": paused, "unread": unread}))
 }
 
 pub fn drop(paths: &Paths, reference: &str, as_json: bool) -> Result<()> {
@@ -314,7 +402,7 @@ pub fn reopen(paths: &Paths, reference: &str) -> Result<()> {
     let store = paths.open(Duration::from_secs(2))?;
     let id = task::resolve(&store, reference)?;
     if crate::start::reopen(&store.conn, &id)? {
-        println!("reopened {}", task::short(&id));
+        println!("reopened {}{}", task::short(&id), reopened_schedule(&store, paths, &id)?);
     } else {
         println!("{} is already open", task::short(&id));
     }
@@ -322,16 +410,32 @@ pub fn reopen(paths: &Paths, reference: &str) -> Result<()> {
 }
 
 pub fn describe_park(report: &Value) -> String {
-    format!("{}{}", closed_as(report, "parked"), left_running(report))
+    let paused =
+        report["paused"].as_str().map(|r| format!("; its schedule ({r}) waits until it is reopened"));
+    let unread = match report["unread"].as_u64().unwrap_or(0) {
+        0 => String::new(),
+        1 => "; 1 unread run waits in it".into(),
+        n => format!("; {n} unread runs wait in it"),
+    };
+    format!("{}{}{}{unread}", closed_as(report, "parked"), left_running(report), paused.unwrap_or_default())
+}
+
+/// `; scheduled every day 06:00; next Fri 06:00`, for a task just reopened
+/// that has a schedule.
+pub fn reopened_schedule(store: &Store, paths: &Paths, id: &str) -> Result<String> {
+    Ok(match crate::schedule::of(store, id)? {
+        Some(s) => format!("; scheduled {}", s.text(store, paths, id)?),
+        None => String::new(),
+    })
 }
 
 /// What a report says of the session the command ran in, which is never
 /// stopped under it.
-fn left_running(report: &Value) -> &'static str {
-    if report["left"].as_array().is_some_and(|l| !l.is_empty()) {
-        "; this session is left running: end it when you are finished"
-    } else {
-        ""
+fn left_running(report: &Value) -> String {
+    match report["left"].as_array().map_or(0, Vec::len) {
+        0 => String::new(),
+        1 => "; a session of it is left running: end it when you are finished".into(),
+        n => format!("; {n} sessions of it are left running: end them when you are finished"),
     }
 }
 
@@ -365,11 +469,32 @@ pub fn live_runs(store: &Store, id: &str) -> Result<Vec<(String, i64, i64)>> {
 /// is no longer written to. Either way the reaper then closes the task's
 /// tmux panes. `varde run` records the exit. The run this command itself
 /// runs under, an agent closing its own task, is left: stopping it would
-/// kill the command mid-call.
+/// kill the command mid-call. Run from an agent's session, it stops
+/// only runs its schedule started: a session of yours is never stopped
+/// by another. A run its schedule started, stopped so, needs nothing of
+/// you: it is marked done, so its exit is not a finding to read.
 fn stop_sessions(store: &Store, id: &str, wait: bool) -> Result<(Vec<String>, Vec<String>)> {
-    let me = std::process::id();
-    let (own, live): (Vec<_>, Vec<_>) =
-        live_runs(store, id)?.into_iter().partition(|(_, pid, start)| process::descends(me, (*pid, *start)));
+    let agent = in_agent();
+    let mut own = Vec::new();
+    let mut spared = Vec::new();
+    let mut live = Vec::new();
+    for r in live_runs(store, id)? {
+        let background: bool =
+            store.conn.query_row("SELECT background FROM run WHERE id = ?1", [&r.0], |row| row.get(0))?;
+        if is_own(&r.0, r.1, r.2) {
+            own.push(r);
+        } else if agent && !background {
+            spared.push(r);
+        } else {
+            if background {
+                store.conn.execute(
+                    "UPDATE run SET done = ?2 WHERE id = ?1 AND done IS NULL",
+                    params![r.0, now_ms()],
+                )?;
+            }
+            live.push(r);
+        }
+    }
     for (_, pid, _) in &live {
         unsafe { libc::kill(*pid as libc::pid_t, libc::SIGTERM) };
     }
@@ -377,7 +502,9 @@ fn stop_sessions(store: &Store, id: &str, wait: bool) -> Result<(Vec<String>, Ve
         end(&live);
     }
     let ids = |runs: Vec<(String, i64, i64)>| runs.into_iter().map(|(run, _, _)| run).collect::<Vec<_>>();
-    let (live, own) = (ids(live), ids(own));
+    // What is left running: this session, and a session of yours spared.
+    let (live, own): (Vec<String>, Vec<String>) =
+        (ids(live), ids(own).into_iter().chain(ids(spared)).collect());
     let mut args = vec!["reap", id];
     for run in &own {
         args.extend(["--spare", run]);
@@ -386,6 +513,29 @@ fn stop_sessions(store: &Store, id: &str, wait: bool) -> Result<(Vec<String>, Ve
     // and the terminal it ran in.
     crate::detach(&args, "the session reaper")?;
     Ok((live, own))
+}
+
+/// Whether live run `run`, its agent `pid` started at `start`, is the
+/// session this command runs in: the agent is an ancestor, or, from an
+/// agent's tool shell, which may not see its pids (a sandbox), it is the
+/// run that shell's `VARDE_RUN` names.
+fn is_own(run: &str, pid: i64, start: i64) -> bool {
+    process::descends(std::process::id(), (pid, start))
+        || (in_agent() && crate::run_env().as_deref() == Some(run))
+}
+
+static AGENT: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+/// For `done`, `park` and `drop` from the command line: whether an agent
+/// runs it, from its tool shell (Claude marks that shell), rather than
+/// you. A board is always you.
+pub fn from_command_line() {
+    AGENT.store(std::env::var_os("CLAUDECODE").is_some(), std::sync::atomic::Ordering::Relaxed);
+}
+
+/// Run by an agent, from its tool shell, rather than by you.
+fn in_agent() -> bool {
+    AGENT.load(std::sync::atomic::Ordering::Relaxed)
 }
 
 /// Stop `run`, one `varde run` launched, and wait for it to go: SIGTERM,
@@ -447,6 +597,47 @@ pub fn reap(paths: &Paths, reference: &str, spare: &[String]) -> Result<()> {
 }
 
 pub fn describe(report: &Value) -> String {
+    if let Some(rule) = report["repeats"].as_str() {
+        let short = report["task"].as_str().map(task::short).unwrap_or_default();
+        let next = report["next"].as_i64().map(|due| {
+            use varde_core::schedule;
+            // Held up by the run just ended, it starts as soon as it can.
+            if due <= now_ms() {
+                return ", the next run starts now".to_string();
+            }
+            format!(", next {}", schedule::when(schedule::from_ms(due), schedule::from_ms(now_ms())))
+        });
+        let stopped = match report["stopped"].as_array().map_or(0, Vec::len) {
+            0 => "",
+            1 => "; its session was stopped",
+            _ => "; its sessions were stopped",
+        };
+        let left = match report["left"].as_array().map_or(0, Vec::len) {
+            0 => String::new(),
+            1 => "; a session of it is left running".into(),
+            n => format!("; {n} sessions of it are left running"),
+        };
+        // What it ended, live, and what it read that nobody had opened.
+        let live = ["stopped", "left", "kept"]
+            .iter()
+            .map(|k| report[k].as_array().map_or(0, Vec::len))
+            .sum::<usize>();
+        let read = report["read"].as_u64().unwrap_or(0) as usize;
+        let kept = match report["kept"].as_array().map_or(0, Vec::len) {
+            0 => "",
+            1 => "; its session keeps running",
+            _ => "; its sessions keep running",
+        };
+        let runs = |n: usize| if n == 1 { "1 unread run".to_string() } else { format!("{n} unread runs") };
+        let what = match (live, read) {
+            (0 | 1, 0) => format!("ended this run of {short}"),
+            (0, r) => format!("marked {} of {short} read", runs(r)),
+            (n, 0) => format!("ended {n} runs of {short}"),
+            (1, r) => format!("ended this run of {short} and marked {} read", runs(r)),
+            (n, r) => format!("ended {n} runs of {short} and marked {} read", runs(r)),
+        };
+        return format!("{what}{stopped}{left}{kept}; it repeats ({rule}{})", next.unwrap_or_default());
+    }
     describe_as(report, "done")
 }
 

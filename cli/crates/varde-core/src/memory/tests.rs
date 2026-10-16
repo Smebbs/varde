@@ -760,20 +760,26 @@ fn a_line_is_changed_one_at_a_time_as_yours_within_the_caps() {
     );
     let version = cairn(&s.conn, "T1").unwrap().unwrap().1;
 
-    // Changed, it keeps its id and its old words are history; the same
-    // words change nothing.
+    // Changed, it keeps its id and its old words are history, taken back;
+    // the same words change nothing.
     let set = change(&mut s, t, Change::Set(id, "`session_refresh` races logout on expiry"), 6).unwrap();
     assert_eq!((set.id, set.version), (Some(id), version + 1));
+    let old = &former(&s.conn, "T1").unwrap()[0];
+    assert_eq!(
+        (old.text.as_str(), old.reason.as_deref()),
+        ("The `session_refresh` races logout", Some(EDITED_BY_YOU))
+    );
     assert!(
         !change(&mut s, t, Change::Set(id, "`session_refresh`  races logout on expiry"), 7).unwrap().changed
     );
 
-    // Removed, it is history, recall finds it, and it comes back as it was.
+    // Removed, it is history, recall no longer finds it, and it comes back
+    // as it was.
     let removed = change(&mut s, t, Change::Remove(id), 8).unwrap();
     assert!(removed.cairn.findings.is_empty());
-    let gone = &former(&s.conn, "T1").unwrap()[0];
-    assert_eq!((gone.id, gone.reason.as_deref()), (id, Some(REMOVED)));
-    assert_eq!(recall(&s, "expiry", Some("/p"), None, 5, ME, 9).unwrap().hits[0].kind, "history");
+    let gone = former(&s.conn, "T1").unwrap().into_iter().find(|f| f.id == id).unwrap();
+    assert_eq!(gone.reason.as_deref(), Some(REMOVED));
+    assert!(recall(&s, "expiry", Some("/p"), None, 5, ME, 9).unwrap().hits.is_empty());
     assert_eq!(
         refused(&mut s, Change::Remove(id)),
         format!("line #{id} is already removed; --restore {id} brings it back")

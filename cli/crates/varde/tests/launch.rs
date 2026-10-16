@@ -758,9 +758,8 @@ fn model_prompts(e: &Env) -> Vec<String> {
 }
 
 #[test]
-fn closing_a_task_as_done_promotes_what_holds_beyond_it_into_its_projects_memory() {
+fn closing_a_task_as_done_leaves_its_projects_cairn_to_the_user() {
     let e = Env::with_repo(AGENT);
-    std::fs::write(e.repo().join("CLAUDE.md"), "Run the tests with cargo test.\n").unwrap();
     let t = e.new_task("Page shows the wrong language");
     e.cmd(&["attach", &t, "--worktree", "never"])
         .env("FAKE_TALK", "Found it: the cache key omits the locale.")
@@ -768,43 +767,24 @@ fn closing_a_task_as_done_promotes_what_holds_beyond_it_into_its_projects_memory
         .output()
         .unwrap();
     wait_for_cairn(&e, &t);
-    let out = e
-        .cmd(&["done", &t])
-        .env(
-            "FAKE_PROMOTE",
-            "ADD gotchas: `cache_key_for` must include the locale\\nADD conventions: Pages are cached",
-        )
-        .output()
-        .unwrap();
-    assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
-    let repo = e.repo().to_string_lossy().to_string();
-    let mut memory = Value::Null;
+    e.ok(&["done", &t]);
     poll(200, || {
-        let shown: Value = serde_json::from_str(&e.ok(&["show", "--project", &repo, "--json"])).unwrap();
-        memory = shown["cairn"].clone();
-        !memory.is_null()
+        e.query("SELECT count(*) FROM job WHERE kind = 'close' AND state NOT IN ('queued', 'running')") == "1"
     });
-    // Only what names its code is admitted.
-    assert_eq!(memory["gotchas"][0]["text"], "`cache_key_for` must include the locale", "{memory}");
-    assert!(memory["conventions"].is_null(), "{memory}");
-    let prompt = model_prompts(&e).into_iter().find(|p| p.starts_with("Project: ")).unwrap();
-    assert!(prompt.contains("Current project cairn:\n(none yet)"), "{prompt}");
-    assert!(prompt.contains("Its cairn:\nStatus: "), "{prompt}");
-    assert!(prompt.contains("- cache_key_for drops the locale on every page"), "{prompt}");
-    assert!(prompt.contains("--- CLAUDE.md ---\nRun the tests with cargo test."), "{prompt}");
-    // A job of its own, with what it cost.
-    let db = e.db();
-    let promote: (String, i64, i64) = db
-        .query_row("SELECT state, calls, input_tokens FROM job WHERE kind = 'promote'", [], |r| {
-            Ok((r.get(0)?, r.get(1)?, r.get(2)?))
-        })
-        .unwrap();
-    assert_eq!(promote.0, "done");
-    assert_eq!(promote.2, 700 * promote.1);
-    // The next session in the project is shown it.
-    let other = e.new_task("Another page");
-    e.ok(&["attach", &other, "--worktree", "never"]);
-    assert!(contexts(&e).last().unwrap().contains("Gotchas:\n- `cache_key_for` must include the locale"));
+    // No model is asked to write the project's cairn: only the user does.
+    assert_eq!(e.query("SELECT count(*) FROM job WHERE kind = 'promote'"), "0");
+    let repo = e.repo().to_string_lossy().to_string();
+    let shown: Value = serde_json::from_str(&e.ok(&["show", "--project", &repo, "--json"])).unwrap();
+    assert!(shown["cairn"].is_null(), "{shown}");
+    // A promotion an older varde queued is set aside, without a model call.
+    let run = e.query("SELECT run FROM job WHERE kind = 'close'");
+    e.sql(&format!(
+        "INSERT INTO job (id, run, upto, kind, state, created) VALUES ('P', '{run}', 1, 'promote', 'queued', 0)"
+    ));
+    let before = model_prompts(&e).len();
+    e.ok(&["job", "P"]);
+    assert_eq!(e.query("SELECT state FROM job WHERE id = 'P'"), "skipped");
+    assert_eq!(model_prompts(&e).len(), before);
 }
 
 #[test]
@@ -822,12 +802,8 @@ fn a_poisoned_session_reaches_neither_its_task_nor_its_project() {
     assert_eq!(d["cairn"]["findings"], serde_json::json!([]));
     // Refused, it was sent back once, saying why.
     assert!(model_prompts(&e).iter().any(|p| p.contains("memory holds no URLs")));
-    e.cmd(&["done", &t]).env("FAKE_PROMOTE", format!("ADD gotchas: {order}")).output().unwrap();
-    poll(200, || {
-        e.query(
-            "SELECT count(*) FROM job WHERE kind = 'promote' AND state IN ('done', 'unchanged', 'skipped')",
-        ) == "1"
-    });
+    e.ok(&["done", &t]);
+    poll(200, || e.query("SELECT count(*) FROM job WHERE state IN ('queued', 'running')") == "0");
     let other = e.new_task("Unrelated work");
     e.ok(&["attach", &other, "--worktree", "never"]);
     let given = contexts(&e).last().unwrap().clone();
@@ -1445,8 +1421,7 @@ fn closing_a_task_settles_its_cairn() {
     assert!(close.contains(&format!("- [{open}] Add the locale to the key.")), "{close}");
     // Parked, it is told so; with updates off, nothing is queued.
     e.cmd(&["park", &t]).env("FAKE_REPLY", "NO EDITS").output().unwrap();
-    // Once every update has settled: the promotion, given a reply that is
-    // not edits, asks a second time.
+    // Once every update has settled.
     poll(200, || {
         model_prompts(&e).iter().any(|p| p.contains("This task has just been parked"))
             && e.query("SELECT count(*) FROM job WHERE state IN ('queued', 'running')") == "0"
@@ -1898,7 +1873,7 @@ fn an_agent_that_closes_its_own_task_is_not_stopped_under_it() {
         assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
         let log = std::fs::read_to_string(e.path("done.log")).unwrap();
         std::fs::remove_file(e.path("done.log")).unwrap();
-        assert!(log.contains("this session is left running") && log.ends_with("survived\n"), "{log}");
+        assert!(log.contains("a session of it is left running") && log.ends_with("survived\n"), "{log}");
         assert_eq!(e.show(&t)["state"], if how == "done" { "done" } else { "parked" });
     }
     // Removing its own worktree once its work landed: the worktree it runs

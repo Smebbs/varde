@@ -1,11 +1,11 @@
 //! The jobs that update memory: a fold of a run's transcript into its
-//! task's cairn, a task's close-out, and a promotion into its project's
-//! memory. Queued from hooks and commands, run detached.
+//! task's cairn, and a task's close-out. Queued from hooks and commands,
+//! run detached.
 
 use anyhow::Result;
 use rusqlite::{params, Connection, OptionalExtension, TransactionBehavior};
 
-use super::{cairn, confirm, pending_notes, project_cairn, save_doc, Owner, Write};
+use super::{cairn, confirm, pending_notes, save_doc, Owner, Write};
 use crate::cairn::{Cairn, Item, Section};
 use crate::store::Store;
 
@@ -74,7 +74,7 @@ fn insert_job(conn: &Connection, run: &str, upto: i64, kind: &str, now: i64) -> 
                                                          beat = NULL, attempts = 0, finished = NULL
                WHERE job.state = 'failed'
                   OR (job.state IN ('queued', 'running') AND coalesce(job.beat, job.created) < ?6)
-                  OR (job.kind IN ('close', 'promote') AND job.state IN ('done', 'unchanged', 'skipped'))
+                  OR (job.kind = 'close' AND job.state IN ('done', 'unchanged', 'skipped'))
              RETURNING id",
             params![id, run, upto, kind, now, now - STUCK_AFTER_MS],
             |r| r.get(0),
@@ -395,38 +395,4 @@ pub fn skip_job(conn: &Connection, job: &str, now: i64) -> Result<()> {
         params![job, now],
     )?;
     Ok(())
-}
-
-/// Queue the promotion of a task just closed as done into its project's
-/// memory, on the run its close-out ran on. Done again whenever the task
-/// is closed again.
-pub fn enqueue_promote(conn: &Connection, run: &str, upto: i64, now: i64) -> Result<Option<String>> {
-    insert_job(conn, run, upto, "promote", now)
-}
-
-/// Record a promotion's result: the project's cairn, if still at the
-/// version the job read. Returns false, writing nothing, when it moved
-/// underneath it.
-pub fn finish_promote(
-    store: &mut Store,
-    job: &str,
-    project: &str,
-    expected: i64,
-    outcome: Outcome,
-    now: i64,
-) -> Result<bool> {
-    let tx = store.conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
-    let current = project_cairn(&tx, project)?.map_or(0, |(_, v)| v);
-    if current != expected {
-        return Ok(false);
-    }
-    let run: String = tx.query_row("SELECT run FROM job WHERE id = ?1", [job], |r| r.get(0))?;
-    let owner = Owner::Project(project);
-    let Some(state) = write_outcome(&tx, owner, expected, outcome, &run, "left out by a promotion", now)?
-    else {
-        return Ok(false);
-    };
-    tx.execute("UPDATE job SET state = ?2, finished = ?3 WHERE id = ?1", params![job, state, now])?;
-    tx.commit()?;
-    Ok(true)
 }

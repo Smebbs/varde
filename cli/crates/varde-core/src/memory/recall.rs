@@ -96,15 +96,18 @@ fn delete_rows(conn: &Connection, filter: &str, key: &str) -> Result<()> {
 }
 
 /// `owner`'s bullets, current and former, as recall indexes them: what
-/// each is (its section, or `history`), its id, and its text.
+/// each is (its section, or `history`), its id, and its text. Not those
+/// the user took back (`TAKEN_BACK`): they were wrong.
 fn indexed_items(conn: &Connection, owner: Owner) -> Result<Vec<(String, String, String)>> {
     let mut stmt = conn.prepare_cached(&format!(
         "SELECT CASE state WHEN 'current' THEN section ELSE 'history' END, id, text FROM cairn_item
-         WHERE {} = ?1",
+         WHERE {} = ?1 AND (state = 'current' OR coalesce(reason, '') NOT IN (?2, ?3, ?4))",
         owner.column()
     ))?;
-    let rows =
-        stmt.query_map([owner.key()], |r| Ok((r.get(0)?, r.get::<_, i64>(1)?.to_string(), r.get(2)?)))?;
+    let [a, b, c] = super::TAKEN_BACK;
+    let rows = stmt.query_map(params![owner.key(), a, b, c], |r| {
+        Ok((r.get(0)?, r.get::<_, i64>(1)?.to_string(), r.get(2)?))
+    })?;
     Ok(rows.collect::<Result<_, _>>()?)
 }
 
@@ -268,7 +271,7 @@ fn shown_anyway(
     Ok(out)
 }
 
-/// `related`, without logging: for varde's own use, such as promotion.
+/// `related`, without logging.
 /// Its work is bounded, not timed: at most `RELATED_TERMS` index lookups
 /// and `RELATED_ROWS` rows read, which the bench holds to a hook's budget.
 /// What the session is shown anyway, its own cairn and its project's

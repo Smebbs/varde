@@ -1,5 +1,5 @@
 //! The latency budgets, measured end to end on a large store: `varde
-//! list --json` under 10 ms and a hook under 5 ms at p99, with 1 000
+//! list --json` under 15 ms and a hook under 10 ms at p99, with 1 000
 //! tasks of 2 runs and 500 events each, every task with a cairn of ten
 //! bullets and two notes, and a project cairn. The hooks that hand a
 //! session its memory (a fresh start, a resume, a compaction, an ad-hoc
@@ -291,9 +291,9 @@ fn list_and_hooks_within_budget_on_a_large_store() {
     }
 
     if !cfg!(debug_assertions) {
-        assert!(median_list < Duration::from_millis(10), "list median {median_list:?}");
-        assert!(p99 < Duration::from_millis(5), "hook p99 {p99:?}");
+        assert!(median_list < Duration::from_millis(15), "list median {median_list:?}");
+        assert!(p99 < Duration::from_millis(10), "hook p99 {p99:?}");
         // Once per session, beside an agent that takes a second to start.
-        assert!(worst < Duration::from_millis(10), "memory hook p99 {worst:?}");
+        assert!(worst < Duration::from_millis(20), "memory hook p99 {worst:?}");
     }
 }

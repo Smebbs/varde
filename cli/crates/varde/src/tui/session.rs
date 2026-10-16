@@ -121,6 +121,7 @@ impl App<'_> {
             agent: None,
             project: project.clone(),
             take_over: start.take_over,
+            run: start.run.clone(),
         };
         match start::prepare(store, id, opts, false)? {
             start::Outcome::Ask(start::Ask::TakeOver { .. }) => {
@@ -188,11 +189,12 @@ impl App<'_> {
         let mut store = self.paths.open(BUSY)?;
         let title: String =
             store.conn.query_row("SELECT title FROM task WHERE id = ?1", [id], |r| r.get(0))?;
+        let go = start.go;
         match self.prepare(&mut store, id, start, worktree, project)? {
             None | Some(start::Outcome::Ask(_)) => Ok(String::new()),
             Some(start::Outcome::Focus { run, .. }) => {
                 let tty = start::tty_of(&store, &run)?;
-                Ok(if !start.go {
+                Ok(if !go {
                     format!("{} is already running; RET goes to it", task::short(id))
                 } else if tmux.focus(id, tty.as_deref())? {
                     varde_core::store::mark_seen(&store.conn, id, now_ms())?;
@@ -210,11 +212,11 @@ impl App<'_> {
             Some(start::Outcome::Ready { run, cwd, mut notices }) => {
                 let title = varde_core::title::clean(&title);
                 let run = crate::memory_cmd::short_run(&store.conn, &run);
-                tmux.open(id, &title, &cwd, &self.home(), &format!("{} run {run}", typed_exe()), start.go)?;
-                if !start.go {
+                tmux.open(id, &title, &cwd, &self.home(), &format!("{} run {run}", typed_exe()), go)?;
+                if !go {
                     notices.push(format!("started {} in a window of its own", task::short(id)));
                 }
-                self.quit |= self.popup && start.go;
+                self.quit |= self.popup && go;
                 Ok(notices.join("; "))
             }
         }

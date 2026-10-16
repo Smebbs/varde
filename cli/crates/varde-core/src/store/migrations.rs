@@ -252,4 +252,25 @@ INSERT INTO memory_fts (task, kind, ref, title)
 SELECT id, 'title', '', title FROM task
 WHERE id NOT IN (SELECT c7 FROM memory_fts_content WHERE c7 IS NOT NULL);
 "#,
+    // 6: when the run's own session ran `varde done` on its task: it
+    // needs nothing more of you. On a repeating task that ends the run,
+    // not the series, and a background run says so when it found nothing.
+    r#"
+ALTER TABLE run ADD COLUMN done INTEGER;
+"#,
+    // 7: what the user took back is not recalled (`memory::TAKEN_BACK`).
+    // Words the user changed were all `edited`: the version written with
+    // them says whose edit it was. Then their rows leave the index.
+    r#"
+UPDATE cairn_item SET reason = 'edited by you'
+WHERE reason = 'edited' AND (
+  EXISTS (SELECT 1 FROM cairn_history h
+          WHERE h.task = cairn_item.task AND h.ts = cairn_item.left_at AND h.author = 'user')
+  OR EXISTS (SELECT 1 FROM project_cairn_history h
+             WHERE h.project = cairn_item.project AND h.ts = cairn_item.left_at AND h.author = 'user'));
+DELETE FROM memory_fts WHERE rowid IN (
+  SELECT f.id FROM memory_fts_content f JOIN cairn_item i ON i.id = CAST(f.c9 AS INTEGER)
+  WHERE f.c8 = 'history' AND i.state = 'history'
+    AND i.reason IN ('removed by you', 'edited by you', 'removed in varde edit'));
+"#,
 ];

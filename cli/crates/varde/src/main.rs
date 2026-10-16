@@ -104,8 +104,12 @@ enum Cmd {
     /// [DAY|DATE] [HH:MM]`, `every day|weekday|weekend|mon,thu [HH:MM]`,
     /// `every 30m|4h|2d|1w`, or an org timestamp such as `<2026-10-19 Mon
     /// 09:00 ++1w>`. A start missed while the machine was off or asleep
-    /// happens as soon as it is on. Run `varde schedule --install` once,
-    /// so something wakes varde every minute.
+    /// happens as soon as it is on, once however many were missed. Each run
+    /// that ends without saying it found nothing waits in Needs you until
+    /// it is opened; `varde done` on a repeating task ends its run, not the
+    /// series. Parking the task pauses it, and reopening resumes it. `--off`
+    /// ends the series; then `varde done` closes the task. Run `varde
+    /// schedule --install` once, so something wakes varde every minute.
     #[command(display_order = 9)]
     Schedule {
         /// The task: the six characters the board shows, or their first four.
@@ -117,6 +121,10 @@ enum Cmd {
         /// Remove its schedule.
         #[arg(long)]
         off: bool,
+        /// Start its next run now, in the background, as its time would:
+        /// to try a schedule out. The series then goes on as it would.
+        #[arg(long, conflicts_with_all = ["off", "rule"])]
+        now: bool,
         /// Whether its first start gets a worktree: nobody is there to ask.
         #[arg(long, value_enum)]
         worktree: Option<WorktreeArg>,
@@ -233,7 +241,7 @@ enum Cmd {
         /// TEXT `-` is read from stdin.
         #[arg(long, num_args = 2.., value_names = ["ID", "TEXT"])]
         set: Option<Vec<String>>,
-        /// Remove the line with this id; recall still finds it. `status`
+        /// Remove the line with this id; recall no longer finds it. `status`
         /// hands a Status you set back to the updates, which may then change it.
         #[arg(long, value_name = "ID", value_parser = memory_cmd::rm_target)]
         rm: Option<memory_cmd::Rm>,
@@ -414,6 +422,9 @@ struct StartArgs {
     /// schedule, and carry it on here.
     #[arg(long)]
     take_over: bool,
+    /// Continue this run's conversation rather than the newest.
+    #[arg(long, conflicts_with = "fresh")]
+    run: Option<String>,
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -441,6 +452,7 @@ impl StartArgs {
             agent: self.agent,
             project: self.project,
             take_over: self.take_over,
+            run: self.run,
         })
     }
 }
@@ -655,6 +667,9 @@ fn main() -> ExitCode {
 
 fn dispatch(paths: &Paths, cmd: Option<Cmd>, popup: bool) -> Result<i32> {
     let Some(cmd) = cmd else { return tui::run(paths, popup).map(|_| 0) };
+    if matches!(cmd, Cmd::Done { .. } | Cmd::Park { .. } | Cmd::Drop { .. }) {
+        done::from_command_line();
+    }
     let result = match cmd {
         Cmd::List { json, all, project } => list::run(paths, json, all, project.as_deref()),
         Cmd::Doctor { json } => doctor::run(paths, json),
@@ -666,6 +681,7 @@ fn dispatch(paths: &Paths, cmd: Option<Cmd>, popup: bool) -> Result<i32> {
         }
         Cmd::Schedule { install: true, .. } => schedule::install(paths, true),
         Cmd::Schedule { uninstall: true, .. } => schedule::install(paths, false),
+        Cmd::Schedule { task: Some(task), now: true, .. } => schedule::now(paths, &task),
         Cmd::Schedule { task, rule, off, worktree, .. } => {
             let rule = (!rule.is_empty()).then(|| rule.join(" "));
             let worktree = worktree.map(|w| matches!(w, WorktreeArg::Always));

@@ -29,6 +29,9 @@ pub struct Options {
     /// Stop a session its schedule started in the background, and carry
     /// it on here: the answer to [`Ask::TakeOver`].
     pub take_over: bool,
+    /// Continue this run's conversation rather than the newest: its id,
+    /// or the end of it `varde show` prints.
+    pub run: Option<String>,
 }
 
 /// The agent a fresh run uses when none is asked for.
@@ -261,7 +264,7 @@ pub fn prepare(store: &mut Store, task_id: &str, opts: Options, interactive: boo
     // was closed since, which may have taken its worktree, nor when the
     // second start asks for something the run is not: it is planned as
     // any start is.
-    if opts.want == Want::Continue {
+    if opts.want == Want::Continue && opts.run.is_none() {
         let waiting: Option<(String, String, String, Option<String>)> = store
             .conn
             .query_row(
@@ -355,6 +358,23 @@ pub fn prepare(store: &mut Store, task_id: &str, opts: Options, interactive: boo
     // old one: a start there would run in the old checkout.
     let mut runs = run_facts(store, task_id)?;
     runs.retain(|r| r.cwd.as_deref().is_none_or(|c| in_project(store, task_id, project.as_deref(), c)));
+    // Opening a run continues its conversation, not the newest; asked for
+    // none, that of the newest result nobody has read, unless a session
+    // is live to go to.
+    let target = match &opts.run {
+        Some(r) => Some(crate::memory_cmd::resolve_run(&store.conn, r)?),
+        None if opts.want == Want::Continue && !runs.iter().any(|r| r.live()) => {
+            store::unread_results(&store.conn, task_id)?.into_iter().next()
+        }
+        None => None,
+    };
+    let opened = match &target {
+        Some(t) => conversation(store, task_id, t)?,
+        None => vec![],
+    };
+    if target.is_some() {
+        runs.retain(|r| opened.contains(&r.id));
+    }
     let wt = worktree_facts(store, task_id)?;
     let Plan { session, tree } = plan::plan(&runs, wt.as_ref().map(|w| &w.0), opts.want, worktree);
 
@@ -370,6 +390,11 @@ pub fn prepare(store: &mut Store, task_id: &str, opts: Options, interactive: boo
             crate::done::stop_run(store, run)?;
             return prepare(store, task_id, again, interactive);
         }
+    }
+    // Only opening a run reads what it found.
+    let now = now_ms();
+    for run in &opened {
+        store::read_result(&store.conn, run, now)?;
     }
     if let Session::Focus { run } = session {
         // Starting a task picks it up, even when that is only going to
@@ -574,6 +599,27 @@ pub fn prepare(store: &mut Store, task_id: &str, opts: Options, interactive: boo
     tx.commit()?;
     notices.extend(crate::doctor::unhooked(agent.name()));
     Ok(Outcome::Ready { run, cwd, notices })
+}
+
+/// The runs of `run`'s conversation: it and every run that continued it,
+/// resumed or forked. `run` must be `task_id`'s.
+fn conversation(store: &Store, task_id: &str, run: &str) -> Result<Vec<String>> {
+    let all: Vec<(String, Option<String>)> = store
+        .conn
+        .prepare("SELECT id, parent_run FROM run WHERE task = ?1 ORDER BY started, rowid")?
+        .query_map([task_id], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    if !all.iter().any(|(id, _)| id == run) {
+        bail!("run {} is not one of {}'s", task::short(run), task::short(task_id));
+    }
+    // Oldest first, so a parent is in before its children.
+    let mut out = vec![run.to_string()];
+    for (id, parent) in &all {
+        if parent.as_ref().is_some_and(|p| out.contains(p)) && !out.contains(id) {
+            out.push(id.clone());
+        }
+    }
+    Ok(out)
 }
 
 /// Back to Open from done, parked or dropped; whether it was any of them.

@@ -83,10 +83,32 @@ pub fn meta(r: &Row, now: i64, project: bool) -> Vec<(String, Tone)> {
     if let Some(p) = r.project.as_deref().filter(|_| project) {
         out.push((crate::list::project_name(Some(p)).to_string(), Tone::Quiet));
     }
-    // A task waiting for its schedule shows when it starts, not its age.
-    match r.schedule.as_ref().filter(|_| word(r.status).is_none()) {
-        Some(s) => out.push((s.label.clone(), if s.late { Tone::Asking } else { Tone::Quiet })),
-        None => out.push((crate::list::age(now - r.last), Tone::Quiet)),
+    // A task waiting for its schedule shows when it starts, not its age;
+    // one at work that repeats, that `d` ends this run, not the task, how
+    // many of its runs wait to be read, and that its next start is due,
+    // waiting for this session: late once that has gone on for a day.
+    match r.schedule.as_ref() {
+        Some(s) if word(r.status).is_none() => {
+            out.push((s.label.clone(), if s.late { Tone::Asking } else { Tone::Quiet }))
+        }
+        s => {
+            if let Some(s) = s.filter(|s| s.repeats) {
+                let mut mark = String::from("↻");
+                // A row that is not itself the one unread result, such as
+                // a live session, says it waits too.
+                if r.results > 1 || (r.results == 1 && !r.unread) {
+                    mark.push_str(&format!(" {} unread", r.results));
+                }
+                let long = now - s.due > 24 * 3_600_000;
+                match (s.late, long) {
+                    (true, false) => mark.push_str(" due"),
+                    (true, true) => mark.push_str(" late"),
+                    _ => {}
+                }
+                out.push((mark, if s.late && long { Tone::Asking } else { Tone::Quiet }));
+            }
+            out.push((crate::list::age(now - r.last), Tone::Quiet))
+        }
     }
     out
 }

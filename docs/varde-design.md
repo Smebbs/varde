@@ -23,7 +23,7 @@ example integration for everyone else.
 | **State** | One SQLite database per machine. Status is derived and never stored. No daemon, and no sync. |
 | **Agents** | Claude Code and pi, behind an adapter trait with an agent-neutral event vocabulary. Codex and others can be added the same way. |
 | **Liveness** | `varde run` is the parent process of the agent, and a hook finds the agent process of a session varde did not launch, so liveness is observed, not inferred. |
-| **Memory** | One cairn per task and one memory per project: a fixed shape, hard caps, changed only by checked edits. It reaches every session through the agent's hooks, anchored bullets are checked against the code, and `varde eval` measures what it was worth. |
+| **Memory** | One cairn per task, written by its updates, and one per project, written only by you (Q38): a fixed shape, hard caps, changed only by checked edits. It reaches every session through the agent's hooks, anchored bullets are checked against the code, and `varde eval` measures what it was worth. |
 | **Standalone UI** | Plain commands with `--json`, plus a TUI board (`varde` with no arguments). |
 | **Emacs** | A thin client. It renders a board varde has already grouped, and adds terminals, workspaces and the task view. Org meets varde through `varde:` links in your notes, which show where their tasks stand; nothing is synced, and org-varde writes nothing to org but the links you ask for (Q31). |
 | **Repo** | This one. The CLI lives in `cli/`. The elisp stays as the reference integration, and `docs/clients.md` is the contract for other clients. |
@@ -56,9 +56,9 @@ oldest, and user notes are among them.
 
 1. **Reliable.** Every fact has exactly one owner and changes only
    inside a transaction.
-2. **Efficient.** A hook takes under 5 ms at p99. The hooks that hand
-   a session its memory take under 10 ms (Q20). `varde list --json`
-   takes under 10 ms at 1 000 tasks. No daemon.
+2. **Efficient.** A hook takes under 10 ms at p99. The hooks that hand
+   a session its memory take under 20 ms (Q20). `varde list --json`
+   takes under 15 ms at 1 000 tasks (Q35). No daemon.
 3. **Standalone.** Fully usable in a plain terminal, with no Emacs or
    org.
 4. **Adaptable.** Every command a client needs speaks `--json`, context
@@ -121,7 +121,7 @@ sync (§5), and embeddings (§7.4).
 | **Project cairn** | project | Its version, and each version kept in `project_cairn_history` (§7.5). Its bullets are items. |
 | **Note** | ULID | task, run, text, ts, folded (bool). Pinned input to the next update. |
 | **Schedule** | task | rule (as typed), next_due, worktree (the answer a first start would ask for), fired, tried and error (why the last try to start failed) (§6.5) |
-| **Job** | ULID | run, the transcript position it folds up to, kind (`fold`, `close` for a close-out, or `promote` into the project's cairn), state, attempts, a beat while it waits on a model, its model calls with their input and output tokens, and what its ADDs repeated (§7.7). Unique on (run, position, kind). Aged out after 30 days, and its cost with it. |
+| **Job** | ULID | run, the transcript position it folds up to, kind (`fold`, or `close` for a close-out; `promote`, into the project's cairn, was dropped by Q38), state, attempts, a beat while it waits on a model, its model calls with their input and output tokens, and what its ADDs repeated (§7.7). Unique on (run, position, kind). Aged out after 30 days, and its cost with it. |
 | **Shown** | — | what each run was given (§7.3): kind, task, version, bullet or note ids. Aged out after 30 days, with the recall log, by the same jobs that age out events. |
 
 Rules:
@@ -192,19 +192,19 @@ out of `--help` (Q15).
 | `varde` | Opens the TUI board. The groups are Needs you, Working, Open, Scheduled, Inbox, Done and Parked, which starts collapsed; every group is always shown, in that order, an empty one as a dim line, and `z` folds any (Q29). Done holds tasks closed today, and older ones whose worktree is still waiting for its work to land. Each row shows where its git work stands (§6.3), `●` marks an unread one, and a deferred task's row ends with `← <short>` of its origin. Tab goes to the next task that needs you, `u` reopens what `d`, `P` or `x` last closed there, and `v` opens a task's view, its cairn first, edited a line at a time (Q30). RET suspends the board and attaches; inside tmux it opens the session in a window of its own instead (Q6), and `varde --popup`, the board in a tmux `display-popup -E`, quits once a key has gone to a session, so the popup closes on it (outside tmux the flag is ignored). Opened inside a repository, it keeps to that project's rows once it has one, says how many are elsewhere and how many of those need you, and `.` shows every project (Q26). Nothing that fails in the background closes the board: errors, notices and a broken config file go to its message line. Once a newer varde has migrated the store, the board starts again as that varde. SIGTERM ends it as `q` does, giving the terminal back; with no terminal it says so and exits non-zero. |
 | `varde list [--all] [--project [DIR]] [--json]` | The board as data: rows already grouped, ordered and labelled, for every project, or with `--project` only the project DIR (default: here) is in. Every group is present, empty or not (Q29). `--all` adds old done tasks, and dropped ones in a group of their own. A row's `busy` says a live session of the task is mid-turn, so a client asks before closing it. Without `--json` it prints the board as the TUI draws it, with Parked folded unless `--all`. |
 | `varde new [<title>] [--project DIR] [--context -] [--external REF]` | Creates a task in the project of the directory it runs in (or `DIR`): the checkout you are in, which is a linked worktree of your own when you are in one (Q24). `--context` is the task's body; `--body`, its 1.0 name, is a hidden alias. With no title, the title is cut from the context as an ad-hoc session's is from its first prompt, and a model, started detached, names the task (§6.2, Q28); with neither, it is refused. |
-| `varde schedule <task> RULE [--worktree always\|never]`, `--off`, `--install` | Starts the task at a time, or again and again (§6.5); `--off` stops that. `varde new --when RULE` makes a task with one. `--install` puts in the heartbeat that runs `varde tick`. |
+| `varde schedule <task> RULE [--worktree always\|never]`, `--off`, `--now`, `--install` | Starts the task at a time, or again and again (§6.5); `--off` stops that, `--now` starts its next run at once. `varde new --when RULE` makes a task with one. `--install` puts in the heartbeat that runs `varde tick`. |
 | `varde new <title> --from <run> [--project DIR] [--context -]` | Used by the agent. Puts work deferred from the run's task in the Inbox, in the same project unless `--project` names another (§6.4). |
-| `varde start <task> [--fresh\|--fork] [--worktree always\|never] [--project DIR] [--context-file F] [--agent A] [--json]` | Reopens a done, parked or dropped task, makes the attach decision (§6.1), prepares the worktree and context, and records the run without launching it. It returns a plan: `run` (`{run, cwd, command}`), `focus` (`{run, tty}`), or `ask` when a first run needs an answer only the user can give, the worktree or the project, and then nothing is changed (Q18). `--take-over` answers its `ask` for a session at work in the background (§6.5). `--agent` picks the agent of a new conversation; a resume or fork is always by the agent whose conversation it continues. Outside a git repository, or in one with no commits yet, there is no worktree to ask about, and the run goes without one. What else the user should hear, such as a worktree restored, goes to stderr. |
+| `varde start <task> [--fresh\|--fork\|--run RUN] [--worktree always\|never] [--project DIR] [--context-file F] [--agent A] [--json]` | Reopens a done, parked or dropped task, makes the attach decision (§6.1), prepares the worktree and context, and records the run without launching it. It returns a plan: `run` (`{run, cwd, command}`), `focus` (`{run, tty}`), or `ask` when a first run needs an answer only the user can give, the worktree or the project, and then nothing is changed (Q18). `--take-over` answers its `ask` for a session at work in the background (§6.5). `--run` continues that run's conversation rather than the newest (§6.5). `--agent` picks the agent of a new conversation; a resume or fork is always by the agent whose conversation it continues. Outside a git repository, or in one with no commits yet, there is no worktree to ask about, and the run goes without one. What else the user should hear, such as a worktree restored, goes to stderr. |
 | `varde run <run>` | Runs in the terminal's shell. It forks the agent with the terminal inherited, records the pid and exit code, and returns to the shell. A SIGTERM sent to it goes on to the agent, and it waits for the agent to exit. A ULID has no characters any shell treats specially, so typing it is safe. |
 | `varde attach <task>` | Does `start` and then `run`, for terminal users. It asks its questions itself; on a running task it goes to its tmux pane, or says where it runs. |
 | `varde next [--board]` | Inside tmux, goes to the window of the next task in Needs you after the one on screen, round to the first, and to the board once nothing else needs you; `--board` goes to the board, whose pane is tagged `@varde_board` while it runs. For a tmux key (`run-shell`), so what it cannot do it says in tmux's status line, naming a task that needs you but has no window. Outside tmux (no `$TMUX`) it says so on stderr and exits 1, never touching the default tmux server. |
-| `varde done [<task>] [--remove [--force]] [--keep-running] [--json]` | Closes the task, and asks nothing about its worktree (§6.3). It never merges: you land the work your own way, and varde notices (§6.3). `--remove` refuses a dirty or unmerged tree unless `--force` is given. It stops the task's live runs that `varde run` launched, before any worktree is removed, unless `--keep-running`: SIGTERM now, and a detached `varde reap` sends SIGKILL to any still alive after 5 s, so `done` returns without waiting. `--remove` does wait for them, up to the same 5 s, and looks at the worktree again once they are gone, since a session may write as it stops; `drop` waits too before it saves the work. Their conversations are kept, so starting the task again resumes them. A session that runs `done` or `park` itself is left running, and the report says so: stopping it would kill the command mid-call. Its worktree is then not removed under it, even by `--remove`; the refresh removes it once the session ends and its work has landed. Inside a session varde runs (`VARDE_RUN`), `done`, `park` and `show` with no task mean the one that session is working on. |
+| `varde done [<task>] [--remove [--force]] [--keep-running] [--json]` | Closes the task, and asks nothing about its worktree (§6.3). On a repeating task it ends this run instead, and the series goes on (§6.5, Q34). It never merges: you land the work your own way, and varde notices (§6.3). `--remove` refuses a dirty or unmerged tree unless `--force` is given. It stops the task's live runs that `varde run` launched, before any worktree is removed, unless `--keep-running`: SIGTERM now, and a detached `varde reap` sends SIGKILL to any still alive after 5 s, so `done` returns without waiting. `--remove` does wait for them, up to the same 5 s, and looks at the worktree again once they are gone, since a session may write as it stops; `drop` waits too before it saves the work. Their conversations are kept, so starting the task again resumes them. A session that runs `done` or `park` itself is left running, and the report says so: stopping it would kill the command mid-call. Its worktree is then not removed under it, even by `--remove`; the refresh removes it once the session ends and its work has landed. Inside a session varde runs (`VARDE_RUN`), `done`, `park` and `show` with no task mean the one that session is working on. |
 | `varde park [<task>] [--keep-running] [--json]` | Puts the task aside: it moves to the collapsed Parked group and its sessions are stopped as `done` stops them. Its worktree is never touched. |
 | `varde drop <task> [--json]` | Stops the task's sessions and throws it away. Work in its worktree is first kept under `refs/varde/discarded/<slug>` (§6.3); then the worktree and branch are removed. A worktree, branch or repo already gone is not an error. Starting the task again brings it back, work included. |
 | `varde reopen <task>` | Moves a done, parked or dropped task back to Open without starting it. Its worktree comes back when it starts. |
 | `varde accept <task>…` | Moves Inbox tasks into Open. |
 | `varde show [<task>] [--history] [--no-git] [--json]` | The task, its cairn, its runs, its lineage and its git status (§6.3). The cairn comes first, as the board's view shows it (Q30), each line followed by its id (`#12`) for `edit`; `--json` adds its `usage` and `limits`, the caps a client counts against. Under each run it says why the run has its status: the event behind it and when, any idle notice or `seen` after it, and whether the process is alive. `--no-git` skips git and `gh`, for callers that only need the task. |
-| `varde edit <task> --add SECTION TEXT \| --set ID TEXT \| --rm ID \| --restore ID [--json]` | Changes one line of the cairn, as the user's, in one transaction (§7.1, Q30): `--add status` sets the Status, `--rm` moves a line to history as `removed by you`, and `--restore` brings it back where it was. `--rm status` hands a Status the user set back to the updates: its words stay, and the next update may change them. `--json` prints the cairn after the change. |
+| `varde edit <task> --add SECTION TEXT \| --set ID TEXT \| --rm ID \| --restore ID [--json]` | Changes one line of the cairn, as the user's, in one transaction (§7.1, Q30): `--add status` sets the Status, `--rm` moves a line to history as `removed by you`, which recall does not find (Q36), and `--restore` brings it back where it was. `--rm status` hands a Status the user set back to the updates: its words stay, and the next update may change them. `--json` prints the cairn after the change. |
 | `varde edit <task> [--print\|--stdin]` | Edits the whole cairn, with the task's context above it, in `$EDITOR`, or through a client's own editor (§7.1), for bulk changes. |
 | `varde show --project [DIR]`, `varde edit --project [DIR]` | The same for the cairn of the project DIR (default: here) is in (§7.5). |
 | `varde recall <words> [--all\|--project DIR] [--json]` | Searches memory, current project (or DIR's) first (§7.4). |
@@ -227,7 +227,8 @@ whenever it sends you to a live session (`focus`). The TUI and
 only say where it runs. In tmux, `varde run` clears it itself while its
 pane is on screen: a turn that ends while you are in the task is read,
 with or without a board running. A `seen` is an event, so status is
-unaffected.
+unaffected. A background run's result is the exception: only opening
+that run reads it (§6.5).
 
 ### 6.1 The attach decision
 
@@ -392,7 +393,7 @@ two or three `git` calls:
 to 1 s), so callers that only need the task pass `--no-git`.
 `done --remove` asks `gh` only when there are unmerged commits.
 
-**On the board.** `varde list` has a 10 ms budget, and one worktree's
+**On the board.** `varde list` has a 15 ms budget, and one worktree's
 git takes about 10 ms, so the board reads a cache, `git_state`: a row
 per task with its stage, a label to show (`committed`, `PR #12 ✓`,
 `PR #12 closed`) and when it was checked.
@@ -557,24 +558,101 @@ derived as any run's, and the guidance tells it nobody is watching.
   was answered in the last 15 minutes; a session of varde's left idle
   longer is stopped, as `done` stops one, its conversation kept to
   resume. The guidance tells a repeating task's sessions that each run
-  starts fresh from the cairn and that `varde done` ends the series, and
-  its updates to keep in the Status how far the run got.
+  starts fresh from the cairn and that `varde done` ends this run, not
+  the series, and its updates to keep in the Status how far the run
+  got. The cairn is the series' memory, for the next run; what each run
+  found is in that run's conversation, for you.
 - **Lifecycle.** No new state. The tick fires open tasks only, so
-  `done`, `park` and `drop` stop the schedule, and `reopen` lets it
-  fire again, at once if it came due meanwhile. A one-shot is spent
-  once it starts. `--off` removes it.
+  `park` pauses the schedule (a holiday's way) and `drop` stops it, and
+  `reopen` lets it fire again, at once if it came due meanwhile. `park`
+  and `reopen` say so, and `show` says "paused while it is parked" (of a
+  done or dropped task, "not while it is dropped, and again if it is
+  reopened"). A
+  one-shot is spent once it starts, and after that `done` closes the
+  task as any. `--off` removes it. `--now` starts the next run at once,
+  in the background as its time would, to try a schedule out without a
+  rule every 2 minutes; it says what holds it up, if anything does.
+- **A start held up says why.** Past due by 5 minutes, a start is
+  late. A row waiting in Scheduled says `late`; one held up by a session
+  of it says `↻ due`, quietly, since you are at it, and `↻ late` once
+  that has gone on a day (a session varde did not start is never
+  stopped for it). `show` and
+  `varde schedule TASK` say what holds it, derived as the tick decides:
+  a cairn update, a session of it still open (and that varde stops it
+  once idle 15 minutes, if varde started it), or no `varde tick`.
+- **`done` ends the run, not the series** (Q34). On a repeating task,
+  `done` stops the task's sessions as it stops any, marks its runs
+  read, and leaves the task open: its row goes back to Scheduled. A run
+  its schedule started, stopped so, is marked `done` as it goes, so its
+  exit is not a finding of its own (nor on `reopen`, after `park` or
+  `drop`). It says what it did ("ended this run of …", "marked 3
+  unread runs of … read"); on a board, marking read runs nobody opened
+  is asked first ("has 3 unread runs you have not opened: mark them
+  read?"), since `d` on a row reads as being through with what it
+  shows. `--keep-running` ends the runs, `done`, and leaves their
+  sessions going. With no session live and
+  nothing unread it refuses, saying how to stop the series, and
+  `--remove` is refused: the worktree is the series'. The series ends
+  with its schedule (`schedule --off`, or `e` clearing `When:`); then
+  `done` closes the task as any. On a board, where a CLI hint is no
+  help, `d` on a repeating task between runs asks "stop repeating and
+  close it?" and does both (on marked tasks, one question for all that
+  names both, closing the rest as `d` does); `u` does not undo it, since
+  reopening would not bring the schedule back, and it does not reopen
+  what an earlier key closed either.
+- **Nothing to report.** A session that runs `varde done` on its own
+  task sets its run's `done`, the one fact this adds: that run never
+  needs you. It ends that run and no other: another run's finding stays
+  unread, and no other session of the task is stopped. Its own run is
+  the one it descends from, or, from an agent's tool shell (Claude marks
+  it), the one its `VARDE_RUN` names, as a sandbox may hide the pids.
+  From an agent's shell, `done`, `park` and `drop` never stop a session
+  of yours, only runs a schedule started; and `done` from a session
+  varde cannot tell apart, which may be one of this task's own, is
+  refused, pointing to your terminal. A board is always you. A background run that finds nothing does that before it
+  stops, as the guidance tells it, and otherwise ends with what you
+  should know; one that does neither is in Needs you, so a run that
+  gets it wrong costs a look, never a finding. An interactive session
+  whose agent closes it this way is left running, as `done` leaves
+  one, and leaves Needs you.
 - **A failure** to start (a question only you can answer, a project
   gone) leaves the schedule
   due, says why on the row (`late`), in `show` and in `doctor`, and is
   tried again after 10 minutes.
 - **On the board** a scheduled task is in Scheduled, soonest first,
   showing when it starts (`↻ Mon 09:00`, `◷ Thu`) where other rows show
-  their age, until a session of it is in Needs you or Working. The
-  new-task form has a `When:` line, and `e` changes or clears it.
-- **Done, it is yours.** A background run that has ended with nobody
-  looking since is your turn, unread, in Needs you: derived from its
-  `ended` and any `seen` after it, never stored. Starting the task
-  resumes its conversation in your terminal, as any task's.
+  their age, until a session of it is in Needs you or Working, where a
+  bare `↻` says `d` ends this run, not the task. A run at work is where
+  the task is: its row is in Working even while an earlier finding
+  waits, and says so (`working · ↻ 1 unread`); once the run ends, the
+  finding has the row in Needs you. The new-task form has
+  a `When:` line, and `e` changes or clears it.
+- **Its results are yours.** A background run that ended without
+  `done`, and that nobody has opened since, is your turn, unread, in
+  Needs you: derived from its `ended`, its `done` and any `seen` after,
+  never stored. Every such run counts, not only the newest, so a run
+  that fires before you read the last buries nothing, and the row is
+  still one; with more than one unread it says how many (`↻ 3
+  unread`), so a week away shows its size before RET; a row that is
+  not itself the one waiting, such as a live session's, says `↻ 1
+  unread`. RET opens the newest of them, and only opening a run reads
+  it: a week away is a RET a finding, or `d`, which asks, for all of
+  them. `park` says how many wait in it, folded away. Its
+  result is in its conversation; varde shows no output of its own.
+- **Its sessions** are listed in the view under the cairn, as any
+  task's, one line a conversation (its resumes and forks folded in),
+  newest first: when it started, `●` while unread, `quiet` when it
+  ended with `done`, a live one's status, and, for a task a schedule
+  ran, when you last resumed it (`resumed Thu Oct 15 23:13`): RET on a
+  task with nothing unread goes on from the newest run, so that line is
+  where it goes. `show`, one line a run, marks a background run
+  `unread` or `nothing to report`, and folds those that found nothing
+  past the newest 10 as the view does. A repeating task lists
+  them all, under its rule and when it is next due, and still does
+  once its series has ended; of those that found nothing, only the
+  newest 10, the rest a count in the heading ("· 1430 earlier found
+  nothing"), since a task every 30 minutes would bury its findings. RET on one
+  continues it (`start --run`).
 - **Taking it over.** While it works there is no terminal to go to, so
   `start` asks (`takeover`, Q18's way); `--take-over` stops it, as
   `done` stops a session, and plans again, which resumes it here. What
@@ -629,7 +707,8 @@ Open       ≤ 5 bullets — what is unresolved
 - **The cap limits what is shown, not what is known.** A bullet that
   leaves the cairn (superseded, done, or settled by the cap) stays in
   its history with the reason, and recall still finds it, marked as
-  history. Folded notes stay searchable the same way. Bullets the old
+  history, unless the user took it back (Q36). Folded notes stay
+  searchable the same way. Bullets the old
   rewrites had lost were recovered from `cairn_history` as history
   (`left in a rewrite, before bullets had ids`): 1 084 of them on the
   evaluation's store.
@@ -648,7 +727,9 @@ Open       ≤ 5 bullets — what is unresolved
   an update landing meanwhile is never undone. The caps hold as for an
   update's edits (40 words a line, a section full, 200 in all, no two
   lines alike). A removed line goes to history as `removed by you`, and
-  `--restore` brings it back where it was. Every client edits this way
+  `--restore` brings it back where it was. The old words of a line the
+  user changed go to history as `edited by you`. Recall finds neither
+  (Q36). Every client edits this way
   (Q30); the whole document is for bulk changes.
 - **The context comes first.** `varde edit` on a task opens with a
   `Context:` block above `Status:`: the task's body, the text it was
@@ -858,7 +939,7 @@ nothing to do:
   `session_start`, `session_compact` or `before_agent_start` hook hands
   back, with the next prompt.
 
-**Cost.** These hooks have 10 ms at p99, not 5 (Q20). The bench's store
+**Cost.** These hooks have 20 ms at p99, twice another hook's (Q20, Q35). The bench's store
 has 1 000 tasks, each with a cairn of ten bullets and two notes, and a
 project cairn: 13 000 rows of recall's index, seven times the
 evaluation store's. Measured on the author's machine under load 0.5 to
@@ -945,7 +1026,7 @@ Some facts belong to no one task: how to build and reinstall, the
 tests that fail on one machine, a convention, the user's preferences.
 Sessions re-derived them again and again (`cargo install` in 16 of 22
 sessions here). Each project keeps one more capped document, its
-**project cairn** (Q21):
+**project cairn** (Q21, Q38):
 
 ```
 Conventions  ≤ 5 bullets
@@ -959,25 +1040,14 @@ How-to       ≤ 5 bullets — commands that work, each with its anchor
   the staleness check are a cairn's. It has no Status and at most 200
   words; a document over the caps gives up Conventions first, then
   How-to, then Gotchas.
-- **Promotion.** A task closed as done queues a job of kind `promote`
-  after its close-out, on the same run, in the same detached process.
-  It reads the memory with ids, the task's cairn and all its notes, up
-  to twelve bullets or notes of other tasks in the project that match
-  what it found (as related work does), and the first 6 000 characters
-  of the project's `CLAUDE.md` and `AGENTS.md`, cleaned as a fold's
-  material is. It answers with `ADD conventions|gotchas|how-to`,
-  `EDIT`, `DROP` and `CONFIRM`, admitting only facts that hold beyond
-  the task, still hold in the code, and that `CLAUDE.md` does not
-  already say. A fact seen in two or more tasks is preferred; an
-  overview is never admitted. A bug the task fixed is not a gotcha
-  (unless the fix leaves a trap), and a feature's behaviour is not a
-  convention: the first replayed promotion had added both. At most 2
-  `ADD`s of a promotion are applied; code leaves out the rest. Code
-  admits a bullet only if it names a path, identifier or command
-  (`cargo install --path cli/crates/varde` is anchored to its path).
-  Its edits pass the same gates as a fold's (§7.2), which matter most
-  here, since a project cairn reaches every session in the project.
-  Closing a task again promotes again.
+- **Written by you.** Only `varde edit --project` and the view's
+  Project tab change it; no update or job does (Q38). It is what you
+  want every session here to know, as in "put SQL queries in a `.txt`
+  file, for copying": rare, and true of most tasks. It started as
+  promotion, a job that read each task closed as done and admitted
+  what held beyond it; on varde's own tasks (2026-10-16) every bullet
+  it kept was a feature's behaviour or one task's internals, most of
+  them already in this document, and none was worth every session.
 - **Where it shows.** First in every session in the project (§7.3).
   `varde show --project` shows it and `varde edit --project` edits it;
   on either board, the view's Project tab (`v`, then `]`) shows the
@@ -1029,8 +1099,7 @@ deleted on a guess.
   (`new`) is in almost any code, and `config.memory.enabled` when each
   `.` part is, since code writes it apart (`[memory]`, then `enabled`).
   Grepped whole, each was marked stale while it was there.
-- **When.** After a fold, that cairn's anchors are checked; after a
-  promotion, the project cairn's. Each `git-refresh` checks at most 50
+- **When.** After a fold, that cairn's anchors are checked. Each `git-refresh` checks at most 50
   anchors not checked for 10 minutes, the least recently checked first.
   A check stops at 2 seconds in all, and an anchor it did not reach
   keeps its mark. A rename can take a refresh or two to show.
@@ -1362,6 +1431,9 @@ Practices from day one:
   and a capped context file replace them.
 - Whole-document cairn rewrites, fuzzy dedupe, and memory in the first
   prompt (§7).
+- Promotion into the project's cairn (2026-10-16, Q38). A model
+  judging what holds across a project, from one task, kept what that
+  task found, not what most tasks need.
 
 ## 13. Decisions
 
@@ -1387,7 +1459,7 @@ Practices from day one:
 | Q18 | Questions only the user can answer (2026-10-10) | `start` never guesses whether a first run gets a worktree, or which project a deferred task belongs to. It returns an `ask` plan and changes nothing; the client asks and calls again with the answer. `attach` in a terminal asks itself. |
 | Q19 | Memory, rebuilt (2026-10-10) | An evaluation found the cairn reached no session and lost what it learned (§7). Bullets are items with ids, and updates answer with edits that code checks against caps and gates. Memory reaches every session through the agent's hooks, however it starts. Anchors are checked against the code. What each session was shown is recorded, and `varde eval` reports what memory was worth. |
 | Q20 | Memory hook budget (2026-10-10) | The hooks that hand a session memory have 10 ms at p99, not the 5 ms of every other hook. They run once per session and after a compaction, beside an agent that takes about a second to start. Related work is bounded by what it reads, not cut off by a timer, so the result does not depend on the machine's load. |
-| Q21 | Project cairn (2026-10-10) | One small capped document per project (Conventions, Gotchas, How-to), filled only by promotion from tasks closed as done, under the same gates as a fold, and never restating `CLAUDE.md`. Anchored, recurring facts pay; overviews do not. |
+| Q21 | Project cairn (2026-10-10) | One small capped document per project (Conventions, Gotchas, How-to), filled only by promotion from tasks closed as done, under the same gates as a fold, and never restating `CLAUDE.md`. Anchored, recurring facts pay; overviews do not. (Revised 2026-10-16, see Q38: only you write it.) |
 | Q22 | Memory is data, not orders (2026-10-10) | A project cairn reaches every session in a project, so one obliging model could put an order into all of them. Memory is framed as records; updates may not write URLs, piped commands, instructions or secrets; notes are redacted; related work offered unasked stays in its project. |
 | Q23 | Holdout (2026-10-10) | `memory.holdout`, off by default, withholds memory (but not your own lines) from a stable share of fresh sessions launched by `start`, so `varde eval` can compare sessions with and without it. |
 | Q24 | A worktree of your own (2026-10-10) | A task belongs to the checkout it was made in, a linked worktree included. Its worktree starts from, and lands in, that worktree's branch, and lives beside the others in the main checkout's worktree directory. |
@@ -1400,3 +1472,9 @@ Practices from day one:
 | Q31 | Org through links (2026-10-13) | Reverses "a heading per task". Keeping a heading and its task in step took about 1 050 lines and 85 tests: an index over every org file, settling keyword changes, reconciling both ways by guessing which change came last from CLOSED times and file mtimes, copied and archived headings, and still two sources of truth, each able to undo the other. Tasks are made on the board, where most were made anyway, and org is where notes are written; a note links the tasks it is about, `[[varde:SHORT][Title]]`, and the link shows where its task stands, as forge's and orgit's links point into a repository, mu4e's into mail, and org-ql's or om-dash's blocks gather a review. `org-varde-new-here` makes a task from a heading and links it there; DONE on a heading offers to close its tasks, one way; a dynamic block lists them for a review. Nothing is synced, so nothing disagrees. |
 | Q32 | The task's branch (2026-10-15) | Tracked by the worktree, not the name. A branch the agent cut or you renamed in the worktree is the task's (made no earlier than the worktree), and a branch that was there before is never deleted; a stored name made such a task's worktree wait in Done for ever, its work landed. The branch tracks its local base, for magit's "Unmerged into" and `git status`. Sessions in the worktree are told to commit on its branch. Rejected: worktrees on a detached HEAD until the user names a branch (Codex app), since every closed task with commits would wait on that, magit cannot push it, and the agent names one anyway to push; and dropping the `varde/` prefix by default, since landings fast-forward and it groups the branches (`branch_prefix = ""` still drops it). Claude Code's subagent worktrees branch from `origin/main` unless `worktree.baseRef` is `head` in its settings, which is the user's to set. |
 | Q33 | Scheduled and repeating tasks (2026-10-14) | A schedule starts a task in the background, and once it is done it is an ordinary task: RET resumes it in your terminal. It runs as `start --fresh` and `varde run` with no terminal, the agent in print mode, tracked as any run. Opening it while it works takes it over: it stops, and resumes in your terminal. Hosting it in tmux, so it could be gone to live, was built first and dropped: a scheduled task should just run, with nothing to attach to, and outside tmux (Emacs) attaching meant tmux inside a terminal. A terminal varde would hold itself (as dtach does) was the other way to go to it live, at the cost of a pty server of varde's own. There is no daemon: the store owns every schedule, and a heartbeat (a systemd timer or LaunchAgent, installed by `varde schedule --install`) runs `varde tick` every minute, firing on wake what came due in sleep, once. A repeating task is one task with many fresh runs, so each starts from the cairn alone, after the last one's update. Org's `SCHEDULED` never drives varde (Q31); `org-varde-new-here` copies it into the form's `When:` once. |
+| Q34 | Done on a repeating task, and its runs (2026-10-15) | Two kinds of repeating task: one that runs alone and should ask for you only when it found something, and one that always wants you and, once you are through, should wait for its next time. So `done` on a repeating task ends the run, not the series, which ends with its schedule (`schedule --off`, then `done`); `done --series` was left out, since ending one is rare and two plain steps say what they do, and `u` does not undo it, since RET resumes the run anyway. A run says it has nothing to report with the same verb, run on its own task: one stored fact, `run.done`. An event varde derived it from was tried on paper and dropped: the `turn_end` that follows a session's own `done` needed a rule of its own to not undo it. Before, each run that fired became the row's, so a week of a daily task left alone showed only the last day, RET resumed it, and reading it marked all seven read; now each unread run keeps the row in Needs you and is read only by opening it. Also left out: a count on the row, a Runs tab, and the tail of each run's output on the board or in `show` (a second place to read what the conversation already holds); not firing while a result is unread, since a daily check would lose its days; and putting findings in the cairn, which is the next run's memory, rewritten by its updates, not a log of what each run found. |
+| Q35 | Looser latency budgets (2026-10-15) | A hook has 10 ms at p99, the hooks that hand a session its memory 20 ms, and `varde list --json` 15 ms at 1 000 tasks, up from 5, 10 and 10. The bench failed on the old ones with nothing changed but the machine's load (the memory hooks at p99 10.2 ms, a hook at 5.4 ms), and a hook beside an agent that takes a second to start, or a board refreshed every few seconds, is not felt at either. |
+| Q36 | What you take back is not recalled (2026-10-15) | A line the user removes (`removed by you`, `removed in varde edit`) and the old words of a line the user changes (`edited by you`) stay in history, where `show --history` shows them and `--restore` brings a removed line back, but recall does not index them. A line the user removes may be wrong, not just done, and recall offered it again as `earlier`, which reads as once true. Lines an update drops, edits or caps are still recalled: there the reason is time, not error. Rejected: deleting the row, which breaks append-only history and `--restore`; and a separate verb for "wrong", one more thing to choose on every removal. Migration 7 drops such rows from the index, and marks earlier `edited` rows `edited by you` when the version written with them was the user's. |
+| Q37 | Repeating tasks in day-to-day use (2026-10-15) | A test of a schedule every 2 minutes and a review against real weeks (a Monday update, three weeks away, a quiet nightly check, a holiday, ending a series) found the facts right and their telling thin. So, each derived and nothing stored: the row says how many results wait when more than one (`↻ 3 unread`), which Q34 left out, since a week away should show its size before RET reads one; a row held up by a session of it says `↻ due`, and `show` says what holds a start up; `done` says how many runs it ended; a parked task says its schedule is paused; the view lists every session of a task its schedule ran, also once the series ends, and says when each was last resumed, which explains where RET goes; `show` marks a background run `unread` or `nothing to report`; and on a board `d` between runs asks to end the series and close the task, since a CLI hint there is no help. Left out: run numbers (dates name an occurrence, and a counter is one more fact), saying which slot a catch-up run stood for (the run knows the date), and not stopping an idle session of yours for the next slot (a forgotten terminal would hold the series up unseen). |
+| Q38 | The project cairn is yours (2026-10-16) | Revises Q21: nothing promotes into it. An audit of varde's own project cairn found all ten bullets were one task's facts: a feature's behaviour (`attach --fork`, how `tick` catches up), internals of one code path, the user's own setup, most of them already in this document, which promotion never read; and its lines were acted on 11% of the times they were shown. A fact true of most tasks, a preference or a convention, is rarely what a task finds, so you write it (`varde edit --project`). A promotion an older varde queued is set aside; past ones stay in history and in `varde eval`'s cost. Rejected: giving promotion the design documents and a stricter bar, since the bar it had already said "not a feature's behaviour", and the model held to it no better. |
+| Q39 | Repeating tasks reviewed by whole flows (2026-10-16) | Q37 was checked a behaviour at a time and missed what only a sequence shows: a run's own `done` read every finding of its task and stopped your sessions; `done` or `park` on a run at work left the run it stopped as a finding; `u` reopened what an earlier key closed. So each is now held by `tests/schedule_flows.rs`, which walks weeks of a series and overlapping runs and, after every step, checks that exactly the right runs are unread and that the row, its count and group, `show` and `schedule` agree. Decided with it: a session's own `done` ends only its run, found by ancestry or, from an agent's shell, by `VARDE_RUN`; from an agent, nothing stops a session of yours; a run a schedule started, stopped by you, is `done`; `d` on a board asks before it marks read runs nobody opened (it was silent, Q34's "`d` for all of them"), and `done` says it "marked N read" rather than "ended" them; a run at work keeps its row in Working, saying what waits, rather than Needs you; a resumed background conversation is told the user is there now. Left for a decision: a notification when a finding arrives, pruning `cairn_history` for high-frequency series, refreshing a series' worktree once its work lands, and letting background runs call `varde done`/`note` without the user allowing them. |

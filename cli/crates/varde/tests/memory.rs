@@ -225,10 +225,10 @@ fn project_cairn_is_shown_edited_and_found_by_recall() {
     let e = env();
     let proj = proj(&e).to_string_lossy().to_string();
     let none = e.ok(&["show", "--project", &proj]);
-    assert!(none.contains("No project cairn yet: tasks closed as done add to it"), "{none}");
+    assert!(none.contains("No project cairn yet: it holds only what you add"), "{none}");
     task_with_memory(&e);
     let shown = e.ok(&["show", "--project", &proj]);
-    assert!(shown.starts_with("Project cairn · what proj's tasks learned"), "{shown}");
+    assert!(shown.starts_with("Project cairn · what holds across proj"), "{shown}");
     assert!(shown.contains(" ago by you · not handed to a session yet"), "{shown}");
     assert!(shown.contains("  Gotchas 1/7\n    - `cargo test -p varde-agent`"), "{shown}");
     assert!(shown.contains("binary. (yours)  #3\n  How-to 1/5"), "{shown}");
@@ -738,16 +738,22 @@ fn a_line_is_added_changed_removed_and_brought_back_one_at_a_time() {
     );
     assert_eq!(e.ok(&["edit", &t, "--set", &id.to_string(), "The cache key omits the locale."]), "unchanged");
 
-    // Removed, it leaves for history, which recall finds, and comes back.
+    // Removed, it leaves for history, which recall does not find, and
+    // comes back.
     let rm = e.ok(&["edit", &t, "--rm", &format!("#{id}")]);
-    assert_eq!(rm, format!("removed line #{id}; recall still finds it, and --restore {id} brings it back"));
+    assert_eq!(
+        rm,
+        format!("removed line #{id}; recall no longer finds it, and --restore {id} brings it back")
+    );
     assert!(e.show(&t)["cairn"]["findings"].as_array().unwrap().is_empty());
     assert!(refused(&["--rm", &id.to_string()])
         .contains(&format!("not saved: line #{id} is already removed; --restore {id} brings it back")));
     let found = e.ok(&["recall", "locale"]);
-    assert!(found.contains("earlier: The cache key omits the locale."), "{found}");
+    assert!(!found.contains("The cache key omits the locale."), "{found}");
     let back = json(&["--restore", &id.to_string()]);
     assert_eq!(back["cairn"]["findings"][0]["id"].as_i64(), Some(id));
+    let found = e.ok(&["recall", "locale"]);
+    assert!(found.contains("finding: The cache key omits the locale."), "{found}");
     assert!(refused(&["--restore", &id.to_string()]).contains("no line"));
     let shown: Value = serde_json::from_str(&e.ok(&["show", &t, "--json", "--no-git", "--history"])).unwrap();
     let reasons: Vec<&str> =
