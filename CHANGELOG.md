@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org).
 
 ## Unreleased
 
+## 1.3.1 - 2026-10-16
+
 ### Fixed
 
 - The new-task form under evil-org (as in Doom): C-j and C-k go between
