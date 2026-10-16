@@ -63,6 +63,10 @@ fake `varde` and records terminals instead of opening them.
   its work`.
 - Add a line to [`CHANGELOG.md`](CHANGELOG.md) under *Unreleased* when
   a user would notice the change.
+- `main` takes one commit per change: pull requests are squash-merged
+  (the only merge GitHub allows here), and work landed locally is
+  squashed the same way (`git merge --squash`, or a soft reset before
+  pushing), so each commit on `main` is a whole change.
 
 ## Releasing
 

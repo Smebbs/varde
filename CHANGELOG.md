@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org).
 
 ## Unreleased
 
+## 1.3.0 - 2026-10-16
+
 ### Added
 
 - `agents.<agent>.background` in the config: arguments added only to a
@@ -13,12 +15,49 @@ follow [Semantic Versioning](https://semver.org).
   Claude, so a scheduled task can use tools your settings do not allow
   without anyone there to approve them. Interactive sessions are
   unchanged.
+- `varde schedule <task> --now` starts the next run at once, in the
+  background as its time would, to try a schedule out.
+- A repeating task's row says how many runs wait unread (`↻ 3 unread`),
+  and that its next start is held up by a session of it (`↻ due`, then
+  `↻ late` after a day). `show` and `varde schedule <task>` say what
+  holds a due start up: a session, a cairn update, or no `varde tick`.
+- The view lists every session of a task a schedule ran, also once its
+  series ends, with when each was last resumed (where RET goes); quiet
+  ones past the newest ten fold into a count. `show` marks a background
+  run `unread`, `nothing to report` or `failed (exit N)` with its log.
+- The view says when a scheduled task next starts.
 
 ### Changed
 
+- `done` on a repeating task ends the run, not the series: it stops the
+  run at work, marks what waits read and leaves the task open; the
+  series ends with `varde schedule --off`. A session's own `varde done`
+  ends only its run, which is how a background run says it found
+  nothing to report; from an agent, nothing stops a session of yours.
+- Every background run that ended unopened stays unread until it is
+  opened, not only the newest; RET opens the newest, a session line any.
+- `d` on a board asks before it marks read runs nobody opened, and on a
+  repeating task between runs asks to stop it repeating and close it.
+  `done` says what it did ("marked 3 unread runs read").
+- A repeating task with a run at work is in Working, not Needs you,
+  saying what waits; once the run ends, the finding has it in Needs you.
+- `park`, `reopen`, `drop` and saving the form say what happens to a
+  task's schedule and what waits unread in it.
+- Recall leaves out lines you removed or rewrote: what you took back is
+  not offered again as `earlier`.
+- The project cairn is yours: closing a task no longer promotes its
+  lines into it; it holds only what `varde edit --project` writes.
 - org-varde: the context in the new-task and edit form is written in
   org-mode. It is drawn as org draws it, its keys are org's, and `TAB`
   in it is org's while `TAB` above the line still goes between fields.
+
+### Fixed
+
+- A run that found nothing marked an earlier run's finding read, and
+  stopped other sessions of its task.
+- `done` or `park` on a run at work left the run it stopped as a finding.
+- `u` after `d` on a repeating task reopened what an earlier key closed.
+- RET on a session line of a closed task reopened it without asking.
 
 ## 1.2.0 - 2026-10-15
 
