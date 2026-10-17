@@ -552,19 +552,20 @@ searches FROM and TO, and return the text with its link."
 
 (defvar org-varde-test-org-minor-mode-map (make-sparse-keymap))
 (define-minor-mode org-varde-test-org-minor-mode
-  "Stands in for evil-org-mode, whose state maps bind RET, TAB and <tab>.")
+  "Stands in for evil-org-mode, whose state maps bind RET, TAB and <tab>,
+and Doom's C-j and C-k.")
 
 (ert-deftest org-varde-new-form-under-evil ()
   "Run with evil on the load path to check this; skipped otherwise.
-Evil's line edits keep to a field, and C-j and C-k go between them; in
-insert state, where the form opens, C-j is a newline in the context,
-and C-k is the maps' below."
+Evil's line edits keep to a field, and TAB and S-TAB go between them;
+C-j and C-k are left to org, as in any org buffer."
   (skip-unless (require 'evil nil t))
   (evil-mode 1)
   (dolist (state '(normal insert))
     (evil-define-key* state org-varde-test-org-minor-mode-map
                       (kbd "RET") #'newline (kbd "TAB") #'ignore
-                      (kbd "<tab>") #'ignore))
+                      (kbd "<tab>") #'ignore
+                      (kbd "C-j") #'org-down-element (kbd "C-k") #'org-up-element))
   (add-hook 'org-mode-hook #'org-varde-test-org-minor-mode)
   (unwind-protect
       (org-varde-test-with-varde
@@ -576,23 +577,20 @@ and C-k is the maps' below."
             (switch-to-buffer (current-buffer) nil t)
             (should org-varde-test-org-minor-mode)
             (should (evil-insert-state-p))
-            ;; In the context, C-j is org's own, and RET the maps' below.
+            ;; In the context, RET is the maps' below.
             (should (eq (org-varde--form-at) 'body))
             (let ((size (buffer-size)))
-              (execute-kbd-macro (kbd "C-j"))
-              (should (= (buffer-size) (1+ size)))
-              (should (eq (org-varde--form-at) 'body))
               (execute-kbd-macro (kbd "RET"))
-              (should (= (buffer-size) (+ 2 size))))
-            (delete-char -2)
-            ;; Above the line C-j goes to the next field, and C-k is
-            ;; evil's own.
+              (should (= (buffer-size) (1+ size))))
+            (delete-char -1)
+            ;; C-j and C-k are org's, here and above the line.
+            (should (eq (key-binding (kbd "C-j")) #'org-down-element))
+            (should (eq (key-binding (kbd "C-k")) #'org-up-element))
             (org-varde--form-goto 'title)
-            (execute-kbd-macro (kbd "C-j"))
-            (should (eq (org-varde--form-at) 'project))
-            (should (eq (key-binding (kbd "C-k")) #'evil-insert-digraph))
+            (should (eq (key-binding (kbd "C-j")) #'org-down-element))
+            (should (eq (key-binding (kbd "C-k")) #'org-up-element))
             (execute-kbd-macro (kbd "RET"))
-            (should (eq (org-varde--form-at) 'when))
+            (should (eq (org-varde--form-at) 'project))
             (org-varde--form-goto 'title)
             (evil-normal-state)
             ;; cc changes the title, o opens a line that stays in it,
@@ -603,18 +601,20 @@ and C-k is the maps' below."
             ;; Its line is still there to write below.
             (execute-kbd-macro (kbd "G o More <escape>"))
             (should (equal (org-varde--new-text) '("New title" . "More")))
-            ;; C-j and C-k go between fields, and TAB, which is
-            ;; normal state's own, too, as <tab>, which a GUI Emacs
-            ;; looks up first.
-            (execute-kbd-macro (kbd "<escape> C-k"))
+            ;; TAB and S-TAB go between fields, TAB as <tab> too,
+            ;; which a GUI Emacs looks up first; C-j and C-k are org's.
+            (execute-kbd-macro (kbd "<escape>"))
+            (should (eq (key-binding (kbd "C-j")) #'org-down-element))
+            (should (eq (key-binding (kbd "C-k")) #'org-up-element))
+            (execute-kbd-macro (kbd "<backtab>"))
             (should (eq (org-varde--form-at) 'when))
-            (execute-kbd-macro (kbd "C-k <backtab>"))
+            (execute-kbd-macro (kbd "<backtab> <backtab>"))
             (should (eq (org-varde--form-at) 'title))
             (execute-kbd-macro (kbd "<tab>"))
             (should (eq (org-varde--form-at) 'project))
             (execute-kbd-macro (kbd "TAB"))
             (should (eq (org-varde--form-at) 'when))
-            (execute-kbd-macro (kbd "C-j"))
+            (execute-kbd-macro (kbd "TAB"))
             (should (eq (org-varde--form-at) 'body))
             (set-buffer-modified-p nil))))
     (remove-hook 'org-mode-hook #'org-varde-test-org-minor-mode)

@@ -78,8 +78,8 @@ It loops after the session expires.
 From: [[file:~/notes/auth.org::*Fix the SSO redirect][auth.org › Auth › Fix the SSO redirect]]
 ```
 
-`TAB` and `S-TAB` go between the fields (`C-j` and `C-k` too, in
-evil's normal state), and `RET` (or `M-TAB`) on the Project picks it.
+`TAB` and `S-TAB` go between the fields, and `RET` (or `M-TAB`) on the
+Project picks it.
 The context is written in org, with org's keys: `TAB` there folds a
 heading, `M-RET` adds a list item, and the agent gets the text as you
 wrote it.

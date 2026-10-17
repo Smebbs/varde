@@ -37,6 +37,12 @@ follow [Semantic Versioning](https://semver.org).
 
 - A context written in the board's form, then in `$EDITOR`, no longer
   comes back as the title when the title was empty.
+- The new-task form no longer binds C-j and C-k: they do what they do
+  in any org buffer, and TAB and S-TAB go between its fields. It had
+  left C-k, and C-j in the context, to what it took for org's, which
+  under Doom went down and up an org element instead.
+- The board's form takes C-j as Enter, as a terminal does: a newline in
+  the context.
 
 ## 1.3.2 - 2026-10-17
 

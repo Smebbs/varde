@@ -118,11 +118,18 @@ impl Draft {
     /// or Alt-Tab (Esc Tab, as Emacs's M-TAB) opens the project picker;
     /// Backspace empties it. Down and Up go through the fields too.
     /// Enter creates from another field above the line and starts a new
-    /// line in the body; C-s creates from any.
+    /// line in the body, and C-j is Enter, as in a terminal; C-s creates
+    /// from any.
     /// Esc and C-g put the form away, and C-x C-e or Alt-e opens the
     /// draft in `$EDITOR`. The rest edits the text as every prompt of the
     /// board does.
     pub(super) fn key(&mut self, key: KeyEvent) -> Edit {
+        let key = match key.code {
+            KeyCode::Char('j') if key.modifiers == KeyModifiers::CONTROL => {
+                KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE)
+            }
+            _ => key,
+        };
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         let alt = key.modifiers.contains(KeyModifiers::ALT);
         if std::mem::take(&mut self.prefix) && ctrl && key.code == KeyCode::Char('e') {
@@ -342,6 +349,10 @@ mod tests {
         typed(&mut d, "line two");
         press(&mut d, KeyCode::Backspace);
         assert_eq!(d.body.text(), "line one\nline tw");
+        let ctrl_j = KeyEvent::new(KeyCode::Char('j'), KeyModifiers::CONTROL);
+        assert!(matches!(d.key(ctrl_j), Edit::Typing));
+        assert_eq!(d.body.text(), "line one\nline tw\n", "C-j is Enter, as in a terminal");
+        press(&mut d, KeyCode::Backspace);
         assert_eq!((d.title.text(), d.project.text()), ("", "~/src/app"));
         assert!(matches!(d.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL)), Edit::Create));
         assert_eq!(d.body.text(), "line one\nline tw", "Ctrl-S is not typed");

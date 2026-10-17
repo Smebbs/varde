@@ -761,18 +761,6 @@ They are the buffer's own, so evil-org's TAB and RET do not shadow them."
   "<tab>" (org-varde--in-field #'org-varde-new-next-field)
   "RET" (org-varde--in-field #'org-varde-new-return))
 
-(defvar-keymap org-varde-new-evil-normal-map
-  :doc "The form's keys in evil's normal state."
-  :parent org-varde-new-evil-map
-  "C-j" #'org-varde-new-next-field
-  "C-k" #'org-varde-new-previous-field)
-
-(defvar-keymap org-varde-new-evil-insert-map
-  :doc "The form's keys in evil's insert state.  In the context, C-j is
-org's newline; C-k is evil's everywhere."
-  :parent org-varde-new-evil-map
-  "C-j" (org-varde--in-field #'org-varde-new-next-field))
-
 (defvar evil-normal-state-local-map)
 (defvar evil-insert-state-local-map)
 
@@ -783,23 +771,20 @@ its Project, which RET or \\[org-varde-new-complete] on it picks; When varde sta
 if at all (`at mon 09:00', `every weekday 09:00', `every 4h', an
 org timestamp); and below the line, the context for the agent, written
 in org: TAB and RET there are org's.
-\\[org-varde-new-tab] and \\[org-varde-new-return] go from a field to the next, and \\[org-varde-new-previous-field] back; under
-evil, C-j and C-k too, and in insert state C-j, which in the context
-is org's newline.  \\[org-varde-new-create] creates it, and
+\\[org-varde-new-tab] and \\[org-varde-new-return] go from a field to the next, and \\[org-varde-new-previous-field] back.
+\\[org-varde-new-create] creates it, and
 \\[org-varde-new-cancel] puts it away, for `n' on the board to bring
 back; cleared first, it is dropped."
   (add-hook 'after-change-functions #'org-varde--form-hints nil t)
   (add-hook 'post-command-hook #'org-varde--form-keep-line nil t)
   (add-hook 'kill-buffer-query-functions #'org-varde--keep-edit-p nil t)
-  ;; C-j and C-k go between fields as between evil-collection's
-  ;; sections; in insert state, where the form opens, C-j does above
-  ;; the line.  The buffer's own state maps, as minor modes' state
-  ;; maps, evil-org's, would win over the mode's.  An empty field's
+  ;; The buffer's own state maps, as minor modes' state maps,
+  ;; evil-org's, would win over the mode's.  An empty field's
   ;; place is the end of its line: normal state stays there, not on
   ;; the field's name.
   (setq-local evil-move-beyond-eol t
-              evil-normal-state-local-map (make-composed-keymap nil org-varde-new-evil-normal-map)
-              evil-insert-state-local-map (make-composed-keymap nil org-varde-new-evil-insert-map)))
+              evil-normal-state-local-map (make-composed-keymap nil org-varde-new-evil-map)
+              evil-insert-state-local-map (make-composed-keymap nil org-varde-new-evil-map)))
 
 (defface org-varde-form-label '((t :inherit bold))
   "A field's name in the form that writes a task."

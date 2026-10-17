@@ -210,7 +210,7 @@ and Shift-Tab go between the fields. The Project starts as the project
 the board keeps to; left empty, it is asked for on create. On the
 Project, RET or typing opens the project picker, and Backspace empties
 it. RET on another field above the line, or C-s anywhere, creates the
-task. C-x C-e writes it, fields and all, in `$EDITOR`. Esc puts the
+task; C-j is RET, as in a terminal. C-x C-e writes it, fields and all, in `$EDITOR`. Esc puts the
 draft away, and the next `n` brings it back. `e` opens the same form on
 a task: changing its Project there moves it, as `m` does. Prompts edit
 text as a shell does (C-w, C-u, C-k, Alt-b/f, C-y).
