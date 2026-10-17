@@ -135,7 +135,16 @@ impl App<'_> {
         }
 
         match &self.mode {
-            Mode::New(draft) => draw_draft(f, draft, main),
+            Mode::New(draft) => {
+                draw_draft(f, draft, main);
+            }
+            // Above the form where there is room, so it stays in view.
+            Mode::Where(draft, p, _) => {
+                let form = draw_draft(f, draft, main);
+                let above = Rect { height: form.y - main.y, ..main };
+                p.draw(f, if above.height >= 6 { above } else { main });
+            }
+            Mode::Move(_, p) | Mode::Project(.., p) => p.draw(f, main),
             Mode::Help => {
                 self.help_most = draw_help(f, &self.keys, main, &mut self.help_scroll);
                 // Its keys under it, now it is known whether it scrolls.
@@ -186,36 +195,6 @@ impl App<'_> {
         Line::from(vec![" varde".bold(), Span::raw(what), key.dark_gray(), " ".into()])
     }
 
-    /// What follows a directory prompt: the directories Tab could
-    /// complete it to, the one in the line in view and marked, in at most
-    /// half the `width`; or else its `keys`.
-    fn prompt_tail(&self, keys: &[(&str, &str)], width: usize) -> Vec<Span<'static>> {
-        let Some(menu) = &self.menu else { return key_spans(keys) };
-        let names: Vec<String> = menu.names.iter().map(|n| clean(n)).collect();
-        let fits = |shown: &[String]| shown.iter().map(|n| n.width() + 2).sum::<usize>() + 6 <= width / 2;
-        let at = menu.at.unwrap_or(0);
-        let mut from = 0;
-        while from < at && !fits(&names[from..=at]) {
-            from += 1;
-        }
-        let mut to = at + 1;
-        while to < names.len() && fits(&names[from..=to]) {
-            to += 1;
-        }
-        let mut out = Vec::new();
-        if from > 0 {
-            out.push("  …".dark_gray());
-        }
-        for (i, n) in names.iter().enumerate().take(to).skip(from) {
-            out.push("  ".into());
-            out.push(if menu.at == Some(i) { n.clone().reversed() } else { n.clone().dark_gray() });
-        }
-        if to < names.len() {
-            out.push("  …".dark_gray());
-        }
-        out
-    }
-
     /// The rows under the board: a prompt, the message, or the keys.
     /// Two where one is too narrow for it.
     fn bottom_line(&self, width: usize) -> Vec<Line<'static>> {
@@ -260,7 +239,8 @@ impl App<'_> {
                     ("Tab", "next field"),
                 ];
                 if d.at == Part::Project {
-                    keys.push(("M-Tab", "pick directory"));
+                    keys[0].0 = "C-s";
+                    keys.insert(0, ("RET", "pick project"));
                 }
                 keys.extend([("Esc", "later"), ("C-x C-e", "$EDITOR")]);
                 one(Line::from(key_spans(&keys)[1..].to_vec()))
@@ -277,23 +257,8 @@ impl App<'_> {
                 line.extend(keys);
                 one(Line::from(line))
             }
-            Mode::Move(_, dir) => {
-                let tail =
-                    self.prompt_tail(&[("RET", "move"), ("Tab", "complete"), ("Esc", "cancel")], width);
-                let room = width.saturating_sub(17 + tail.iter().map(Span::width).sum::<usize>());
-                let mut line = vec!["Move to project: ".bold()];
-                line.extend(dir.line_spans(room));
-                line.extend(tail);
-                one(Line::from(line))
-            }
-            Mode::Where(_, dir, pick) => {
-                let done = if *pick { ("RET", "pick") } else { ("RET", "create") };
-                let tail = self.prompt_tail(&[done, ("Tab", "complete"), ("Esc", "back")], width);
-                let room = width.saturating_sub(23 + tail.iter().map(Span::width).sum::<usize>());
-                let mut line = vec!["Project for this task: ".bold()];
-                line.extend(dir.line_spans(room));
-                line.extend(tail);
-                one(Line::from(line))
+            Mode::Move(_, p) | Mode::Where(_, p, _) | Mode::Project(.., p) => {
+                one(Line::from(key_spans(&p.keys())[1..].to_vec()))
             }
             Mode::WhenTree(d, dir) => {
                 let title =
@@ -322,21 +287,6 @@ impl App<'_> {
                     width.saturating_sub(keys.width()),
                 );
                 ask(format!("{question}{keys}"))
-            }
-            Mode::Project(_, _, choices, i, dir) => {
-                let mut keys = vec![];
-                if !choices.is_empty() {
-                    keys.push(format!("  {}/{}", i + 1, choices.len()).dark_gray());
-                    keys.extend(key_spans(&[("↑/↓", "other")]));
-                }
-                keys.extend(
-                    self.prompt_tail(&[("Tab", "complete"), ("RET", "start"), ("Esc", "cancel")], width),
-                );
-                let room = width.saturating_sub(23 + keys.iter().map(Span::width).sum::<usize>());
-                let mut line = vec!["Project for this task: ".bold()];
-                line.extend(dir.line_spans(room));
-                line.extend(keys);
-                one(Line::from(line))
             }
             Mode::Drop(ids) => {
                 let working = ids.iter().any(|id| self.row_of(id).is_some_and(|r| working(r.status)));

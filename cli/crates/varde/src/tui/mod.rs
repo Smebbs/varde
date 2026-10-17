@@ -14,6 +14,7 @@ mod draft;
 mod draw;
 mod field;
 mod keys;
+mod pick;
 mod session;
 mod term;
 
@@ -36,6 +37,7 @@ use diff::Diff;
 use draft::{Draft, Edit};
 use field::{Field, Words};
 use keys::{Act, Keys};
+use pick::{Pick, Picked};
 use term::{enter, have_terminal, input, leave, quit_on_sigterm, terminated};
 
 const BUSY: Duration = Duration::from_secs(2);
@@ -70,11 +72,11 @@ enum Mode {
     EndSeries(Vec<String>),
     /// Typing a recall query.
     Recall(Field),
-    /// Typing the directory of the project to move the task to.
-    Move(String, Field),
-    /// Typing the directory of the project a new task is in: to create
-    /// it there, or, when picked with M-Tab, to put in its Project.
-    Where(Draft, Field, bool),
+    /// Picking the project to move the task to.
+    Move(String, Pick),
+    /// Picking the project of the task being written: to create it
+    /// there, or, when picked from its Project, to put there.
+    Where(Draft, Pick, bool),
     /// Asked whether a new scheduled task's first start, with nobody
     /// there, gets a worktree; in the project typed.
     WhenTree(Draft, String),
@@ -83,9 +85,8 @@ enum Mode {
     /// Asked whether a first run in tmux gets its own worktree, with the
     /// project picked for it.
     Worktree(Start, Asked, Option<PathBuf>),
-    /// Picking the project of a first run: the choices, which one was
-    /// last stepped to, and the directory, one of them or typed.
-    Project(Start, Asked, Vec<String>, usize, Field),
+    /// Picking the project of a first run.
+    Project(Start, Asked, Pick),
 }
 
 /// The task a question about starting was asked of, and its state then.
@@ -208,9 +209,6 @@ struct App<'a> {
     /// Recall results, shown in the detail pane until dismissed.
     found: Option<Found>,
     message: String,
-    /// The directories Tab could complete a directory prompt to, shown
-    /// until a key other than Tab.
-    menu: Option<Menu>,
     /// Drafts put away with Esc: the new task's, and one for each task
     /// being edited. `n` (or `e` on its task) takes one up again, so
     /// nothing typed is lost.
@@ -327,7 +325,6 @@ impl<'a> App<'a> {
             elsewhere: None,
             found: None,
             message: String::new(),
-            menu: None,
             kept: Vec::new(),
             reveal: None,
             view: cairn::View::default(),
@@ -721,7 +718,6 @@ impl<'a> App<'a> {
 
     fn key(&mut self, key: KeyEvent) -> Option<Away> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
-        let menu = self.menu.take();
         // What was said over a form or prompt lasts until the next key.
         if matches!(
             self.mode,
@@ -760,13 +756,13 @@ impl<'a> App<'a> {
                     self.create(draft, &dir, None);
                 }
                 // No Project: asked for, as org-varde asks.
-                Edit::Create => self.mode = Mode::Where(draft, self.project_offer(), false),
-                Edit::Pick => {
-                    let dir = match draft.project.text().trim() {
-                        "" => self.project_offer(),
-                        dir => Field::new(dir),
-                    };
-                    self.mode = Mode::Where(draft, dir, true);
+                Edit::Create => {
+                    let pick = self.project_pick(&draft, "Project for this task");
+                    self.mode = Mode::Where(draft, pick, false);
+                }
+                Edit::Pick(typed) => {
+                    let pick = self.project_pick(&draft, "Project").typed(&typed);
+                    self.mode = Mode::Where(draft, pick, true);
                 }
                 Edit::Cancel => self.keep(draft),
             },
@@ -775,25 +771,14 @@ impl<'a> App<'a> {
                 KeyCode::Char('n' | 'N') => self.create(draft, &dir, Some(false)),
                 _ => self.mode = Mode::New(draft),
             },
-            Mode::Where(mut draft, mut dir, pick) => match key.code {
-                KeyCode::Enter if pick => {
-                    draft.project.set(dir.text().trim().trim_end_matches('/'));
+            Mode::Where(mut draft, mut p, pick) => match p.key(key) {
+                Picked::Dir(dir) if pick => {
+                    draft.project.set(&draw::tilde(&Pick::expand(&dir)));
                     self.mode = Mode::New(draft);
                 }
-                KeyCode::Enter => {
-                    let typed = dir.text().to_string();
-                    self.create(draft, &typed, None);
-                }
-                KeyCode::Esc => self.mode = Mode::New(draft),
-                KeyCode::Char('g') if ctrl => self.mode = Mode::New(draft),
-                KeyCode::Tab | KeyCode::BackTab => {
-                    self.menu = tab(&mut dir, menu, key.code == KeyCode::BackTab);
-                    self.mode = Mode::Where(draft, dir, pick);
-                }
-                _ => {
-                    dir.key(key, Words::Path);
-                    self.mode = Mode::Where(draft, dir, pick);
-                }
+                Picked::Dir(dir) => self.create(draft, &dir, None),
+                Picked::Back => self.mode = Mode::New(draft),
+                Picked::Typing => self.mode = Mode::Where(draft, p, pick),
             },
             Mode::Recall(mut query) => match key.code {
                 KeyCode::Enter => self.recall(query.text(), false),
@@ -804,39 +789,17 @@ impl<'a> App<'a> {
                     self.mode = Mode::Recall(query);
                 }
             },
-            Mode::Move(task, mut dir) => match key.code {
-                KeyCode::Enter => self.move_task(&task, dir.text()),
-                KeyCode::Esc => {}
-                KeyCode::Char('g') if ctrl => {}
-                KeyCode::Tab | KeyCode::BackTab => {
-                    self.menu = tab(&mut dir, menu, key.code == KeyCode::BackTab);
-                    self.mode = Mode::Move(task, dir);
-                }
-                _ => {
-                    dir.key(key, Words::Path);
-                    self.mode = Mode::Move(task, dir);
-                }
+            Mode::Move(task, mut p) => match p.key(key) {
+                Picked::Dir(dir) => self.move_task(&task, &dir),
+                Picked::Back => {}
+                Picked::Typing => self.mode = Mode::Move(task, p),
             },
-            Mode::Project(start, asked, choices, i, mut dir) => match key.code {
-                KeyCode::Down | KeyCode::Up if !choices.is_empty() => {
-                    let n = choices.len();
-                    let i = if key.code == KeyCode::Down { (i + 1) % n } else { (i + n - 1) % n };
-                    dir.set(&draw::tilde(&choices[i]));
-                    self.mode = Mode::Project(start, asked, choices, i, dir);
+            Mode::Project(start, asked, mut p) => match p.key(key) {
+                Picked::Dir(dir) => {
+                    return self.answer(asked, start, None, Some(PathBuf::from(Pick::expand(&dir))))
                 }
-                KeyCode::Enter => {
-                    return self.answer(asked, start, None, Some(PathBuf::from(home_in(dir.text()))))
-                }
-                KeyCode::Esc => self.message = "cancelled".into(),
-                KeyCode::Char('g') if ctrl => self.message = "cancelled".into(),
-                KeyCode::Tab | KeyCode::BackTab => {
-                    self.menu = tab(&mut dir, menu, key.code == KeyCode::BackTab);
-                    self.mode = Mode::Project(start, asked, choices, i, dir);
-                }
-                _ => {
-                    dir.key(key, Words::Path);
-                    self.mode = Mode::Project(start, asked, choices, i, dir);
-                }
+                Picked::Back => self.message = "cancelled".into(),
+                Picked::Typing => self.mode = Mode::Project(start, asked, p),
             },
             Mode::TakeOver(start, asked) => match key.code {
                 KeyCode::Char('y' | 'Y') => {
@@ -1178,8 +1141,13 @@ impl<'a> App<'a> {
             }
             Act::Move => {
                 if let Some(r) = self.current() {
-                    let dir = r.project.as_deref().map(draw::tilde).unwrap_or_default();
-                    self.mode = Mode::Move(r.task.clone(), Field::new(&dir));
+                    let (task, now) = (r.task.clone(), r.project.clone());
+                    let pick = Pick::new(
+                        "Move to project",
+                        self.known(std::slice::from_ref(&self.here)),
+                        now.as_deref(),
+                    );
+                    self.mode = Mode::Move(task, pick);
                 }
             }
             Act::Mark => self.mark(),
@@ -1241,7 +1209,7 @@ impl<'a> App<'a> {
         match &mut self.mode {
             Mode::New(draft) => draft.paste(text),
             Mode::Recall(query) => query.insert(&text.split_whitespace().collect::<Vec<_>>().join(" ")),
-            Mode::Move(_, dir) | Mode::Where(_, dir, _) | Mode::Project(.., dir) => dir.insert(text.trim()),
+            Mode::Move(_, p) | Mode::Where(_, p, _) | Mode::Project(.., p) => p.paste(text),
             Mode::Normal if self.detail && self.view.paste(text) => {}
             Mode::Normal => self.message = "pasted text goes into a prompt: n new task, / recall".into(),
             _ => {}
@@ -1317,12 +1285,15 @@ impl<'a> App<'a> {
         }
         let result = (|| -> Result<Draft> {
             let store = self.paths.open(BUSY)?;
-            let (title, body, when): (String, Option<String>, Option<String>) = store.conn.query_row(
-                "SELECT title, body, (SELECT rule FROM schedule WHERE task = t.id) FROM task t WHERE id = ?1",
-                [&id],
-                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
-            )?;
-            Ok(Draft::of(&id, &title, &body.unwrap_or_default(), &when.unwrap_or_default()))
+            let (title, project, body, when): (String, Option<String>, Option<String>, Option<String>) =
+                store.conn.query_row(
+                    "SELECT title, project, body, (SELECT rule FROM schedule WHERE task = t.id)
+                     FROM task t WHERE id = ?1",
+                    [&id],
+                    |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                )?;
+            let project = project.as_deref().map(draw::tilde).unwrap_or_default();
+            Ok(Draft::of(&id, &title, &project, &body.unwrap_or_default(), &when.unwrap_or_default()))
         })();
         match result {
             Ok(draft) => {
@@ -1384,7 +1355,7 @@ impl<'a> App<'a> {
         if let Ok(text) = std::fs::read_to_string(home.join("draft.txt")) {
             let _ = std::fs::remove_file(home.join("draft.txt"));
             let (title, body) = text.trim().split_once('\n').unwrap_or((text.trim(), ""));
-            all.push(Draft { task: None, ..Draft::of("", title.trim(), body.trim(), "") }.json());
+            all.push(Draft { task: None, ..Draft::of("", title.trim(), "", body.trim(), "") }.json());
         }
         let mut said = Vec::new();
         for d in &all {
@@ -1487,9 +1458,19 @@ impl<'a> App<'a> {
                 varde_core::schedule::parse(when, varde_core::schedule::from_ms(now_ms()))
                     .map_err(anyhow::Error::msg)?;
             }
+            // A move refused saves nothing, as `varde set --project`.
+            let project = Some(draft.project.text().trim()).filter(|p| !p.is_empty()).map(Pick::expand);
+            let had_project: Option<String> =
+                store.conn.query_row("SELECT project FROM task WHERE id = ?1", [&id], |r| r.get(0))?;
+            let moved = match project {
+                Some(p) if had_project.as_deref() != Some(p.as_str()) => {
+                    Some(crate::tasks::move_to(&store, &id, Path::new(&p))?)
+                }
+                _ => None,
+            };
             task::set(&store, &id, Some(draft.title.text().trim()), Some(draft.body.text()))?;
             crate::naming::start(&store, &id);
-            let mut said = format!("saved {}", task::short(&id));
+            let mut said = moved.unwrap_or_else(|| format!("saved {}", task::short(&id)));
             if when.is_empty() && had.is_some() {
                 store.conn.execute("DELETE FROM schedule WHERE task = ?1", [&id])?;
                 said.push_str("; no longer scheduled");
@@ -1510,11 +1491,25 @@ impl<'a> App<'a> {
         self.here.clone().filter(|_| self.scoped)
     }
 
-    /// The directory a new task's project prompt starts with: the
-    /// selected task's project, else the one the board was opened in.
-    fn project_offer(&self) -> Field {
-        let dir = self.current().and_then(|r| r.project.clone()).or_else(|| self.here.clone());
-        Field::new(&dir.as_deref().map(draw::tilde).unwrap_or_default())
+    /// The projects varde knows, newest first, after `first` where they
+    /// are known: the likeliest. Nothing known when the store is busy.
+    fn known(&self, first: &[Option<String>]) -> Vec<String> {
+        let rest = self.paths.open(BUSY).and_then(|s| crate::start::projects(&s, None)).unwrap_or_default();
+        let mut out: Vec<String> = Vec::new();
+        for p in first.iter().flatten().cloned().chain(rest) {
+            if !out.contains(&p) {
+                out.push(p);
+            }
+        }
+        out
+    }
+
+    /// The picker for the project of `draft`: its Project first, then the
+    /// selected task's, then the one the board was opened in.
+    fn project_pick(&self, draft: &Draft, title: &'static str) -> Pick {
+        let now = Some(draft.project.text().trim()).filter(|p| !p.is_empty()).map(Pick::expand);
+        let at = self.current().and_then(|r| r.project.clone());
+        Pick::new(title, self.known(&[now, at, self.here.clone()]), None)
     }
 
     /// Create the task in the project `dir` is in. A failure leaves the
@@ -1560,7 +1555,8 @@ impl<'a> App<'a> {
             Ok(None) => self.mode = Mode::WhenTree(draft, dir.to_string()),
             Ok(Some(said)) => self.report(Ok(said)),
             Err(e) => {
-                self.mode = Mode::Where(draft, Field::new(dir), false);
+                let pick = self.project_pick(&draft, "Project for this task").typed(dir);
+                self.mode = Mode::Where(draft, pick, false);
                 self.report(Err(e));
             }
         }
@@ -1864,75 +1860,6 @@ pub(super) fn home_in(dir: &str) -> String {
         }
         _ => dir.trim().to_string(),
     }
-}
-
-/// The directories in `parent` Tab could complete a directory prompt to,
-/// and the one it last put in the line.
-struct Menu {
-    parent: String,
-    names: Vec<String>,
-    at: Option<usize>,
-}
-
-/// Tab, or Shift-Tab when `back`, in a directory prompt: the next (or
-/// previous) directory of the `menu` the last Tab listed put in the
-/// line, or else the line completed.
-fn tab(line: &mut Field, menu: Option<Menu>, back: bool) -> Option<Menu> {
-    let Some(mut menu) = menu else {
-        let mut text = line.text().to_string();
-        let menu = complete_dir(&mut text);
-        line.set(&text);
-        return menu;
-    };
-    let n = menu.names.len();
-    let at = match (menu.at, back) {
-        (None, false) => 0,
-        (None, true) => n - 1,
-        (Some(i), false) => (i + 1) % n,
-        (Some(i), true) => (i + n - 1) % n,
-    };
-    line.set(&format!("{}{}/", menu.parent, menu.names[at]));
-    menu.at = Some(at);
-    Some(menu)
-}
-
-/// `line` completed as a shell completes a directory, as far as the
-/// directories it could name agree; those directories when that is no
-/// further. Hidden ones only once a `.` is typed.
-fn complete_dir(line: &mut String) -> Option<Menu> {
-    if line.trim() == "~" {
-        line.push('/');
-    }
-    let (parent, stem) = match line.rfind('/') {
-        Some(i) => (line[..=i].to_string(), line[i + 1..].to_string()),
-        None => (String::new(), line.clone()),
-    };
-    let dir = if parent.is_empty() { ".".to_string() } else { home_in(&parent) };
-    let Ok(entries) = std::fs::read_dir(dir) else { return None };
-    let mut names: Vec<String> = entries
-        .flatten()
-        .filter(|e| e.path().is_dir())
-        .filter_map(|e| e.file_name().into_string().ok())
-        .filter(|n| n.starts_with(&stem) && (stem.starts_with('.') || !n.starts_with('.')))
-        .collect();
-    names.sort();
-    let first = names.first()?;
-    let common = names.iter().fold(first.as_str(), |a, b| {
-        let end = a
-            .char_indices()
-            .zip(b.chars())
-            .find(|((_, x), y)| x != y)
-            .map_or(a.len().min(b.len()), |((i, _), _)| i);
-        &a[..end]
-    });
-    if names.len() == 1 {
-        *line = format!("{parent}{common}/");
-    } else if common.len() > stem.len() {
-        *line = format!("{parent}{common}");
-    } else {
-        return Some(Menu { parent, names, at: None });
-    }
-    None
 }
 
 /// Closing from the board: never merging or removing.
@@ -2535,149 +2462,77 @@ mod tests {
     }
 
     #[test]
-    fn tab_completes_a_directory_as_a_shell_does() {
-        let dir = tempfile::tempdir().unwrap();
-        for d in ["projects/varde", "projects/vardo", "projects/web", "projects/.hidden"] {
-            std::fs::create_dir_all(dir.path().join(d)).unwrap();
-        }
-        std::fs::write(dir.path().join("projects/varfile"), "").unwrap();
-        let root = dir.path().display().to_string();
-        let complete_dir = |line: &mut String| complete_dir(line).map(|m| m.names).unwrap_or_default();
-        let mut line = format!("{root}/pro");
-        assert!(complete_dir(&mut line).is_empty());
-        assert_eq!(line, format!("{root}/projects/"), "one match, closed with a slash");
-        assert_eq!(complete_dir(&mut line), ["varde", "vardo", "web"], "no prefix: listed, hidden left out");
-        line.push('v');
-        assert!(complete_dir(&mut line).is_empty());
-        assert_eq!(line, format!("{root}/projects/vard"), "as far as they agree, files left out");
-        assert_eq!(complete_dir(&mut line), ["varde", "vardo"]);
-        assert_eq!(line, format!("{root}/projects/vard"));
-        line.push('e');
-        complete_dir(&mut line);
-        assert_eq!(line, format!("{root}/projects/varde/"));
-        let mut hidden = format!("{root}/projects/.");
-        complete_dir(&mut hidden);
-        assert_eq!(hidden, format!("{root}/projects/.hidden/"));
-        let mut nothing = format!("{root}/nowhere/x");
-        assert!(complete_dir(&mut nothing).is_empty());
-        assert_eq!(nothing, format!("{root}/nowhere/x"));
-    }
-
-    #[test]
-    fn tab_in_the_new_tasks_project_line_completes_lists_and_picks() {
+    fn the_forms_project_opens_the_picker_and_creating_without_one_asks_it() {
         let (dir, paths) = temp_paths();
-        for d in ["alpha", "alps", "alto"] {
-            std::fs::create_dir(dir.path().join(d)).unwrap();
+        let store = paths.open(BUSY).unwrap();
+        for p in ["alpha", "beta"] {
+            std::fs::create_dir_all(dir.path().join(p).join(".git")).unwrap();
+            let p = dir.path().join(p).display().to_string();
+            task::create(&store, p.rsplit('/').next().unwrap(), None, Some(&p), None, 1_000).unwrap();
         }
         let mut app = board(&paths, &[]);
         key(&mut app, KeyCode::Char('n'));
         key(&mut app, KeyCode::Char('T'));
-        app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
-        let Mode::Where(_, line, _) = &mut app.mode else { panic!("not asking the project") };
-        line.set(&format!("{}/a", dir.path().display()));
-        let line = |app: &App| match &app.mode {
-            Mode::Where(_, l, _) => l.text().rsplit_terminator('/').next().unwrap().to_string(),
-            _ => panic!("left the prompt"),
-        };
-        key(&mut app, KeyCode::Tab);
-        assert_eq!(line(&app), "al", "common prefix");
-        key(&mut app, KeyCode::Tab);
-        assert!(screen(&mut app, 120, 10).contains("alpha  alps  alto"));
-        key(&mut app, KeyCode::Tab);
-        assert_eq!(line(&app), "alpha", "the next Tab picks the first");
-        key(&mut app, KeyCode::Tab);
-        assert_eq!(line(&app), "alps");
         key(&mut app, KeyCode::BackTab);
         key(&mut app, KeyCode::BackTab);
-        assert_eq!(line(&app), "alto", "Shift-Tab goes back, round the end");
-        assert!(screen(&mut app, 120, 10).contains("alpha  alps  alto"), "listed while picking");
-        key(&mut app, KeyCode::Char('x'));
-        assert!(!screen(&mut app, 120, 10).contains("alpha  alps"), "gone at another key");
-        assert!(matches!(&app.mode, Mode::Where(_, l, _) if l.text().ends_with("/alto/x")), "the pick kept");
-
-        // M-Tab on the form's Project asks the same, and RET puts it there.
-        key(&mut app, KeyCode::Esc);
-        key(&mut app, KeyCode::Tab);
-        key(&mut app, KeyCode::Tab);
-        app.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::ALT));
-        assert!(screen(&mut app, 120, 10).contains("RET pick"));
-        app.paste(&format!("{}/alp", dir.path().display()));
-        key(&mut app, KeyCode::Tab);
-        key(&mut app, KeyCode::Tab);
+        assert!(screen(&mut app, 120, 20).contains("RET pick project  C-s create"));
+        // Typing on the Project narrows the picker, and RET puts the pick there.
+        key(&mut app, KeyCode::Char('b'));
+        let s = screen(&mut app, 120, 24);
+        assert!(s.contains("╭ Project ") && s.contains("› b") && s.contains("beta "), "{s}");
+        assert!(s.contains("╭ New task"), "the form stays in view under it:\n{s}");
         key(&mut app, KeyCode::Enter);
         let Mode::New(d) = &app.mode else { panic!("not back in the form") };
-        assert_eq!(
-            (d.project.text(), d.at),
-            (format!("{}/alpha", dir.path().display()).as_str(), Part::Project)
-        );
-        assert_eq!(d.body.text(), "T", "the rest kept");
+        let beta = dir.path().join("beta").display().to_string();
+        assert_eq!((d.project.text(), d.at, d.body.text()), (beta.as_str(), Part::Project, "T"));
+        // Emptied, it is asked on create, the selected task's project picked.
+        key(&mut app, KeyCode::Backspace);
+        app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        assert!(screen(&mut app, 120, 24).contains("╭ Project for this task "));
+        key(&mut app, KeyCode::Esc);
+        assert!(matches!(&app.mode, Mode::New(d) if d.body.text() == "T"), "Esc goes back to the form");
+        let at = app.current().and_then(|r| r.project.clone()).unwrap();
+        app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        key(&mut app, KeyCode::Enter);
+        assert!(app.message.starts_with("created "), "{}", app.message);
+        let made: String =
+            store.conn.query_row("SELECT project FROM task WHERE body = 'T'", [], |r| r.get(0)).unwrap();
+        assert_eq!(made, at);
     }
 
     #[test]
-    fn the_picked_directory_stays_in_view() {
+    fn the_picker_keeps_the_picked_directory_in_view() {
         let (dir, paths) = temp_paths();
-        let names: Vec<String> = (0..20).map(|i| format!("dir{i:02}")).collect();
-        for n in &names {
-            std::fs::create_dir(dir.path().join(n)).unwrap();
+        for i in 0..20 {
+            std::fs::create_dir(dir.path().join(format!("dir{i:02}"))).unwrap();
         }
         let mut app = board(&paths, &[]);
-        app.mode = Mode::Where(Draft::default(), Field::new(&format!("{}/", dir.path().display())), false);
-        key(&mut app, KeyCode::Tab);
-        for _ in 0..16 {
-            key(&mut app, KeyCode::Tab);
+        let pick = Pick::new("Project", vec![], None).typed(&format!("{}/", dir.path().display()));
+        app.mode = Mode::Where(Draft::default(), pick, false);
+        for _ in 0..15 {
+            key(&mut app, KeyCode::Down);
         }
-        assert!(matches!(&app.mode, Mode::Where(_, l, _) if l.text().ends_with("/dir14/")));
-        let s = screen(&mut app, 80, 10);
-        assert!(s.contains("dir14") && !s.contains("dir00") && s.contains("…"), "{s}");
+        assert!(matches!(&app.mode, Mode::Where(_, p, _) if p.line.text().ends_with("/dir14/")));
+        let s = screen(&mut app, 80, 16);
+        assert!(s.contains("dir14/") && !s.contains("dir00/"), "{s}");
     }
 
     #[test]
-    fn the_project_chooser_keeps_its_keys_in_view() {
+    fn the_first_starts_project_question_is_the_picker() {
         let (_dir, paths) = temp_paths();
         let mut app = board(&paths, &["Where"]);
         let long = format!("/srv/{}/project", "deep/".repeat(30));
-        let dir = Field::new(&long);
-        app.mode = Mode::Project(
-            Start { want: Want::Continue, go: true, ..Start::default() },
-            asked("T"),
-            vec![long],
-            0,
-            dir,
-        );
-        let s = screen(&mut app, 80, 10);
-        assert!(s.contains("…") && s.contains("1/1  ↑/↓ other  Tab complete  RET start  Esc cancel"), "{s}");
-    }
-
-    #[test]
-    fn the_project_chooser_steps_through_its_choices_or_takes_a_typed_directory() {
-        let (_dir, paths) = temp_paths();
-        let mut app = board(&paths, &["Where"]);
-        let choices = vec!["/srv/a".to_string(), "/srv/b".to_string()];
         let start = Start { want: Want::Continue, go: true, ..Start::default() };
-        app.mode = Mode::Project(start.clone(), asked("T"), choices, 0, Field::new("/srv/a"));
-        let dir = |app: &App| match &app.mode {
-            Mode::Project(.., i, d) => (*i, d.text().to_string()),
-            _ => panic!("not asking the project"),
-        };
-        key(&mut app, KeyCode::Down);
-        assert_eq!(dir(&app), (1, "/srv/b".into()));
-        key(&mut app, KeyCode::Up);
-        key(&mut app, KeyCode::Up);
-        assert_eq!(dir(&app), (1, "/srv/b".into()), "round to the last");
-        // j and k are typed, as in any path.
-        for c in "/jk".chars() {
-            key(&mut app, KeyCode::Char(c));
-        }
-        assert_eq!(dir(&app), (1, "/srv/b/jk".into()));
-        app.paste("/x ");
-        assert_eq!(dir(&app), (1, "/srv/b/jk/x".into()));
+        let pick = Pick::new("Project for this task", vec![long, "/srv/b".into()], None);
+        app.mode = Mode::Project(start, asked("T"), pick);
+        let s = screen(&mut app, 80, 14);
+        assert!(s.contains("project  …") && s.contains("deep//project │"), "clipped from the left:\n{s}");
+        assert!(s.contains("↑/↓ choose  RET pick  Tab into its directory  Esc back"), "{s}");
+        // j and k are typed, as in any line.
+        key(&mut app, KeyCode::Char('j'));
+        assert!(matches!(&app.mode, Mode::Project(.., p) if p.line.text() == "j"));
         key(&mut app, KeyCode::Esc);
         assert!(matches!(app.mode, Mode::Normal) && app.message == "cancelled");
-        // With none known, it asks for one to be typed.
-        app.mode = Mode::Project(start, asked("T"), vec![], 0, Field::new(""));
-        key(&mut app, KeyCode::Down);
-        assert_eq!(dir(&app), (0, "".into()));
-        assert!(!screen(&mut app, 80, 10).contains("other"));
     }
 
     #[test]
@@ -3044,7 +2899,7 @@ mod tests {
         let start = Start { want: Want::Continue, go: false, ..Start::default() };
         // A directory typed, not one of the choices, is the project.
         let elsewhere = vec!["/srv/elsewhere".to_string()];
-        app.mode = Mode::Project(start, asked(wanted), elsewhere, 0, Field::new(""));
+        app.mode = Mode::Project(start, asked(wanted), Pick::new("Project", elsewhere, None));
         app.paste(&project.display().to_string());
         key(&mut app, KeyCode::Enter);
         assert!(app.message.contains("in a window of its own"), "{}", app.message);
@@ -3165,9 +3020,7 @@ mod tests {
         app.mode = Mode::Project(
             Start { want: Want::Continue, go: true, ..Start::default() },
             asked("T"),
-            vec!["/srv/p".into()],
-            0,
-            Field::new("/srv/p"),
+            Pick::new("Project", vec!["/srv/p".into()], None),
         );
         app.recall("one", true);
         for (w, h) in [(1, 1), (5, 3), (20, 6)] {
@@ -3332,11 +3185,13 @@ mod tests {
         key(&mut app, KeyCode::Char('e'));
         assert!(matches!(&app.mode, Mode::New(d) if d.when.text() == "every day 06:00"));
         key(&mut app, KeyCode::Down);
+        key(&mut app, KeyCode::Down);
         app.key(ctrl('u'));
         app.paste("every weekday 09:00");
         key(&mut app, KeyCode::Enter);
         assert_eq!(rule().as_deref(), Some("every weekday 09:00"), "{}", app.message);
         key(&mut app, KeyCode::Char('e'));
+        key(&mut app, KeyCode::Down);
         key(&mut app, KeyCode::Down);
         app.key(ctrl('u'));
         key(&mut app, KeyCode::Enter);
@@ -3596,7 +3451,12 @@ mod tests {
         key(&mut app, KeyCode::Tab);
         app.paste("Two");
         key(&mut app, KeyCode::Enter);
-        assert!(screen(&mut app, 200, 24).contains(&format!("Project for this task: {}", old.display())));
+        let s = screen(&mut app, 200, 24);
+        assert!(
+            s.contains("╭ Project for this task ")
+                && s.contains(&format!("▌old  {}", draw::tilde(&old.to_string_lossy()))),
+            "{s}"
+        );
         // Esc goes back to the form, the title kept.
         key(&mut app, KeyCode::Esc);
         assert!(matches!(&app.mode, Mode::New(d) if d.title.text() == "Two"));
@@ -3713,7 +3573,12 @@ mod tests {
             || -> String { store.conn.query_row("SELECT project FROM task", [], |r| r.get(0)).unwrap() };
 
         key(&mut app, KeyCode::Char('m'));
-        assert!(screen(&mut app, 200, 24).contains(&format!("Move to project: {}", old.display())));
+        let s = screen(&mut app, 200, 24);
+        assert!(
+            s.contains("╭ Move to project ")
+                && s.contains(&format!("{}  · its project now", draw::tilde(&old.to_string_lossy()))),
+            "{s}"
+        );
         app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
         app.paste(&new.to_string_lossy());
         key(&mut app, KeyCode::Enter);

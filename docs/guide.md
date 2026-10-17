@@ -186,7 +186,7 @@ shows them all.
 | Tab / S-Tab | The next / previous task that needs you. |
 | `s` | In tmux, start it in a window of its own and stay on the board. |
 | `R` / `F` | Start a fresh conversation / fork the latest. |
-| `n` / `e` | New task / edit its title and context. |
+| `n` / `e` | New task / edit its title, project and context. |
 | `d` / `P` / `x` | Done / park / drop. `x` asks; `d` and `P` ask only about a busy session. |
 | `u` | Reopen the tasks last closed here. |
 | `a` | Accept an Inbox task. |
@@ -206,13 +206,27 @@ shows them all.
 **The new-task form.** `n` opens it in the context, as org-varde's
 form: most tasks are only that, and with no title a model names the
 task from it. Above the line are `Title:`, `Project:` and `When:`; Tab
-and Shift-Tab go between the fields, and M-Tab (Esc Tab) on the Project
-picks its directory, with Tab completing it. The Project starts as the
-project the board keeps to; left empty, it is asked for on create. RET
-above the line, or C-s anywhere, creates the task. C-x C-e writes it,
-fields and all, in `$EDITOR`. Esc puts the draft away, and the next `n`
-brings it back. Prompts edit text as a shell does (C-w, C-u, C-k,
-Alt-b/f, C-y).
+and Shift-Tab go between the fields. The Project starts as the project
+the board keeps to; left empty, it is asked for on create. On the
+Project, RET or typing opens the project picker, and Backspace empties
+it. RET on another field above the line, or C-s anywhere, creates the
+task. C-x C-e writes it, fields and all, in `$EDITOR`. Esc puts the
+draft away, and the next `n` brings it back. `e` opens the same form on
+a task: changing its Project there moves it, as `m` does. Prompts edit
+text as a shell does (C-w, C-u, C-k, Alt-b/f, C-y).
+
+**The project picker.** Every question about a project is the same
+picker: the form's Project, a new task with none, `m`, and a first start
+whose project is unsure. It lists the projects varde knows, by name and
+directory, newest first, with the likeliest at the top and picked: the
+form's Project, else the selected task's, else the one the board was
+opened in. `m` lists the task's own project last. Typing narrows the
+list by name, then by directory; ↑/↓ or C-p/C-n choose, RET picks, and
+Esc goes back. A directory typed (`~`, `/` or `.` first) lists the
+directories in it instead: Tab completes as a shell does, ↑/↓ step
+through them, and RET takes the directory typed. Tab on a project goes
+into its directory, and `another directory…` starts one at `~/`.
+org-varde's picker is the same list in the minibuffer.
 
 ### The view
 

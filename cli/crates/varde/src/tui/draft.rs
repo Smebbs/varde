@@ -18,7 +18,7 @@ use super::field::{Field, Words};
 pub(super) enum Part {
     #[default]
     Title,
-    /// The directory of a new task's project; a task made has one.
+    /// The directory of the task's project, picked with the project picker.
     Project,
     When,
     Body,
@@ -50,8 +50,8 @@ pub(super) enum Edit {
     Cancel,
     /// Write it in `$EDITOR` instead.
     Editor,
-    /// Alt-Tab on the Project: pick its directory.
-    Pick,
+    /// On the Project: pick it, starting with what was typed.
+    Pick(String),
 }
 
 /// The hint at the top of the file a draft is written in.
@@ -67,10 +67,11 @@ impl Draft {
         Draft { project: Field::new(project), at: Part::Body, ..Draft::default() }
     }
 
-    /// A task's title and context, to change.
-    pub(super) fn of(task: &str, title: &str, body: &str, when: &str) -> Draft {
+    /// A task's title, project and context, to change.
+    pub(super) fn of(task: &str, title: &str, project: &str, body: &str, when: &str) -> Draft {
         Draft {
             title: Field::new(title),
+            project: Field::new(project),
             when: Field::new(when),
             body: Field::new(body),
             task: Some(task.to_string()),
@@ -98,27 +99,26 @@ impl Draft {
             _ => return None,
         };
         let (title, body) = (d["title"].as_str()?, d["text"].as_str()?);
-        let mut draft = Draft { task, ..Draft::of("", title, body, d["when"].as_str().unwrap_or_default()) };
+        let (project, when) =
+            (d["project"].as_str().unwrap_or_default(), d["when"].as_str().unwrap_or_default());
+        let mut draft = Draft { task, ..Draft::of("", title, project, body, when) };
         if draft.task.is_none() {
-            draft.project.set(d["project"].as_str().unwrap_or_default());
             draft.at = Part::Body;
         }
         Some(draft)
     }
 
-    /// The fields, in order: a task made keeps its project here.
+    /// The fields, in order.
     fn parts(&self) -> &'static [Part] {
-        match self.task {
-            None => &[Part::Title, Part::Project, Part::When, Part::Body],
-            Some(_) => &[Part::Title, Part::When, Part::Body],
-        }
+        &[Part::Title, Part::Project, Part::When, Part::Body]
     }
 
     /// Tab goes to the next field, round from the body to the title, and
-    /// Shift-Tab back, as org-varde's form; Alt-Tab (Esc Tab, as Emacs's
-    /// M-TAB) on the Project picks its directory. Down and Up go through
-    /// the fields too. Enter creates from a field above the
-    /// line and starts a new line in the body; C-s creates from any.
+    /// Shift-Tab back, as org-varde's form. On the Project, RET, typing
+    /// or Alt-Tab (Esc Tab, as Emacs's M-TAB) opens the project picker;
+    /// Backspace empties it. Down and Up go through the fields too.
+    /// Enter creates from another field above the line and starts a new
+    /// line in the body; C-s creates from any.
     /// Esc and C-g put the form away, and C-x C-e or Alt-e opens the
     /// draft in `$EDITOR`. The rest edits the text as every prompt of the
     /// board does.
@@ -135,9 +135,12 @@ impl Draft {
             KeyCode::Char('s') if ctrl => return Edit::Create,
             KeyCode::Char('x') if ctrl => self.prefix = true,
             KeyCode::Char('e') if alt => return Edit::Editor,
+            KeyCode::Enter if project => return Edit::Pick(String::new()),
             KeyCode::Enter if self.at != Part::Body => return Edit::Create,
             KeyCode::Enter => self.body.insert("\n"),
-            KeyCode::Tab if alt && project => return Edit::Pick,
+            KeyCode::Tab if alt && project => return Edit::Pick(String::new()),
+            KeyCode::Char(c) if project && !ctrl && !alt => return Edit::Pick(c.to_string()),
+            KeyCode::Backspace | KeyCode::Delete if project => self.project.set(""),
             KeyCode::Tab => self.step(1),
             KeyCode::BackTab => self.step(-1),
             KeyCode::Down if self.at != Part::Body => self.step(1),
@@ -200,10 +203,7 @@ impl Draft {
             "Lines starting with \"#:\" are left out. Save and quit to go back to the form.",
         ];
         let mut text: String = hint.iter().map(|l| format!("{HINT}{l}\n")).collect();
-        text += &format!("Title: {}\n", self.title.text());
-        if self.task.is_none() {
-            text += &format!("Project: {}\n", self.project.text());
-        }
+        text += &format!("Title: {}\nProject: {}\n", self.title.text(), self.project.text());
         text += &format!("When: {}\n{RULE}\n{}\n", self.when.text(), self.body.text().trim_end());
         text
     }
@@ -215,7 +215,7 @@ impl Draft {
         while let Some(line) = lines.peek() {
             let field = match line.split_once(':') {
                 Some(("Title", v)) => Some((&mut self.title, v)),
-                Some(("Project", v)) if self.task.is_none() => Some((&mut self.project, v)),
+                Some(("Project", v)) => Some((&mut self.project, v)),
                 Some(("When", v)) => Some((&mut self.when, v)),
                 _ => None,
             };
@@ -237,7 +237,7 @@ impl Draft {
 /// The new-task form, over the bottom of the board, a pane as the view
 /// is. The fields stay put and the body scrolls to keep the cursor in
 /// view. An empty field says what it is for, as org-varde's does.
-pub(super) fn draw_draft(f: &mut Frame, draft: &Draft, area: Rect) {
+pub(super) fn draw_draft(f: &mut Frame, draft: &Draft, area: Rect) -> Rect {
     let width = area.width.saturating_sub(4).max(1) as usize;
     let body = draft.body.text();
     let rows: usize = body.split('\n').map(|l| l.chars().count() / width + 1).sum();
@@ -245,6 +245,7 @@ pub(super) fn draw_draft(f: &mut Frame, draft: &Draft, area: Rect) {
     // Six rows where the screen has them; a smaller one gets all it has.
     let height = (rows + fields + 3).max(fields + 5).min(area.height as usize) as u16;
     let area = Rect { y: area.bottom() - height, height, ..area };
+    let form = area;
     let name = if draft.task.is_some() { " Edit task " } else { " New task " };
     let block =
         Block::bordered().border_type(BorderType::Rounded).padding(Padding::horizontal(1)).title(name);
@@ -260,14 +261,31 @@ pub(super) fn draw_draft(f: &mut Frame, draft: &Draft, area: Rect) {
                 &draft.title,
                 if draft.task.is_none() { "left empty, varde names it from the context" } else { "" },
             ),
-            Part::Project => ("Project: ", &draft.project, "asked for on create, or M-Tab picks it"),
+            Part::Project => (
+                "Project: ",
+                &draft.project,
+                if draft.task.is_none() {
+                    "asked for on create · RET picks it"
+                } else {
+                    "none yet · RET picks it"
+                },
+            ),
             Part::When => {
                 ("When:    ", &draft.when, "not scheduled: at mon 09:00 · every weekday 09:00 · every 4h")
             }
             Part::Body => unreachable!("the body is below the line"),
         };
         let mut line = vec![label.bold()];
-        if draft.at == *part {
+        if *part == Part::Project {
+            // Its directory quiet, and its name, as the picker shows it.
+            let dir = left_clip(&clean(field.text()), room);
+            let name = dir.trim_end_matches('/').rsplit('/').next().unwrap_or_default().len();
+            let (parent, name) = dir.split_at(dir.trim_end_matches('/').len() - name);
+            line.extend([parent.to_string().dark_gray(), name.to_string().into()]);
+            if draft.at == *part {
+                line.push(" ".reversed());
+            }
+        } else if draft.at == *part {
             line.extend(field.line_spans(room));
         } else {
             line.push(Span::raw(left_clip(&clean(field.text()), room)));
@@ -289,7 +307,7 @@ pub(super) fn draw_draft(f: &mut Frame, draft: &Draft, area: Rect) {
     let in_body = draft.at == Part::Body;
     if body.is_empty() && !in_body {
         f.render_widget(Paragraph::new("context for the agent".dark_gray()), body_area);
-        return;
+        return form;
     }
     // The cursor's row, as wrapped, kept in view.
     let before = &body[..draft.body.cursor()];
@@ -297,6 +315,7 @@ pub(super) fn draw_draft(f: &mut Frame, draft: &Draft, area: Rect) {
     let scroll = (at + 1).saturating_sub(body_area.height as usize) as u16;
     let lines = draft.body.lines(in_body);
     f.render_widget(Paragraph::new(lines).wrap(Wrap { trim: false }).scroll((scroll, 0)), body_area);
+    form
 }
 
 #[cfg(test)]
@@ -337,10 +356,17 @@ mod tests {
         assert!(matches!(press(&mut d, KeyCode::Enter), Edit::Create));
         press(&mut d, KeyCode::Tab);
         assert_eq!(d.at, Part::Project);
-        assert!(matches!(d.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::ALT)), Edit::Pick));
-        typed(&mut d, "~/x/");
-        d.key(KeyEvent::new(KeyCode::Char('w'), KeyModifiers::CONTROL));
-        assert_eq!(d.project.text(), "~/", "C-w rubs out a directory");
+        assert!(
+            matches!(d.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::ALT)), Edit::Pick(t) if t.is_empty())
+        );
+        assert!(matches!(press(&mut d, KeyCode::Enter), Edit::Pick(t) if t.is_empty()), "RET picks it");
+        assert!(
+            matches!(press(&mut d, KeyCode::Char('w')), Edit::Pick(t) if t == "w"),
+            "typing narrows the picker"
+        );
+        d.project.set("~/x");
+        press(&mut d, KeyCode::Backspace);
+        assert_eq!(d.project.text(), "", "Backspace empties it");
         press(&mut d, KeyCode::Tab);
         assert_eq!(d.at, Part::When);
         press(&mut d, KeyCode::BackTab);
@@ -349,12 +375,12 @@ mod tests {
         assert_eq!(d.at, Part::Body, "Shift-Tab goes back, round to the context");
         assert!(matches!(press(&mut d, KeyCode::Esc), Edit::Cancel));
 
-        // A task made keeps its project: no field for it.
-        let mut e = Draft::of("t1", "Title", "", "");
+        // A task made has its project too, to move it.
+        let mut e = Draft::of("t1", "Title", "~/src/app", "", "");
         assert_eq!(e.at, Part::Title, "an edit opens on the title");
         press(&mut e, KeyCode::Tab);
-        assert_eq!(e.at, Part::When);
-        assert!(matches!(e.key(KeyEvent::new(KeyCode::Tab, KeyModifiers::ALT)), Edit::Typing));
+        assert_eq!(e.at, Part::Project);
+        assert!(matches!(press(&mut e, KeyCode::Enter), Edit::Pick(_)));
     }
 
     #[test]
@@ -411,11 +437,11 @@ mod tests {
             (d.title.text(), d.when.text(), d.body.text()),
             ("Just a title", "every 4h", "The context")
         );
-        // An edit has no Project to change.
-        let mut e = Draft::of("t1", "Old", "body", "");
-        assert!(!e.text().contains("Project:"));
+        // An edit changes its Project too.
+        let mut e = Draft::of("t1", "Old", "/here", "body", "");
+        assert!(e.text().contains("Project: /here\n"));
         e.set_text("Title: New\nProject: /elsewhere\n──\nbody\n");
-        assert_eq!((e.title.text(), e.project.text()), ("New", ""));
+        assert_eq!((e.title.text(), e.project.text()), ("New", "/elsewhere"));
     }
 
     #[test]
@@ -433,7 +459,11 @@ mod tests {
     fn the_form_shows_title_and_body_and_follows_the_typing() {
         let mut d = Draft::default();
         typed(&mut d, "Board git status");
-        let screen = |d: &Draft| render(40, 12, |f| draw_draft(f, d, f.area()));
+        let screen = |d: &Draft| {
+            render(40, 12, |f| {
+                draw_draft(f, d, f.area());
+            })
+        };
         let s = screen(&d);
         assert!(s.contains("Title:   Board git status "), "{s}");
         assert!(s.contains("Project: asked for on create"), "an empty field says what it is for:\n{s}");
@@ -463,7 +493,9 @@ mod tests {
             press(&mut d, KeyCode::Up);
         }
         assert_eq!(d.at, Part::When, "Up from the first line goes above the line");
-        assert!(render(60, 12, |f| draw_draft(f, &Draft::new(""), f.area()))
-            .contains("Title:   left empty, varde names it"));
+        assert!(render(60, 12, |f| {
+            draw_draft(f, &Draft::new(""), f.area());
+        })
+        .contains("Title:   left empty, varde names it"));
     }
 }

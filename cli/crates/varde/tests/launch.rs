@@ -1969,6 +1969,10 @@ fn a_task_moves_to_another_project_and_starts_there_afresh() {
     let d = e.show(&t);
     assert_eq!(d["project"], root.as_str());
     assert_eq!(d["runs"][0]["cwd"], e.repo().to_string_lossy().as_ref(), "a past run keeps its directory");
+    // The projects a client's picker offers: the newest first.
+    let projects: serde_json::Value = serde_json::from_str(&e.ok(&["projects", "--json"])).unwrap();
+    assert_eq!(projects["projects"][0], root.as_str(), "{projects}");
+    assert_eq!(projects["projects"].as_array().unwrap().len(), 1, "the old one has no task now: {projects}");
 
     // The old conversation stays in the old checkout: the next start is a
     // fresh one in the new project, given the new project's cairn.

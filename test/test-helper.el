@@ -141,6 +141,20 @@ from `<subcommand>.once-err', and a one-time answer from `<subcommand>.once-out'
                    (process-list))
     (accept-process-output nil 0.02)))
 
+(defvar org-varde-test-offered nil
+  "The directories the project picker last offered, best first, and
+`another directory…' last.")
+
+(defun org-varde-test-pick (&optional answer)
+  "A `completing-read' that answers the project picker: with ANSWER, a
+directory typed or `org-varde--other-directory', else with RET, its
+first choice.  What it offers goes in `org-varde-test-offered'."
+  (lambda (_prompt collection &rest _)
+    (let ((choices (all-completions "" collection)))
+      (setq org-varde-test-offered
+            (mapcar (lambda (c) (or (cadr (split-string c "  +" t)) c)) choices))
+      (or answer (car choices)))))
+
 (defun org-varde-test-calls ()
   "Every call the fake varde received, oldest first, once all are done."
   (org-varde-test-wait)

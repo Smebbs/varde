@@ -769,9 +769,24 @@ pub fn projects(store: &Store, own: Option<&str>) -> Result<Vec<String>> {
     Ok(out)
 }
 
+/// `varde projects`: [`projects`], one a line, or as JSON for a client's
+/// project picker (`docs/clients.md`).
+pub fn list_projects(paths: &Paths, as_json: bool) -> Result<()> {
+    let known = projects(&paths.open(Duration::from_secs(2))?, None)?;
+    if as_json {
+        println!("{}", json!({"v": 1, "projects": known}));
+    } else {
+        known.iter().for_each(|p| println!("{p}"));
+    }
+    Ok(())
+}
+
 fn ask_project(store: &Store, choices: &[String]) -> Result<PathBuf> {
+    // As the boards' picker lists them: by name, then directory.
+    let width = choices.iter().map(|p| crate::list::project_name(Some(p)).width()).max().unwrap_or(0);
     for (i, p) in choices.iter().enumerate() {
-        eprintln!("  {}  {p}", i + 1);
+        let name = crate::list::pad(crate::list::project_name(Some(p)), width + 2);
+        eprintln!("  {}  {name}{}", i + 1, crate::tasks::tilde(p));
     }
     eprint!("Project for this task? [number or directory, default 1] ");
     std::io::stderr().flush()?;

@@ -160,10 +160,12 @@
   (org-varde-test-with-varde
     (org-varde-test--run-plan)
     (org-varde-test-reply-once "start" "{\"v\":1,\"action\":\"ask\",\"ask\":\"project\",\"choices\":[\"/p/repo\"]}")
-    (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) "/p/repo/")))
+    ;; RET takes the first of varde's choices.
+    (cl-letf (((symbol-function 'completing-read) (org-varde-test-pick)))
       (org-varde--start org-varde-test--id "t" nil nil)
       (org-varde-test-wait))
-    (should (string-suffix-p "--project /p/repo/" (car (last (org-varde-test-calls)))))
+    (should (equal org-varde-test-offered (list "/p/repo" org-varde--other-directory)))
+    (should (string-suffix-p "--project /p/repo" (car (last (org-varde-test-calls)))))
     (should (equal org-varde-test-sent '("varde run R1")))))
 
 ;; The board's RET on a region: the worktree answer holds for every task
@@ -178,11 +180,12 @@
                                  "{\"v\":1,\"action\":\"ask\",\"ask\":\"project\",\"choices\":[\"/p/a\"]}")
                                 ((not (member "--worktree" args)) "{\"v\":1,\"action\":\"ask\",\"ask\":\"worktree\"}")
                                 (t "{\"v\":1,\"action\":\"run\"}")))))
-              ((symbol-function 'read-directory-name)
-               (lambda (prompt _dir default)
+              ((symbol-function 'completing-read)
+               (lambda (prompt collection &rest _)
                  (push prompt prompts)
-                 (push default defaults)
-                 (if (= (length prompts) 1) "/p/b/" default)))
+                 (funcall (org-varde-test-pick (and (= (length prompts) 1) "/p/b/")) prompt collection)
+                 (push (car org-varde-test-offered) defaults)
+                 (if (= (length prompts) 1) "/p/b/" (car (all-completions "" collection)))))
               ((symbol-function 'y-or-n-p) (lambda (&rest _) (setq worktree-asked (1+ worktree-asked)))))
       (let ((org-varde--background t)
             (org-varde--answers (list :region t)))
@@ -192,9 +195,9 @@
                                                                           #'ignore #'ignore))
                                    #'ignore))
       (should (= worktree-asked 1))
-      (should (equal (nreverse prompts) '("Project directory for One: " "Project directory for Two: ")))
-      (should (equal (nreverse defaults) '("/p/a" "/p/b/")))
-      (should (equal (car calls) '("start" "T2" "--json" "--project" "/p/b/" "--worktree" "always")))
+      (should (equal (nreverse prompts) '("Project for One: " "Project for Two: ")))
+      (should (equal (nreverse defaults) '("/p/a" "/p/b")))
+      (should (equal (car calls) '("start" "T2" "--json" "--project" "/p/b" "--worktree" "always")))
       ;; A start of its own keeps nothing.
       (should-not org-varde--answers)
       (org-varde--plan-answering '("start" "T3" "--json") "Three" #'ignore #'ignore)
@@ -213,7 +216,7 @@
   (org-varde-test-with-varde
     (org-varde-test-reply "start" "{\"v\":1,\"action\":\"ask\",\"ask\":\"project\",\"choices\":[]}")
     (let ((asked 0) why)
-      (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) (setq asked (1+ asked)) "/p/")))
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) (setq asked (1+ asked)) "/p/")))
         (org-varde--plan-answering '("start" "T1" "--json") nil #'ignore (lambda (w) (setq why w)))
         (org-varde-test-wait))
       (should (= asked 1))

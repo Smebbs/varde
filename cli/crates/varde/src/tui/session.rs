@@ -9,7 +9,7 @@ use varde_core::board::{Board, Row};
 use varde_core::store::Store;
 use varde_core::task;
 
-use super::{App, Asked, Away, Field, Mode, Start, BUSY, OPEN_GROUPS};
+use super::{App, Asked, Away, Mode, Pick, Start, BUSY, OPEN_GROUPS};
 use crate::{now_ms, run, start, tmux};
 
 impl App<'_> {
@@ -129,8 +129,7 @@ impl App<'_> {
                 Ok(None)
             }
             start::Outcome::Ask(start::Ask::Project { choices }) => {
-                let dir = Field::new(&choices.first().map(|c| crate::tasks::tilde(c)).unwrap_or_default());
-                self.mode = Mode::Project(start, asked, choices, 0, dir);
+                self.mode = Mode::Project(start, asked, Pick::new("Project for this task", choices, None));
                 Ok(None)
             }
             start::Outcome::Ask(start::Ask::Worktree) => {

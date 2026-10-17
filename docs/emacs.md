@@ -79,7 +79,7 @@ From: [[file:~/notes/auth.org::*Fix the SSO redirect][auth.org › Auth › Fix 
 ```
 
 `TAB` and `S-TAB` go between the fields (`C-j` and `C-k` too, in
-evil's normal state), and `M-TAB` on the Project picks its directory.
+evil's normal state), and `RET` (or `M-TAB`) on the Project picks it.
 The context is written in org, with org's keys: `TAB` there folds a
 heading, `M-RET` adds a list item, and the agent gets the text as you
 wrote it.
@@ -91,6 +91,16 @@ task, it offers to go to that instead.
 A heading's `SCHEDULED:` goes into `When:`, so varde starts the task
 then; clear it to start the task yourself. It is copied once: `e` on
 the board changes the schedule later, not the org timestamp.
+
+**Picking a project** is one picker everywhere, the terminal board's
+in the minibuffer: the form's Project, a new task with none, `m` on the
+board, and a first start whose project is unsure. It offers the projects
+varde knows as `name  ~/dir`, the likeliest first, so RET takes it: the
+form's Project, else the task at point's, else the board's. `m` offers
+the task's own project last. Typing narrows them, in your completion
+UI's way (vertico, ivy and the like keep varde's order); a directory
+typed (`~`, `/` or `.` first) completes to the directories in it, and
+`another directory…` asks for one with `read-directory-name`.
 
 **Marking a heading DONE** offers to close the open tasks its text
 links (`org-varde-close-with-heading`: `ask`, `always` or `never`).
@@ -127,7 +137,7 @@ board does. `?` lists every key.
 | `s` | Start it in the background and stay on the board. |
 | `TAB` / `S-TAB` | The next / previous task that needs you. |
 | `v` | View the task and its cairn. |
-| `n` / `e` | New task / edit its title and context, in a form: `Title:`, `Project:` and `When:` (when varde starts it: `at mon 09:00`, `every weekday 09:00`; empty, never) above the line, the context below. An empty Title has a model name the task. `C-c C-c` saves, `C-c C-k` puts it away. |
+| `n` / `e` | New task / edit its title, project and context, in a form: `Title:`, `Project:` and `When:` (when varde starts it: `at mon 09:00`, `every weekday 09:00`; empty, never) above the line, the context below. An empty Title has a model name the task; a Project changed in `e` moves it, as `m` does. `C-c C-c` saves, `C-c C-k` puts it away. |
 | `d` / `P` / `x` | Done / park / drop. `u` reopens. |
 | `a` | Accept an Inbox task. |
 | `m` | Move it to another project. |

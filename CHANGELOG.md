@@ -8,11 +8,26 @@ follow [Semantic Versioning](https://semver.org).
 
 ### Changed
 
+- One project picker, the same on both boards, for every question about
+  a project: the form's Project, a new task with none, `m`, and a first
+  start whose project is unsure. It lists the projects varde knows by
+  name and directory, the likeliest at the top and picked (the form's,
+  else the selected task's, else the board's), so RET takes it; typing
+  narrows them, ↑/↓ or C-p/C-n choose, and a directory typed (`~`, `/`
+  or `.` first) lists and completes the directories in it. In the
+  board's form, RET or typing on the Project opens it. In org-varde it
+  is a `completing-read` with the same list, in place of
+  `read-directory-name`.
+- The edit form (`e`) has the task's Project, on both boards: changing
+  it moves the task, as `m` does, and a move varde refuses saves
+  nothing.
+- `varde projects --json` lists the projects varde knows, for clients'
+  pickers.
+
 - The board's new-task form is org-varde's: it opens in the context, not
   the Title, and has a `Project:` field between `Title:` and `When:`,
-  filled in with the project the board keeps to. M-Tab (Esc Tab) on it
-  picks its directory, with Tab completing; left empty, it is asked for
-  on create, as before. An empty Title says varde names the task from
+  filled in with the project the board keeps to; left empty, it is
+  asked for on create, as before. An empty Title says varde names the task from
   the context, and an empty Project when it is asked.
 - `$EDITOR` from the form (C-x C-e) writes its fields as the form shows
   them, `Title:`, `Project:` and `When:` above a line, the context

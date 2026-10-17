@@ -476,10 +476,9 @@ TITLE names the task in the question."
   (pcase (and (equal (plist-get plan :action) "ask") (plist-get plan :ask))
     ((and "project" (guard (not (member "--project" args))))
      (let* ((choices (append (plist-get plan :choices) nil))
-            (default (or (plist-get org-varde--answers :project) (car choices)))
-            (project (expand-file-name
-                      (read-directory-name (format "Project directory for %s: " (or title "this task"))
-                                           default default)))
+            (project (org-varde-read-project (format "Project for %s: " (or title "this task"))
+                                             (list (plist-get org-varde--answers :project))
+                                             nil choices))
             (region (plist-get org-varde--answers :region)))
        (when region
          (setq org-varde--answers (plist-put org-varde--answers :project project)))
@@ -1681,6 +1680,64 @@ Erasing the buffer took it away, and it comes back only after a command."
   "The project DIR by its name, as the board says it."
   (and dir (file-name-nondirectory (directory-file-name dir))))
 
+;;; The project picker
+
+(defconst org-varde--other-directory "another directory…"
+  "The project picker's last choice, which asks for a directory.")
+
+(defun org-varde-read-project (prompt &optional first now known)
+  "Ask with PROMPT for a project, as the terminal board's picker does,
+and return its directory.  The projects varde knows are offered by name
+and directory: FIRST, a list of directories, the likeliest first, at the
+top, so RET takes the first; NOW, the project the task is in, last and
+said so.  Typing narrows them, as the completion UI does; a directory
+typed, `~', `/' or `.' first, completes to the directories in it, and is
+taken as it is; `another directory…' asks for one with
+`read-directory-name'.  KNOWN, if given, is offered in place of what
+`varde projects' knows."
+  (let* ((known (append (or known
+                            ;; A varde older than `projects', or a busy
+                            ;; store: FIRST is offered all the same.
+                            (ignore-errors (plist-get (org-varde--varde-json "projects" "--json") :projects)))
+                        nil))
+         (now (and now (directory-file-name (expand-file-name now))))
+         (dirs (remove now (seq-uniq (mapcar (lambda (d) (directory-file-name (expand-file-name d)))
+                                             (append (delq nil (copy-sequence first)) known)))))
+         (dirs (append dirs (and now (list now))))
+         (width (apply #'max 0 (mapcar (lambda (d) (string-width (org-varde--project-name d))) dirs)))
+         (table (make-hash-table :test #'equal))
+         (choices (append
+                   (mapcar (lambda (d)
+                             (let ((c (concat (string-pad (org-varde--project-name d) (+ width 2))
+                                              (org-varde--quiet (abbreviate-file-name d))
+                                              (if (equal d now) (org-varde--quiet "  · its project now") ""))))
+                               (puthash c d table)
+                               c))
+                           dirs)
+                   (list org-varde--other-directory)))
+         (answer (completing-read
+                  (format-prompt (string-remove-suffix ": " prompt)
+                                 (and dirs (org-varde--project-name (car dirs))))
+                  (lambda (string pred action)
+                    (cond ((string-match-p "\\`[~/.]" string)
+                           ;; A directory typed completes as a file name,
+                           ;; to directories only.
+                           (completion-file-name-table
+                            string (lambda (f) (and (directory-name-p f) (not (member f '("./" "../")))))
+                            action))
+                          ((eq action 'metadata)
+                           '(metadata (category . org-varde-project)
+                                      (display-sort-function . identity)
+                                      (cycle-sort-function . identity)))
+                          (t (complete-with-action action choices string pred))))
+                  nil nil nil nil (car choices))))
+    (directory-file-name
+     (expand-file-name
+      (cond ((gethash answer table))
+            ((member answer (list org-varde--other-directory ""))
+             (read-directory-name prompt "~/"))
+            (t answer))))))
+
 (defconst org-varde--about-cairn
   '("cairn: what its sessions learned, handed to the next one" "cairn: what its sessions learned")
   "What a cairn is, said at the right of the Task tab where it fits: the
@@ -2685,7 +2742,7 @@ ring, for \\[yank]."
        (and (derived-mode-p 'org-varde-board-mode) org-varde-board--project)
        (when-let* ((task (ignore-errors (org-varde--task-here))))
          (plist-get (org-varde--varde-json "show" task "--no-git" "--json") :project))
-       (read-directory-name "Project: "))))
+       (org-varde-read-project "Project: "))))
 
 ;;;###autoload
 (defun org-varde-show-project (&optional directory)

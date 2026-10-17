@@ -395,6 +395,13 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// The projects varde knows, the newest first (for clients' project
+    /// pickers).
+    #[command(hide = true)]
+    Projects {
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Args)]
@@ -674,6 +681,7 @@ fn dispatch(paths: &Paths, cmd: Option<Cmd>, popup: bool) -> Result<i32> {
         Cmd::List { json, all, project } => list::run(paths, json, all, project.as_deref()),
         Cmd::Doctor { json } => doctor::run(paths, json),
         Cmd::Agent { json } => start::agent(json),
+        Cmd::Projects { json } => start::list_projects(paths, json),
         Cmd::Eval { all, since, json } => eval::run(paths, all, since.as_deref(), json),
         Cmd::New { title, project, body, external, from, when, worktree, json } => {
             let when = when.map(|w| (w, worktree.map(|w| matches!(w, WorktreeArg::Always))));

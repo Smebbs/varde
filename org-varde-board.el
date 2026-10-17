@@ -725,9 +725,9 @@ one; else in its project."
   "Start a session of your own in DIRECTORY.
 Asked for, offering the project of the task at point."
   (interactive
-   (let ((project (plist-get (get-text-property (point) 'org-varde-row) :project)))
-     (list (read-directory-name "Project directory: "
-                                (and project (file-name-as-directory project))))))
+   (list (org-varde-read-project "Session in project: "
+                                 (list (plist-get (get-text-property (point) 'org-varde-row) :project)
+                                       org-varde-board--project))))
   (org-varde-new-session directory))
 
 (defvar-keymap org-varde-new-mode-map
@@ -759,7 +759,7 @@ They are the buffer's own, so evil-org's TAB and RET do not shadow them."
   ;; binds it to `org-cycle'.
   "TAB" (org-varde--in-field #'org-varde-new-next-field)
   "<tab>" (org-varde--in-field #'org-varde-new-next-field)
-  "RET" (org-varde--in-field #'org-varde-new-next-field))
+  "RET" (org-varde--in-field #'org-varde-new-return))
 
 (defvar-keymap org-varde-new-evil-normal-map
   :doc "The form's keys in evil's normal state."
@@ -779,7 +779,7 @@ org's newline; C-k is evil's everywhere."
 (define-derived-mode org-varde-new-mode org-mode "varde new"
   "Write a new task, or change one, in a form, as `message-mode' writes
 a mail: its Title, which varde makes from the context when left empty;
-its Project, which \\[org-varde-new-complete] picks; When varde starts it,
+its Project, which RET or \\[org-varde-new-complete] on it picks; When varde starts it,
 if at all (`at mon 09:00', `every weekday 09:00', `every 4h', an
 org timestamp); and below the line, the context for the agent, written
 in org: TAB and RET there are org's.
@@ -817,6 +817,9 @@ back; cleared first, it is dropped."
 
 (defvar-local org-varde--new-when ""
   "The schedule the task this buffer edits had when the form opened.")
+
+(defvar-local org-varde--new-project nil
+  "The project the task this buffer edits was in when the form opened.")
 
 (defvar-local org-varde--new-then nil
   "What to do once the task being written is made, or nil: a function of
@@ -903,7 +906,8 @@ line's newline, as evil's dd on the context's last line does."
     (widen)
     (pcase-dolist (`(,field . ,hint)
                    `((title . ,(unless org-varde--new-task "left empty, varde names it from the context"))
-                     (project . "asked for on create, or M-TAB picks it")
+                     (project . ,(if org-varde--new-task "none yet · RET picks it"
+                                   "asked for on create · RET picks it"))
                      (when . "not scheduled: at mon 09:00, every weekday 09:00, every 4h")))
       (let ((b (org-varde--form-bounds field))
             (o (alist-get field org-varde--form-hints)))
@@ -925,11 +929,13 @@ line's newline, as evil's dd on the context's last line does."
        (string-empty-p (org-varde--form-value 'body))))
 
 (defun org-varde-new-return ()
-  "In a field above the line, go to the next; in the context, org's RET."
+  "On the Project, pick it; in another field above the line, go to the
+next; in the context, org's RET."
   (interactive)
-  (if (eq (org-varde--form-at) 'body)
-      (call-interactively #'org-return)
-    (org-varde-new-next-field)))
+  (pcase (org-varde--form-at)
+    ('body (call-interactively #'org-return))
+    ('project (org-varde-new-pick-project))
+    (_ (org-varde-new-next-field))))
 
 (defun org-varde-new-tab ()
   "In a field above the line, go to the next; in the context, org's TAB,
@@ -963,10 +969,9 @@ when negative."
   "Pick the directory of the task's project, for its Project field.
 It offers the one there, or else the one offered for the task."
   (interactive)
-  (let* ((b (or (org-varde--form-bounds 'project) (user-error "This task's project is not changed here")))
+  (let* ((b (or (org-varde--form-bounds 'project) (user-error "Not a form with a Project")))
          (now (org-varde--form-value 'project))
-         (dir (read-directory-name "Project directory for this task: "
-                                   (file-name-as-directory (if (string-empty-p now) (or org-varde--new-offer default-directory) now)))))
+         (dir (org-varde-read-project "Project: " (list (unless (string-empty-p now) now) org-varde--new-offer))))
     (goto-char (car b))
     (delete-region (car b) (cdr b))
     (insert (abbreviate-file-name (directory-file-name (expand-file-name dir))))))
@@ -982,8 +987,9 @@ It offers the one there, or else the one offered for the task."
       (unless (buffer-modified-p)
         (org-varde-new-mode)
         (setq org-varde--new-task (plist-get row :task)
-              org-varde--new-when (or (plist-get (plist-get d :schedule) :rule) ""))
-        (org-varde--form-fill (or (plist-get d :title) "") :none (or (plist-get d :body) "")
+              org-varde--new-when (or (plist-get (plist-get d :schedule) :rule) "")
+              org-varde--new-project (plist-get d :project))
+        (org-varde--form-fill (or (plist-get d :title) "") org-varde--new-project (or (plist-get d :body) "")
                               org-varde--new-when))
       (setq org-varde--new-task (plist-get row :task)
             header-line-format (concat " " (org-varde--edit-keys "save" "cancel"))))
@@ -1155,18 +1161,26 @@ buffer that edits a task saves its title and context instead."
      (let ((project (org-varde--form-value 'project)))
        (list (cond (org-varde--new-task nil)
                    ((not (string-empty-p project)) project)
-                   (t (read-directory-name "Project directory for this task: "
-                                           (and org-varde--new-offer
-                                                (file-name-as-directory org-varde--new-offer)))))))))
+                   (t (org-varde-read-project "Project for this task: " (list org-varde--new-offer))))))))
   (if org-varde--new-task
       (org-varde--save-task)
     (org-varde--create-task directory)))
 
 (defun org-varde--save-task ()
-  "Save the title, context and schedule written in this buffer to its task."
-  (pcase-let ((`(,title . ,body) (org-varde--new-text))
-              (rule (or (org-varde--form-value 'when) "")))
-    (org-varde--call body (list "set" org-varde--new-task (concat "--title=" title) "--body" "-"))
+  "Save the title, context, project and schedule written in this buffer
+to its task.  A move varde refuses saves nothing, and says why."
+  (pcase-let* ((`(,title . ,body) (org-varde--new-text))
+               (rule (or (org-varde--form-value 'when) ""))
+               (project (org-varde--form-value 'project))
+               (dir (and project (not (string-empty-p project))
+                         (directory-file-name (expand-file-name project))))
+               (move (and dir (not (equal dir (and org-varde--new-project
+                                                   (directory-file-name org-varde--new-project))))
+                          (list "--project" dir))))
+    (condition-case e
+        (org-varde--call body (append (list "set" org-varde--new-task (concat "--title=" title) "--body" "-")
+                                      move))
+      (org-varde-varde-error (user-error "varde: %s" (cadr e))))
     ;; What its schedule does now, as the terminal's form says it.
     (let ((said (cond ((equal rule org-varde--new-when) nil)
                       ((string-empty-p rule)
@@ -1174,9 +1188,12 @@ buffer that edits a task saves its title and context instead."
                        "no longer scheduled")
                       (t (string-trim (org-varde--scheduled
                                        (list "schedule" org-varde--new-task "--" rule)))))))
+      (when move (org-varde-board--reveal dir))
       (set-buffer-modified-p nil)
       (org-varde--close-edit)
-      (message "Saved \"%s\"%s" title (if said (concat "; " said) ""))))
+      (message "Saved \"%s\"%s%s" title
+               (if move (format "; moved to %s" (org-varde--project-name dir)) "")
+               (if said (concat "; " said) ""))))
   (org-varde-refresh))
 
 (defun org-varde--scheduled (args &optional input)
@@ -1256,8 +1273,8 @@ and its context."
 Asked for, offering its project.  varde refuses while the task has an
 active worktree or a live session."
   (interactive
-   (let ((project (plist-get (org-varde-board--row-at-point) :project)))
-     (list (read-directory-name "Move to project: " (and project (file-name-as-directory project))))))
+   (list (org-varde-read-project "Move to project: " (list org-varde-board--project)
+                                 (plist-get (org-varde-board--row-at-point) :project))))
   (let* ((task (plist-get (org-varde-board--row-at-point) :task))
          (dir (directory-file-name (expand-file-name directory)))
          (said (condition-case e

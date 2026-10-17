@@ -109,12 +109,10 @@
     (org-varde-board-test--with
         (org-varde-board-test--data '(("open" "Open" ("T0000000000000000000AAA111" "Here" "open" nil))))
       (org-varde-board-test--first-row)
-      (let (offered)
-        (cl-letf (((symbol-function 'read-directory-name)
-                   (lambda (_prompt dir &rest _) (setq offered dir) "/home/u/other/")))
-          (call-interactively #'org-varde-board-new))
-        (should (equal offered "/home/u/proj/"))
-        (should (equal (car org-varde-test-terminals) '("/home/u/other/" "*claude other*")))))))
+      (cl-letf (((symbol-function 'completing-read) (org-varde-test-pick "/home/u/other/")))
+        (call-interactively #'org-varde-board-new))
+      (should (equal (car org-varde-test-offered) "/home/u/proj"))
+      (should (equal (car org-varde-test-terminals) '("/home/u/other/" "*claude other*"))))))
 
 ;; Type TEXT into the form in this buffer: its first line at the end of
 ;; the title, and the rest at the end of the context.
@@ -127,16 +125,17 @@
       (insert (substring text (1+ nl))))))
 
 ;; Write NOTE in the *varde new* buffer that `n' opened, and create it
-;; there, answering the project question with DIR.  Return what was offered.
+;; there, answering the project question with DIR, else RET.  Return the
+;; project offered first, or nil when none is.
 (defun org-varde-board-test--write (note dir)
-  (let (offered)
-    (with-current-buffer "*varde new*"
-      (should (derived-mode-p 'org-varde-new-mode))
-      (org-varde-board-test--type note)
-      (cl-letf (((symbol-function 'read-directory-name)
-                 (lambda (_prompt offer &rest _) (setq offered offer) (or dir offer))))
-        (call-interactively #'org-varde-new-create)))
-    offered))
+  (with-current-buffer "*varde new*"
+    (should (derived-mode-p 'org-varde-new-mode))
+    (org-varde-board-test--type note)
+    (cl-letf (((symbol-function 'completing-read) (org-varde-test-pick dir))
+              ((symbol-function 'read-directory-name) (lambda (&rest _) (error "Asked for a directory"))))
+      (call-interactively #'org-varde-new-create)))
+  (let ((first (car org-varde-test-offered)))
+    (unless (equal first org-varde--other-directory) first)))
 
 (ert-deftest org-varde-board-create-writes-the-task-in-a-buffer ()
   (org-varde-test-with-varde
@@ -147,22 +146,22 @@
       ;; The project is asked for even on a task, offering its project.
       (call-interactively #'org-varde-board-create)
       (should (equal (org-varde-board-test--write "Cache by locale\n\nStart in cache.rs\n  then the tests\n" nil)
-                     "/home/u/proj/"))
+                     "/home/u/proj"))
       (should-not (get-buffer "*varde new*"))
-      (should (member "new --json --project /home/u/proj/ --context - -- Cache by locale" (org-varde-test-calls)))
+      (should (member "new --json --project /home/u/proj --context - -- Cache by locale" (org-varde-test-calls)))
       (should (equal (org-varde-test-stdin "new") "Start in cache.rs\n  then the tests"))
       ;; No context, no body.  No task at point: nothing is offered.
       (with-current-buffer org-varde-board-buffer
         (goto-char (point-min))
         (call-interactively #'org-varde-board-create))
       (should-not (org-varde-board-test--write "Bare" "/home/u/other/"))
-      (should (member "new --json --project /home/u/other/ -- Bare" (org-varde-test-calls)))
+      (should (member "new --json --project /home/u/other -- Bare" (org-varde-test-calls)))
       ;; A blank title is refused before the project is asked for, and
       ;; what was written is kept.
       (call-interactively #'org-varde-board-create)
       (with-current-buffer "*varde new*"
         (org-varde-board-test--type " \n\n")
-        (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) (error "Asked too soon"))))
+        (cl-letf (((symbol-function 'org-varde-read-project) (lambda (&rest _) (error "Asked too soon"))))
           (should-error (call-interactively #'org-varde-new-create) :type 'user-error)))
       (call-interactively #'org-varde-board-create)
       (with-current-buffer "*varde new*"
@@ -205,7 +204,7 @@
           ;; Its project is in the form.
           (should (equal (org-varde--form-value 'project) (abbreviate-file-name proj)))
           ;; Its project is the heading's: nothing is asked.
-          (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) (error "Asked"))))
+          (cl-letf (((symbol-function 'org-varde-read-project) (lambda (&rest _) (error "Asked"))))
             (call-interactively #'org-varde-new-create)))
         ;; Its SCHEDULED is taken as its schedule, once, in the form.
         (should (member (concat "new --json --project " proj " --context - --when <2026-10-12 Mon> -- Fix the login")
@@ -239,7 +238,7 @@
                                (cons "Retry the token refresh"
                                      (format "after a 401.\n\nFrom: [[file:%s::2][notes.md:2]]" file))))
                 ;; Its repository has tasks: it goes there.
-                (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) (error "Asked"))))
+                (cl-letf (((symbol-function 'org-varde-read-project) (lambda (&rest _) (error "Asked"))))
                   (call-interactively #'org-varde-new-create)))
               (should (member (concat "new --json --project " repo " --context - -- Retry the token refresh")
                               (org-varde-test-calls)))
@@ -433,16 +432,19 @@ searches FROM and TO, and return the text with its link."
         (insert "Fix it")
         (org-varde-new-return)
         (should (eq (org-varde--form-at) 'project))
-        ;; Empty, it is asked for on create; M-TAB picks it now, offering
-        ;; the project offered.
+        ;; Empty, it is asked for on create; RET, or M-TAB, picks it now,
+        ;; offering the project offered first.
         (should (alist-get 'project org-varde--form-hints))
-        (cl-letf (((symbol-function 'read-directory-name)
-                   (lambda (_prompt dir &rest _) (should (equal dir "/tmp/offered/")) "/tmp/other/")))
+        (cl-letf (((symbol-function 'completing-read) (org-varde-test-pick)))
+          (org-varde-new-return))
+        (should (equal (car org-varde-test-offered) "/tmp/offered"))
+        (should (equal (org-varde--form-value 'project) "/tmp/offered"))
+        (cl-letf (((symbol-function 'completing-read) (org-varde-test-pick "/tmp/other/")))
           (execute-kbd-macro (kbd "C-M-i")))
         (should (equal (org-varde--form-value 'project) "/tmp/other"))
         (should-not (alist-get 'project org-varde--form-hints))
         ;; TAB goes on from it, never picks.
-        (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) (error "Asked"))))
+        (cl-letf (((symbol-function 'org-varde-read-project) (lambda (&rest _) (error "Asked"))))
           (execute-kbd-macro (kbd "TAB")))
         (should (eq (org-varde--form-at) 'when))
         (execute-kbd-macro (kbd "<backtab> <backtab>"))
@@ -452,7 +454,7 @@ searches FROM and TO, and return the text with its link."
         (should (eq (org-varde--form-at) 'body))
         (execute-kbd-macro (kbd "<backtab> <backtab>"))
         (should (eq (org-varde--form-at) 'project))
-        (org-varde-new-return)
+        (execute-kbd-macro (kbd "TAB"))
         ;; When varde starts it: empty, never; the hint says how.
         (should (eq (org-varde--form-at) 'when))
         (should (alist-get 'when org-varde--form-hints))
@@ -466,7 +468,7 @@ searches FROM and TO, and return the text with its link."
         ;; Nobody is there to say whether its first start gets a worktree:
         ;; asked now, and made with the answer.
         (org-varde-test-fail-once "new" "nobody is there to say whether it gets a worktree when it starts: pass --worktree always or --worktree never")
-        (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) (error "Asked")))
+        (cl-letf (((symbol-function 'org-varde-read-project) (lambda (&rest _) (error "Asked")))
                   ((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
           (call-interactively #'org-varde-new-create))))
     (should (member "new --json --project /tmp/other --context - --when every weekday 09:00 -- Fix it"
@@ -653,7 +655,7 @@ and C-k is the maps' below."
       (with-current-buffer "*varde new*"
         (org-varde--form-goto 'title)
         (insert "Straight in")
-        (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) (error "Asked"))))
+        (cl-letf (((symbol-function 'org-varde-read-project) (lambda (&rest _) (error "Asked"))))
           (call-interactively #'org-varde-new-create)))
       (should (member "new --json --project /home/u/proj -- Straight in" (org-varde-test-calls)))
       ;; The board puts point on it once it shows it.
@@ -677,9 +679,9 @@ where a new task goes unasked."
       (with-current-buffer "*varde new*"
         (org-varde--form-goto 'title)
         (insert "Somewhere")
-        (cl-letf (((symbol-function 'read-directory-name) (lambda (&rest _) "/home/u/proj/")))
+        (cl-letf (((symbol-function 'completing-read) (org-varde-test-pick "/home/u/proj/")))
           (call-interactively #'org-varde-new-create)))
-      (should (member "new --json --project /home/u/proj/ -- Somewhere" (org-varde-test-calls))))))
+      (should (member "new --json --project /home/u/proj -- Somewhere" (org-varde-test-calls))))))
 
 (ert-deftest org-varde-board-returns-to-its-own-workspace ()
   (org-varde-test-with-varde
@@ -704,11 +706,11 @@ where a new task goes unasked."
         (org-varde-board-test--data '(("open" "Open" ("T0000000000000000000AAA111" "Here" "open" nil))))
       (org-varde-board-test--first-row)
       (org-varde-test-reply "set" "moved aaa111 to /home/u/other")
-      (let (offered)
-        (cl-letf (((symbol-function 'read-directory-name)
-                   (lambda (_prompt dir &rest _) (setq offered dir) "/home/u/other/")))
-          (call-interactively #'org-varde-board-move))
-        (should (equal offered "/home/u/proj/")))
+      ;; Its project now is offered last, and said so.
+      (org-varde-test-reply "projects" "{\"v\":1,\"projects\":[\"/home/u/proj\",\"/home/u/other\"]}")
+      (cl-letf (((symbol-function 'completing-read) (org-varde-test-pick)))
+        (call-interactively #'org-varde-board-move))
+      (should (equal org-varde-test-offered (list "/home/u/other" "/home/u/proj" org-varde--other-directory)))
       (should (member "set T0000000000000000000AAA111 --project /home/u/other" (org-varde-test-calls)))
       ;; varde's refusal is the message.
       (org-varde-test-fail-once "set" "varde: aaa111 has a live session, which belongs to /home/u/proj: end it first")
@@ -1038,21 +1040,33 @@ where a new task goes unasked."
 
 (ert-deftest org-varde-board-e-edits-the-title-and-context ()
   (org-varde-test-with-varde
-    (org-varde-test-reply "show" "{\"v\":2,\"title\":\"Old title\",\"body\":\"Old context\"}")
+    (org-varde-test-reply "show" "{\"v\":2,\"title\":\"Old title\",\"body\":\"Old context\",\"project\":\"/home/u/proj\"}")
     (org-varde-board-test--with
         (org-varde-board-test--data '(("open" "Open" ("T0000000000000000000AAA111" "Old title" "open" nil))))
       (org-varde-board-test--first-row)
       (save-window-excursion (org-varde-board-edit))
       (with-current-buffer "*varde edit aaa111*"
         (should (equal (org-varde--new-text) '("Old title" . "Old context")))
-        ;; A task's project is not changed here.
-        (should-not (org-varde--form-bounds 'project))
-        (org-varde--form-fill "" :none "")
+        ;; Its project is there, and unchanged it is not sent.
+        (should (equal (org-varde--form-value 'project) "/home/u/proj"))
+        (org-varde--form-fill "" "/home/u/proj" "")
         (org-varde-board-test--type "New title\nNew context\n")
         (call-interactively #'org-varde-new-create))
       (should-not (get-buffer "*varde edit aaa111*"))
       (should (member "set T0000000000000000000AAA111 --title=New title --body -" (org-varde-test-calls)))
-      (should (equal (org-varde-test-stdin "set") "New context")))))
+      (should (equal (org-varde-test-stdin "set") "New context"))
+      ;; Changed, the task moves with the rest; refused, nothing is saved.
+      (save-window-excursion (org-varde-board-edit))
+      (with-current-buffer "*varde edit aaa111*"
+        (org-varde--form-goto 'project)
+        (cl-letf (((symbol-function 'completing-read) (org-varde-test-pick "/home/u/other")))
+          (org-varde-new-return))
+        (org-varde-test-fail-once "set" "varde: aaa111 has a live session, which belongs to /home/u/proj: end it first")
+        (should-error (call-interactively #'org-varde-new-create) :type 'user-error)
+        (should (buffer-modified-p))
+        (call-interactively #'org-varde-new-create))
+      (should (member "set T0000000000000000000AAA111 --title=Old title --body - --project /home/u/other"
+                      (org-varde-test-calls))))))
 
 (ert-deftest org-varde-board-e-changes-or-clears-the-schedule ()
   (org-varde-test-with-varde
