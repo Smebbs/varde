@@ -181,12 +181,13 @@ fn a_new_task_can_be_written_in_the_editor() {
     let Some(t) = Tmux::start(e.dir.path()) else { return eprintln!("no tmux; skipped") };
     let pane = t.tmux(&["display", "-p", "-t", "t", "#{pane_id}"]).unwrap();
     prepared(&e);
-    // An editor that keeps the hint and the title typed, and writes the rest.
+    // An editor that keeps the hint and the context typed, fills in the
+    // empty Title, and writes more context.
     let editor = e.path("editor");
     std::fs::write(
         &editor,
         // Not `sed -i`, which BSD sed (macOS) takes differently.
-        "#!/bin/sh\nsed 's/^Cache$/Cache by locale/' \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"\nprintf 'Start in cache.rs\\nthen the tests\\n' >> \"$1\"\n",
+        "#!/bin/sh\nsed 's/^Title: $/Title: Cache by locale/' \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"\nprintf 'Start in cache.rs\\nthen the tests\\n' >> \"$1\"\n",
     )
     .unwrap();
     std::fs::set_permissions(&editor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
@@ -194,9 +195,10 @@ fn a_new_task_can_be_written_in_the_editor() {
     let shown = || t.tmux(&["capture-pane", "-p", "-t", &pane]).unwrap();
     wait("the board", || shown().contains("Try it"));
     t.tmux(&["send-keys", "-t", &pane, "n"]).unwrap();
-    t.tmux(&["send-keys", "-t", &pane, "-l", "Cache"]).unwrap();
+    // The form opens in the context.
+    t.tmux(&["send-keys", "-t", &pane, "-l", "It misses"]).unwrap();
     t.tmux(&["send-keys", "-t", &pane, "C-x", "C-e"]).unwrap();
-    wait("the form again", || shown().contains("Title: Cache by locale"));
+    wait("the form again", || shown().contains("Title:   Cache by locale"));
     t.tmux(&["send-keys", "-t", &pane, "C-s"]).unwrap();
     wait("the project", || shown().contains("Project for this task"));
     t.tmux(&["send-keys", "-t", &pane, "Enter"]).unwrap();
@@ -204,7 +206,8 @@ fn a_new_task_can_be_written_in_the_editor() {
     t.tmux(&["send-keys", "-t", &pane, "q"]).unwrap();
     assert_eq!(
         e.query("SELECT body FROM task WHERE title = 'Cache by locale'"),
-        "Start in cache.rs\nthen the tests"
+        "It misses\nStart in cache.rs\nthen the tests",
+        "the context stays the context"
     );
 }
 

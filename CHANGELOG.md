@@ -6,6 +6,23 @@ follow [Semantic Versioning](https://semver.org).
 
 ## Unreleased
 
+### Changed
+
+- The board's new-task form is org-varde's: it opens in the context, not
+  the Title, and has a `Project:` field between `Title:` and `When:`,
+  filled in with the project the board keeps to. M-Tab (Esc Tab) on it
+  picks its directory, with Tab completing; left empty, it is asked for
+  on create, as before. An empty Title says varde names the task from
+  the context, and an empty Project when it is asked.
+- `$EDITOR` from the form (C-x C-e) writes its fields as the form shows
+  them, `Title:`, `Project:` and `When:` above a line, the context
+  below.
+
+### Fixed
+
+- A context written in the board's form, then in `$EDITOR`, no longer
+  comes back as the title when the title was empty.
+
 ## 1.3.2 - 2026-10-17
 
 ### Changed

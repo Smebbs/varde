@@ -13,6 +13,7 @@ use varde_core::title::clean;
 
 use super::cairn::{bullet, more_below};
 use super::draft::draw_draft;
+use super::draft::Part;
 use super::keys::{Act, HelpGroup, Keys, HELP};
 use super::{App, Close, Found, Item, Mode};
 use crate::list::{clip, elsewhere, pad, project_name};
@@ -247,20 +248,23 @@ impl App<'_> {
             rows
         };
         match &self.mode {
-            Mode::New(d) => one(Line::from(
-                key_spans(&[
-                    match (d.in_body, &d.task) {
+            Mode::New(d) => {
+                let body = d.at == Part::Body;
+                let mut keys = vec![
+                    match (body, &d.task) {
                         (false, Some(_)) => ("RET", "save"),
                         (false, None) => ("RET", "create"),
                         (true, Some(_)) => ("C-s", "save"),
                         (true, None) => ("C-s", "create"),
                     },
                     ("Tab", "next field"),
-                    ("Esc", "later"),
-                    ("C-x C-e", "$EDITOR"),
-                ])[1..]
-                    .to_vec(),
-            )),
+                ];
+                if d.at == Part::Project {
+                    keys.push(("M-Tab", "pick directory"));
+                }
+                keys.extend([("Esc", "later"), ("C-x C-e", "$EDITOR")]);
+                one(Line::from(key_spans(&keys)[1..].to_vec()))
+            }
             Mode::Help if self.help_most > 0 => {
                 one(Line::from("j/k C-d/C-u scroll · any other key closes this".dark_gray()))
             }
@@ -282,9 +286,9 @@ impl App<'_> {
                 line.extend(tail);
                 one(Line::from(line))
             }
-            Mode::Where(_, dir) => {
-                let tail =
-                    self.prompt_tail(&[("RET", "create"), ("Tab", "complete"), ("Esc", "back")], width);
+            Mode::Where(_, dir, pick) => {
+                let done = if *pick { ("RET", "pick") } else { ("RET", "create") };
+                let tail = self.prompt_tail(&[done, ("Tab", "complete"), ("Esc", "back")], width);
                 let room = width.saturating_sub(23 + tail.iter().map(Span::width).sum::<usize>());
                 let mut line = vec!["Project for this task: ".bold()];
                 line.extend(dir.line_spans(room));

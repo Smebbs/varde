@@ -203,12 +203,16 @@ shows them all.
 | C-l | Redraw and read the board again. |
 | `q` / Esc | Close the pane, else quit (`q` only, unless configured). |
 
-**The new-task form.** `n` opens it on the title; Tab and Shift-Tab
-move between the title, `When:` and the context, as in org-varde's
-form. RET on the title, or C-s, creates the task. With no title, a
-model names it from the context. C-x C-e writes it in `$EDITOR`. Esc
-puts the draft away, and the next `n` brings it back. Prompts edit text
-as a shell does (C-w, C-u, C-k, Alt-b/f, C-y).
+**The new-task form.** `n` opens it in the context, as org-varde's
+form: most tasks are only that, and with no title a model names the
+task from it. Above the line are `Title:`, `Project:` and `When:`; Tab
+and Shift-Tab go between the fields, and M-Tab (Esc Tab) on the Project
+picks its directory, with Tab completing it. The Project starts as the
+project the board keeps to; left empty, it is asked for on create. RET
+above the line, or C-s anywhere, creates the task. C-x C-e writes it,
+fields and all, in `$EDITOR`. Esc puts the draft away, and the next `n`
+brings it back. Prompts edit text as a shell does (C-w, C-u, C-k,
+Alt-b/f, C-y).
 
 ### The view
 
