@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org).
 
 ## Unreleased
 
+## 1.4.0 - 2026-10-17
+
 ### Changed
 
 - One project picker, the same on both boards, for every question about
@@ -23,6 +25,9 @@ follow [Semantic Versioning](https://semver.org).
   nothing.
 - `varde projects --json` lists the projects varde knows, for clients'
   pickers.
+- Opened outside a project, `.` on the board asks which project to keep
+  it to, on both boards: the projects on the board first, the selected
+  task's at the top. It had said the board shows every one.
 
 - The board's new-task form is org-varde's: it opens in the context, not
   the Title, and has a `Project:` field between `Title:` and `When:`,
