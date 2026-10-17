@@ -6,11 +6,24 @@ follow [Semantic Versioning](https://semver.org).
 
 ## Unreleased
 
+## 1.3.2 - 2026-10-17
+
 ### Changed
 
 - The new-task form opens in the context, not the Title: most tasks are
   only their context, and varde names them from it. Editing a task
   still opens on its Title.
+
+### Fixed
+
+- The new-task form under Doom: evil's `dd` on the context's last line
+  no longer makes org warn of its element cache; `<tab>` goes between
+  fields in a GUI Emacs, where evil-org had bound it to `org-cycle`; and
+  in insert state C-j in the context is org's newline again.
+- A task is not started twice when its key is pressed again before
+  varde answers: it says the task is still starting.
+- What varde warns of on a call that worked is shown in the echo area,
+  not dropped.
 
 ## 1.3.1 - 2026-10-16
 

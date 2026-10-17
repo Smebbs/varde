@@ -4,7 +4,7 @@
 
 ;; Author: Morten Smebye <mortensmeb@gmail.com>
 ;; URL: https://github.com/Smebbs/varde
-;; Version: 1.3.1
+;; Version: 1.3.2
 ;; Package-Requires: ((emacs "29.1") (org "9.6") (transient "0.4"))
 ;; Keywords: tools, outlines
 ;; SPDX-License-Identifier: MIT
