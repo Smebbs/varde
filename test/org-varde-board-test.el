@@ -1151,9 +1151,26 @@ where a new task goes unasked."
         (should (string-match-p "Elsewhere" (buffer-string)))
         (should (string-suffix-p "   every project (none in new yet)" (funcall header)))
         (should-error (org-varde-board-toggle-project) :type 'user-error)
-        (setq org-varde-board--project nil)
+        ;; Opened outside a project, it asks which to keep to: the one
+        ;; at point first, then the board's.
+        (setq org-varde-board--project nil org-varde-board--scoped t)
         (org-varde-board--render)
-        (should-error (org-varde-board-toggle-project) :type 'user-error)))))
+        (goto-char (point-min))
+        (search-forward "Elsewhere")
+        (let (offered)
+          (cl-letf (((symbol-function 'org-varde-read-project)
+                     (lambda (_prompt first &rest _) (setq offered first) "/home/u/proj")))
+            (org-varde-board-toggle-project))
+          (should (equal (seq-take offered 2) '("/home/u/other" "/home/u/other"))))
+        (should (equal org-varde-board--project "/home/u/proj"))
+        (should org-varde-board--scoped)
+        (should-not (string-match-p "Elsewhere" (buffer-string)))
+        ;; One with no task yet is kept, and shows every project.
+        (setq org-varde-board--project nil)
+        (cl-letf (((symbol-function 'org-varde-read-project) (lambda (&rest _) "/home/u/new")))
+          (org-varde-board-toggle-project))
+        (should (equal org-varde-board--project "/home/u/new"))
+        (should (string-suffix-p "   every project (none in new yet)" (funcall header)))))))
 
 (ert-deftest org-varde-board-opens-on-the-project-of-the-buffer-it-is-called-from ()
   (org-varde-test-with-varde

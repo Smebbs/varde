@@ -37,7 +37,8 @@
   "Whether the board opens kept to the project you open it from.
 `project' keeps it to the repository of the buffer `org-varde-board' is
 called from, once that project has a task on the board; `all' shows
-every project.  \\<org-varde-board-mode-map>\\[org-varde-board-toggle-project] on the board switches."
+every project.  \\<org-varde-board-mode-map>\\[org-varde-board-toggle-project] on the board switches; opened outside a
+project, it asks for one."
   :type '(choice (const :tag "The project it is opened from" project)
                  (const :tag "Every project" all))
   :group 'org-varde)
@@ -334,17 +335,31 @@ Not while a region is active there: drawing would lose it."
 
 (defun org-varde-board-toggle-project ()
   "Keep the board to the project it was opened from, or show every one.
-From a view too: what TAB and J go through follows."
+Opened outside a project, it asks which to keep to: the projects on the
+board first, the task at point's at the top.  From a view too: what TAB
+and J go through follows."
   (interactive)
-  (with-current-buffer (or (get-buffer org-varde-board-buffer) (user-error "The board is not open"))
-    (let* ((project (or org-varde-board--project
-                        (user-error "The board was opened outside a project, so it shows every one")))
-           (name (file-name-nondirectory (directory-file-name project))))
-      (unless (org-varde-board--has project)
-        (user-error "No tasks in %s yet, so the board shows every project" name))
-      (setq org-varde-board--scoped (not org-varde-board--scoped))
-      (org-varde-board--render)
-      (message (if org-varde-board--scoped "Only %s" "Every project") name))))
+  (let ((row (ignore-errors (org-varde-board--row-at-point))))
+    (with-current-buffer (or (get-buffer org-varde-board-buffer) (user-error "The board is not open"))
+      (let ((project org-varde-board--project))
+        (cond
+         ((not project)
+          (setq project (org-varde-read-project
+                         "Keep the board to: "
+                         (cons (plist-get row :project)
+                               (mapcan (lambda (g) (mapcar (lambda (r) (plist-get r :project)) (plist-get g :rows)))
+                                       (plist-get org-varde-board-data :groups))))
+                org-varde-board--project project
+                org-varde-board--scoped t)
+          (org-varde-board--render)
+          (message (if (org-varde-board--has project) "Only %s" "No tasks in %s yet, so the board shows every project")
+                   (org-varde--project-name project)))
+         ((not (org-varde-board--has project))
+          (user-error "No tasks in %s yet, so the board shows every project" (org-varde--project-name project)))
+         (t
+          (setq org-varde-board--scoped (not org-varde-board--scoped))
+          (org-varde-board--render)
+          (message (if org-varde-board--scoped "Only %s" "Every project") (org-varde--project-name project))))))))
 
 (defun org-varde-board--row-at-point ()
   "The board row at point; in a task's view, the task it shows."

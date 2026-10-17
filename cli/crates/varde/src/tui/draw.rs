@@ -144,7 +144,7 @@ impl App<'_> {
                 let above = Rect { height: form.y - main.y, ..main };
                 p.draw(f, if above.height >= 6 { above } else { main });
             }
-            Mode::Move(_, p) | Mode::Project(.., p) => p.draw(f, main),
+            Mode::Move(_, p) | Mode::Project(.., p) | Mode::Scope(p) => p.draw(f, main),
             Mode::Help => {
                 self.help_most = draw_help(f, &self.keys, main, &mut self.help_scroll);
                 // Its keys under it, now it is known whether it scrolls.
@@ -218,7 +218,12 @@ impl App<'_> {
         // why it was refused, shows over it until the next key.
         let prompt = matches!(
             self.mode,
-            Mode::New(_) | Mode::Where(..) | Mode::Move(..) | Mode::Project(..) | Mode::Recall(_)
+            Mode::New(_)
+                | Mode::Where(..)
+                | Mode::Move(..)
+                | Mode::Project(..)
+                | Mode::Scope(_)
+                | Mode::Recall(_)
         );
         let one = |l: Line<'static>| -> Vec<Line<'static>> {
             let mut rows: Vec<Line<'static>> =
@@ -257,7 +262,7 @@ impl App<'_> {
                 line.extend(keys);
                 one(Line::from(line))
             }
-            Mode::Move(_, p) | Mode::Where(_, p, _) | Mode::Project(.., p) => {
+            Mode::Move(_, p) | Mode::Where(_, p, _) | Mode::Project(.., p) | Mode::Scope(p) => {
                 one(Line::from(key_spans(&p.keys())[1..].to_vec()))
             }
             Mode::WhenTree(d, dir) => {

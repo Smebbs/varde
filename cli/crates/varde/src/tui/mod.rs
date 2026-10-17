@@ -87,6 +87,8 @@ enum Mode {
     Worktree(Start, Asked, Option<PathBuf>),
     /// Picking the project of a first run.
     Project(Start, Asked, Pick),
+    /// Picking the project to keep the board to, opened outside one.
+    Scope(Pick),
 }
 
 /// The task a question about starting was asked of, and its state then.
@@ -721,7 +723,12 @@ impl<'a> App<'a> {
         // What was said over a form or prompt lasts until the next key.
         if matches!(
             self.mode,
-            Mode::New(_) | Mode::Where(..) | Mode::Move(..) | Mode::Project(..) | Mode::Recall(_)
+            Mode::New(_)
+                | Mode::Where(..)
+                | Mode::Move(..)
+                | Mode::Project(..)
+                | Mode::Scope(_)
+                | Mode::Recall(_)
         ) {
             self.message.clear();
         }
@@ -793,6 +800,11 @@ impl<'a> App<'a> {
                 Picked::Dir(dir) => self.move_task(&task, &dir),
                 Picked::Back => {}
                 Picked::Typing => self.mode = Mode::Move(task, p),
+            },
+            Mode::Scope(mut p) => match p.key(key) {
+                Picked::Dir(dir) => self.keep_to(&Pick::expand(&dir)),
+                Picked::Back => {}
+                Picked::Typing => self.mode = Mode::Scope(p),
             },
             Mode::Project(start, asked, mut p) => match p.key(key) {
                 Picked::Dir(dir) => {
@@ -1180,9 +1192,13 @@ impl<'a> App<'a> {
     }
 
     /// Keep to the project the board was opened in, or show every one.
+    /// Opened outside a project, it asks which to keep to: the projects
+    /// on the board first, the selected task's at the top.
     fn toggle_scope(&mut self) {
         let Some(here) = &self.here else {
-            self.message = "the board was opened outside a project, so it shows every one".into();
+            let mut first = vec![self.current().and_then(|r| r.project.clone())];
+            first.extend(self.rows().map(|r| r.project.clone()));
+            self.mode = Mode::Scope(Pick::new("Keep the board to", self.known(&first), None));
             return;
         };
         let name = crate::list::project_name(Some(here)).to_string();
@@ -1193,6 +1209,23 @@ impl<'a> App<'a> {
         self.scoped = !self.scoped;
         self.stale = true;
         self.message = if self.scoped { format!("only {name}") } else { "every project".into() };
+    }
+
+    /// Keep the board to the project `dir` is in, picked with `.`.
+    fn keep_to(&mut self, dir: &str) {
+        let project =
+            self.paths.open(BUSY).ok().and_then(|s| crate::start::project_of(&s, Path::new(dir)).ok());
+        let project = project.map_or(dir.to_string(), |p| p.to_string_lossy().into_owned());
+        let name = crate::list::project_name(Some(&project)).to_string();
+        (self.here, self.scoped, self.stale) = (Some(project), true, true);
+        if let Err(e) = self.refresh() {
+            return self.report(Err(e));
+        }
+        self.message = if self.here_has {
+            format!("only {name}")
+        } else {
+            format!("no tasks in {name} yet, so the board shows every project")
+        };
     }
 
     /// Open the view on its Task tab, or its Project tab; `v` again closes
@@ -1926,9 +1959,20 @@ mod tests {
         assert!(screen(&mut app, 80, 12).contains("every project (none in new yet)"));
         key(&mut app, KeyCode::Char('.'));
         assert_eq!(app.message, "no tasks in new yet, so the board shows every project");
+
+        // Opened outside a project, it asks which to keep to: the
+        // selected task's first, then the board's.
         app.here = None;
+        app.refresh().unwrap();
+        let there = (0..app.items.len()).find(|&i| app.row(i).is_some_and(|r| r.title == "There")).unwrap();
+        app.select(there);
         key(&mut app, KeyCode::Char('.'));
-        assert!(app.message.contains("outside a project") && screen(&mut app, 80, 12).contains("There"));
+        assert!(screen(&mut app, 80, 12).contains("Keep the board to"));
+        key(&mut app, KeyCode::Enter);
+        assert_eq!((app.here.as_deref(), app.scoped), (Some("/src/lib"), true));
+        assert_eq!(app.message, "only lib");
+        let s = screen(&mut app, 80, 12);
+        assert!(s.contains("varde · lib") && !s.contains("Here"), "{s}");
     }
 
     #[test]
