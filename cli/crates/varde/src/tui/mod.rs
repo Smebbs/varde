@@ -2509,9 +2509,10 @@ mod tests {
     fn the_forms_project_opens_the_picker_and_creating_without_one_asks_it() {
         let (dir, paths) = temp_paths();
         let store = paths.open(BUSY).unwrap();
+        let dir = dir.path().canonicalize().unwrap();
         for p in ["alpha", "beta"] {
-            std::fs::create_dir_all(dir.path().join(p).join(".git")).unwrap();
-            let p = dir.path().join(p).display().to_string();
+            std::fs::create_dir_all(dir.join(p).join(".git")).unwrap();
+            let p = dir.join(p).display().to_string();
             task::create(&store, p.rsplit('/').next().unwrap(), None, Some(&p), None, 1_000).unwrap();
         }
         let mut app = board(&paths, &[]);
@@ -2527,7 +2528,7 @@ mod tests {
         assert!(s.contains("╭ New task"), "the form stays in view under it:\n{s}");
         key(&mut app, KeyCode::Enter);
         let Mode::New(d) = &app.mode else { panic!("not back in the form") };
-        let beta = dir.path().join("beta").display().to_string();
+        let beta = dir.join("beta").display().to_string();
         assert_eq!((d.project.text(), d.at, d.body.text()), (beta.as_str(), Part::Project, "T"));
         // Emptied, it is asked on create, the selected task's project picked.
         key(&mut app, KeyCode::Backspace);

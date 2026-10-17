@@ -195,7 +195,7 @@
                                                                           #'ignore #'ignore))
                                    #'ignore))
       (should (= worktree-asked 1))
-      (should (equal (nreverse prompts) '("Project for One: " "Project for Two: ")))
+      (should (equal (nreverse prompts) '("Project for One (default a): " "Project for Two (default b): ")))
       (should (equal (nreverse defaults) '("/p/a" "/p/b")))
       (should (equal (car calls) '("start" "T2" "--json" "--project" "/p/b" "--worktree" "always")))
       ;; A start of its own keeps nothing.
