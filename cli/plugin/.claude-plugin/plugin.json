@@ -1,6 +1,6 @@
 {
   "name": "varde",
-  "version": "1.4.1",
+  "version": "1.5.0",
   "description": "Records Claude Code sessions as varde tasks. All logic is in the varde binary on your PATH; this plugin only calls it.",
   "author": {
     "name": "Morten Smebye",

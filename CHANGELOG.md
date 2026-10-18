@@ -6,6 +6,8 @@ follow [Semantic Versioning](https://semver.org).
 
 ## Unreleased
 
+## 1.5.0 - 2026-10-18
+
 ### Added
 
 - org-varde opens sessions in ghostel. `org-varde-terminals` says
