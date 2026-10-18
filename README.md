@@ -9,7 +9,7 @@ one needs you, each task can have its own git worktree, and what a
 task's sessions learn is kept in a short *cairn* that is handed to the
 next session. It is one binary and one SQLite file, with no daemon.
 
-https://github.com/user-attachments/assets/d5fac05b-9988-48e3-a141-94d1a7908e46
+https://github.com/user-attachments/assets/21b07ef7-3300-487a-ac3e-e649508b43d6
 
 ## Install
 
@@ -49,7 +49,7 @@ marks it done. `?` lists every key.
 [org-varde](docs/emacs.md) is the Emacs client: the same board, and
 tasks linked from your org notes.
 
-https://github.com/user-attachments/assets/80103eeb-6ef8-4eb9-ac8f-90af5d60b13e
+https://github.com/user-attachments/assets/aab35936-847b-4a71-8864-8259d96e34e5
 
 ## Documentation
 
