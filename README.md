@@ -15,8 +15,10 @@ https://github.com/user-attachments/assets/db6de5d4-adc9-4ffa-a14a-04334c62c4bc
 
 ## Install
 
-You need git and a supported agent: Claude Code or pi. tmux is
-recommended.
+You need git and a supported agent: Claude Code or pi. Other agents
+can be added behind one [adapter trait](docs/varde-design.md#8-the-claude-adapter),
+and other frontends, like the Emacs one below, are built on the
+[`--json` contract](docs/clients.md).
 
 ```sh
 brew install smebbs/tap/varde
@@ -36,7 +38,7 @@ Then add the hooks in Claude Code (for pi, see [the guide](docs/guide.md#install
 ## Usage
 
 ```sh
-varde                         # the board (outside tmux: tmux new -s varde varde)
+varde                         # the board
 varde new Fix the login bug   # a task in this checkout
 varde attach k3m9             # start it, resume it, or go to it
 varde recall login            # what earlier tasks learned
@@ -46,6 +48,7 @@ varde schedule k3m9 every weekday 09:00   # varde starts it then
 On the board: `n` makes a task, `RET` goes to its session, `Tab` goes
 to the next task that needs you, `v` shows its cairn, `/` recalls, `d`
 marks it done. `?` lists every key.
+Inside tmux, each session also gets a window of its own.
 
 ## Emacs
 
