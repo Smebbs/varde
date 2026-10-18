@@ -37,6 +37,7 @@ varde                         # the board (outside tmux: tmux new -s varde varde
 varde new Fix the login bug   # a task in this checkout
 varde attach k3m9             # start it, resume it, or go to it
 varde recall login            # what earlier tasks learned
+varde schedule k3m9 every weekday 09:00   # varde starts it then
 ```
 
 On the board: `n` makes a task, `RET` goes to its session, `Tab` goes
