@@ -191,7 +191,8 @@ fn a_run_with_nothing_to_report_goes_back_to_waiting_without_asking() {
     let done = format!("done {t}");
     fire(&e, &t, &[("FAKE_DONE", &done)]);
     let context = std::fs::read_to_string(e.path("context.log")).unwrap();
-    assert!(context.contains(&format!("If you found nothing the user needs to see, run varde done {t}")));
+    assert!(context.contains(&format!("and found nothing new, run varde done {t}")));
+    assert!(context.contains("Anything you changed, however routine, is for them to see"));
     assert!(std::fs::read_to_string(e.path("done.log")).unwrap().contains("ended this run"));
     let run = &runs(&e, &t)[0];
     assert!(run["done"].is_i64() && run.get("unread").is_none(), "{run}");

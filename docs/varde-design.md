@@ -609,8 +609,10 @@ derived as any run's, and the guidance tells it nobody is watching.
   From an agent's shell, `done`, `park` and `drop` never stop a session
   of yours, only runs a schedule started; and `done` from a session
   varde cannot tell apart, which may be one of this task's own, is
-  refused, pointing to your terminal. A board is always you. A background run that finds nothing does that before it
-  stops, as the guidance tells it, and otherwise ends with what you
+  refused, pointing to your terminal. A board is always you. A background run that changed nothing and finds nothing does that
+  before it stops, as the guidance tells it, since anything it changed,
+  however routine, is for you to see (a run that judged its own commit
+  not worth a look kept it from you), and otherwise ends with what you
   should know; one that does neither is in Needs you, so a run that
   gets it wrong costs a look, never a finding. An interactive session
   whose agent closes it this way is left running, as `done` leaves

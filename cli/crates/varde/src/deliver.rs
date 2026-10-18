@@ -300,10 +300,14 @@ fn guidance(run: &str, task: Option<&Task>, held: bool, updates: bool) -> String
                  is finished.",
                 clip(rule, TITLE_CHARS),
             ));
+            // What it changed is the test, not what the user would care
+            // about: a run judged a routine commit as nothing to see.
             if *background {
                 out.push_str(&format!(
-                    " If you found nothing the user needs to see, run varde done {short} as your last \
-                     step, and they are not asked to look at this run."
+                    " If this run changed nothing (no file edited, nothing committed) and found \
+                     nothing new, run varde done {short} as your last step, and the user is not asked \
+                     to look at this run. Anything you changed, however routine, is for them to see: \
+                     end with what it is."
                 ));
             }
         }
