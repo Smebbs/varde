@@ -1,17 +1,14 @@
 # varde
 
-The guide to the CLI and the terminal board. [`emacs.md`](emacs.md)
-covers the Emacs client, and [`varde-design.md`](varde-design.md) says
-why varde is built this way.
+The CLI and the terminal board. Emacs is in [`emacs.md`](emacs.md).
 
 ## Concepts
 
-- A **task** is a piece of work you give an agent. Its **sessions** are
-  the agent's conversations about it. Starting a task goes to its live
-  session, resumes its last one, or starts fresh.
-- A **cairn** is what a task's sessions learned, handed to the next
-  one: a Status line, and short lists of Findings, Decisions and Open
-  items. Each project keeps one too.
+- A **task** is a piece of work for an agent; its **sessions** are the
+  agent's conversations about it.
+- A **cairn** is what those sessions learned, handed to the next one: a
+  Status line plus short lists of Findings, Decisions and Open items.
+  Each project has one too.
 - The **board** groups tasks by what they need from you:
 
   | Group | Holds |
@@ -19,56 +16,47 @@ why varde is built this way.
   | Needs you | a live session whose turn ended (*your turn*) or that asks you something (*needs input*) |
   | Working | a live session at work |
   | Open | tasks with no session running |
-  | Scheduled | tasks varde starts itself at a time, soonest first |
+  | Scheduled | tasks varde starts itself, soonest first |
   | Inbox | sessions you started yourself, and work an agent left for later |
   | Done | done today, or not landed yet |
   | Parked | put aside (folded) |
 
-  `●` is live (green working, yellow your turn, red needs input), `○`
-  nothing running or already seen, `✓` done, `‖` parked, `✕` dropped.
-  Every group is always shown, in the same order.
+  `●` live (green working, yellow your turn, red needs input), `○` idle
+  or seen, `✓` done, `‖` parked, `✕` dropped. Every group is always
+  shown, in this order.
 - A task ends **done** (`d`), **parked** (`P`) or **dropped** (`x`).
-  Starting it again reopens it, and a dropped task's work is kept under
-  a git ref.
+  Starting it again reopens it. A dropped task's work is kept under a
+  git ref.
 
 ## Install
 
-varde needs git, and Claude Code or pi. tmux is optional (see
-[With tmux](#with-tmux)).
+You need git, and Claude Code or pi. tmux is optional.
 
 ```sh
 brew install smebbs/tap/varde
-```
-
-Or take a binary from the
-[latest release](https://github.com/Smebbs/varde/releases/latest), or
-build it with Rust 1.88 or later:
-
-```sh
+# or, with Rust 1.88+:
 cargo install --locked --git https://github.com/Smebbs/varde varde
 ```
 
-The hooks call `varde` by name, so it must be on your PATH: for
-`cargo install`, add `~/.cargo/bin`.
+Or grab a binary from the
+[latest release](https://github.com/Smebbs/varde/releases/latest).
+`varde` must be on your PATH, since the hooks call it by name.
 
-In Claude Code, install the plugin. It holds only hooks, each calling
-`varde hook <Event>`:
+Claude Code: install the plugin (it's just hooks calling `varde hook`).
 
 ```
 /plugin marketplace add Smebbs/varde
 /plugin install varde@varde
 ```
 
-For [pi](https://pi.dev), link the extension from a clone of this
-repository. It forwards pi's events to `varde hook --agent pi`:
+[pi](https://pi.dev): link the extension from a clone of this repo.
 
 ```sh
 mkdir -p ~/.pi/agent/extensions    # or $PI_CODING_AGENT_DIR/extensions
 ln -s "$PWD/cli/pi/varde.ts" ~/.pi/agent/extensions/varde.ts
 ```
 
-Then run `varde doctor`. It checks the store, the PATH, the config, the
-hooks and the memory updates, and says how to fix what fails.
+Then `varde doctor` checks the setup and says how to fix what's wrong.
 
 ## Commands
 
@@ -85,7 +73,7 @@ varde park k3m9qz            # put it aside, worktree kept
 varde drop k3m9qz            # drop it; its work is kept under refs/varde/discarded/
 varde reopen k3m9qz          # back to Open, without starting it
 varde accept k3m9qz          # an Inbox task into Open
-varde schedule k3m9qz every weekday 09:00  # varde starts it then, a fresh session each time (--off stops it)
+varde schedule k3m9qz every weekday 09:00  # varde starts it then (--off stops it)
 varde new Triage mentions --when "every day 06:00" --worktree never  # a task that starts itself
 varde set k3m9qz --project ~/src/api  # move it to another project
 varde show k3m9qz            # where it stands, its cairn, its sessions
@@ -96,87 +84,77 @@ varde list                   # the board as text (--all: closed tasks too)
 varde eval                   # what memory was worth here
 ```
 
-A task is named by the six characters the board shows; the first four
-do while they are unique. Inside a session varde runs, `done`, `park`
-and `show` with no task mean its own. `varde help <command>` describes
-each command.
+A task is named by the six characters the board shows, or the first
+four while they're unique. Inside a session varde runs, `done`, `park`
+and `show` without a task mean that session's task. `varde help
+<command>` has the rest.
 
 **Projects.** A task belongs to the checkout it was made in. A
-worktree you made yourself is a project of its own; one varde made
-belongs to its repository. `varde set --project` moves a task once it
-has no live session and no unlanded worktree.
+worktree you made yourself counts as its own project; one varde made
+belongs to its repo. `varde set --project` moves a task once it has no
+live session and no unlanded worktree.
 
-**Worktrees.** On a task's first run in a repository, varde asks
-whether it gets a worktree (`--worktree always|never`, or the settings
-below, decide instead). It is `.worktrees/<slug>` on branch
-`varde/<slug>`, cut from your base branch. Submodules are checked out,
-ignored files listed in `.worktreeinclude` are copied, and `git config
-varde.setup` runs. The branch tracks the base, so magit and `git
-status` show the task's work as the commits ahead of it. Rename it as
-you like: varde follows the branch the worktree has checked out, one
-the agent cut there included, and never deletes a branch that was there
-before the task. After `done`, the worktree and its branch are
-removed once nothing can be lost: no uncommitted changes, every commit
-in the base branch or a merged PR, no session running. Until then the
-task stays under Done.
+**Worktrees.** On a task's first run in a repo, varde asks whether it
+gets a worktree (or `--worktree always|never` and the settings below
+decide). It's `.worktrees/<slug>` on branch `varde/<slug>`, cut from
+your base branch and tracking it. Submodules are checked out, ignored
+files listed in `.worktreeinclude` are copied, and `git config
+varde.setup` runs. Rename the branch if you like: varde follows what
+the worktree has checked out, and never deletes a branch that existed
+before the task. After `done`, the worktree and branch go once nothing
+can be lost (clean, every commit in the base or a merged PR, no
+session running). Until then the task sits in Done.
 
-**Sessions you start yourself.** A plain `claude` or `pi` session
-becomes an Inbox task after its first prompt, and stays there once it
-ends until you accept, start or close it. `claude -p` and the Agent SDK
-are not tracked.
+**Sessions you start yourself.** A plain `claude` or `pi` session shows
+up in the Inbox after its first prompt, and stays there until you
+accept, start or close it. `claude -p` and the Agent SDK aren't
+tracked.
 
-**Scheduled and repeating tasks.** `varde schedule <task> RULE` makes
-varde start the task itself, in the background: a fresh session with
-no terminal (the agent's print mode), on the board as any other. A run
-that found nothing to report says so (`varde done` on its own task) and
-goes quietly back to Scheduled; one that found something waits in Needs
-you, and RET (or `varde attach`) opens it in your terminal. RET while it still works asks
-whether to take it over: it stops there and carries on with you. Nobody
-is there to approve a tool your settings do not allow, so such a tool
-is refused, and the session says what it could not do. To let it decide
-for itself, give the agent the arguments for that in `background` (see
-Configure), e.g. Claude's `["--permission-mode", "auto"]`. RULE is one of:
+### Scheduled and repeating tasks
+
+`varde schedule <task> RULE` makes varde start the task itself, in the
+background: a fresh session with no terminal (the agent's print mode).
+RULE is one of:
 
 - `at mon 09:00`, `at 2026-11-02 07:00`, `at tomorrow`: once.
 - `every weekday 09:00`, `every day 06:00`, `every mon,thu`,
   `every weekend 10:00`: on those days.
-- `every 30m`, `every 4h`, `every 2d`: that long after it last started.
+- `every 30m`, `every 4h`, `every 2d`: that long after the last start.
 - An org timestamp: `<2026-10-19 Mon 09:00 ++1w>`.
 
-A time left out is midnight, the first moment the machine is on that
-day: `every day` is "when I open my laptop in the morning". A start
-missed while the machine was off or asleep happens as soon as it is
-on, once, however many were missed. Each run of a repeating task is a
-fresh conversation, given the task's cairn, so tell it what to do in
-its context and let the cairn carry how far it got. The next run waits
-for the last one's cairn update, and stops a session of it left idle
-for 15 minutes; one you are still in is left alone.
+No time means midnight, i.e. the first moment the machine is on that
+day. Starts missed while the machine was off fire once when it's back.
+Run `varde schedule --install` once to add a systemd user timer (a
+LaunchAgent on macOS) that runs `varde tick` every minute; without it,
+schedules only fire while a board is open.
 
-On a repeating task, `d` (`varde done`) ends this run, not the series:
-its session stops, what it found counts as read, and the task waits
-for its next time. Its row shows `↻` while a run is at work or waiting
-for you, to say so. To end the series, take the schedule off (`varde
-schedule <task> --off`, or `e` and clear `When:`), then `done` closes
-the task as any. `park` and `drop` stop the schedule, and `reopen`
-resumes it.
+A run with nothing to report says so (`varde done` on its own task) and
+goes quietly back to Scheduled. One that found something waits in
+Needs you; RET (or `varde attach`) opens it in your terminal, and RET
+while it's still working offers to take it over. Each unopened run
+keeps the row in Needs you, and RET opens them newest first. The view
+(`v`) lists every run (`●` unopened, `quiet` found nothing); RET opens
+one (`varde attach <task> --run <run>`).
 
-Every run you have not opened keeps the row in Needs you, so a week
-away buries nothing: RET opens the newest one, and the next RET the one
-before. The view (`v`) lists every run of a repeating task under its
-cairn, newest first: `●` one you have not opened, `quiet` one that
-found nothing. RET on one opens it (`varde attach <task> --run <run>`).
-Nobody is there to
-answer when it starts, so a first start that would ask about a
-worktree needs `--worktree always|never` up front.
+Nobody is around to approve tools, so a tool your settings don't allow
+is refused. To let the agent decide, pass its flags in `background`
+(see [Configure](#configure)), e.g. `["--permission-mode", "auto"]`.
+For the same reason, a first start that would ask about a worktree
+needs `--worktree always|never` up front.
 
-Once, run `varde schedule --install`: it installs a systemd user timer
-(on macOS a LaunchAgent) that runs `varde tick` every minute. Without
-it, schedules fire only while a board is open, and `varde doctor` says
-so.
+Each run of a repeating task is a fresh conversation given the cairn,
+so put what to do in the context and let the cairn track progress. A
+run waits for the previous one's cairn update, and stops an idle
+session of it after 15 minutes (one you're in is left alone). `d` ends
+the current run, not the series: its session stops and what it found
+counts as read. The row shows `↻` while a run is working or waiting.
+To end the series, take the schedule off (`varde schedule <task>
+--off`, or `e` and clear `When:`), then `done`. `park` and `drop` pause
+the schedule; `reopen` resumes it.
 
 ## The board
 
-`varde` opens the board, kept to the project you are in (`.` shows
+`varde` opens the board, kept to the project you're in (`.` shows
 every project). The footer shows the keys the row needs most; `?`
 shows them all.
 
@@ -203,38 +181,34 @@ shows them all.
 | C-l | Redraw and read the board again. |
 | `q` / Esc | Close the pane, else quit (`q` only, unless configured). |
 
-**The new-task form.** `n` opens it in the context, as org-varde's
-form: most tasks are only that, and with no title a model names the
-task from it. Above the line are `Title:`, `Project:` and `When:`; Tab
-and Shift-Tab go between the fields. The Project starts as the project
-the board keeps to; left empty, it is asked for on create. On the
-Project, RET or typing opens the project picker, and Backspace empties
-it. RET on another field above the line, or C-s anywhere, creates the
-task; C-j is RET, as in a terminal. C-x C-e writes it, fields and all, in `$EDITOR`. Esc puts the
-draft away, and the next `n` brings it back. `e` opens the same form on
-a task: changing its Project there moves it, as `m` does. Prompts edit
-text as a shell does (C-w, C-u, C-k, Alt-b/f, C-y).
+**The new-task form.** `n` opens it in the context, since most tasks
+are just that; leave the title empty and a model names the task. Above
+the line are `Title:`, `Project:` and `When:` (Tab/Shift-Tab between
+them). RET on a field above the line, or C-s anywhere, creates the
+task; C-j is RET. C-x C-e edits the whole form in `$EDITOR`. Esc puts
+the draft away and the next `n` brings it back. `e` opens the same form
+on a task; changing the Project moves it. Prompts take shell editing
+keys (C-w, C-u, C-k, Alt-b/f, C-y).
 
-**The project picker.** Every question about a project is the same
-picker: the form's Project, a new task with none, `m`, and a first start
-whose project is unsure. It lists the projects varde knows, by name and
-directory, newest first, with the likeliest at the top and picked: the
-form's Project, else the selected task's, else the one the board was
-opened in. `m` lists the task's own project last. Typing narrows the
-list by name, then by directory; ↑/↓ or C-p/C-n choose, RET picks, and
-Esc goes back. A directory typed (`~`, `/` or `.` first) lists the
-directories in it instead: Tab completes as a shell does, ↑/↓ step
-through them, and RET takes the directory typed. Tab on a project goes
-into its directory, and `another directory…` starts one at `~/`.
-org-varde's picker is the same list in the minibuffer.
+### The project picker
+
+Every project question uses one picker: the form's Project (RET or
+typing opens it, Backspace empties it; left empty, it's asked on
+create), `m`, and a first start whose project is unclear. It lists
+known projects by name and directory, newest first, with the likeliest
+picked at the top (the form's, else the selected task's, else the
+board's); `m` puts the task's own project last. Typing narrows it; ↑/↓
+or C-p/C-n choose, RET picks, Esc goes back. Type a path (`~`, `/` or
+`.` first) to browse directories instead: Tab completes, RET takes it.
+Tab on a project goes into its directory, and `another directory…`
+starts at `~/`.
 
 ### The view
 
-`v` opens a pane under the board with two tabs: **Task** (the cairn,
-then the notes waiting, the context and the sessions) and **Project**
-(the project's cairn). Lines you wrote are marked `›`; a line about
-code that is gone ends in a yellow `?`. Other keys work as on the
-board, for the task in view.
+`v` opens a pane with two tabs: **Task** (cairn, waiting notes,
+context, sessions) and **Project** (the project's cairn). `›` marks
+your lines; a yellow `?` marks a line about code that's gone. Board
+keys work on the task in view.
 
 | Key | Does |
 |---|---|
@@ -248,17 +222,15 @@ board, for the task in view.
 | `J` / `K` | The next / previous task. |
 | `q` / Esc / `v` | Back to the board. |
 
-A line you are typing is never lost: Esc puts it away, and the same key
-on the same line brings it back.
+A half-typed line is never lost: Esc puts it away, and the same key on
+the same line brings it back.
 
 ### With tmux
 
-The board works on its own: RET hands a session the terminal, and the
-board comes back when the agent exits. With tmux (3.0 or later),
-sessions run side by side instead.
-
-Keep the board a key away in a popup (tmux 3.3 or later; on 3.2, leave
-out `-B`), and bind `varde next`:
+Without tmux, RET hands the session the terminal and the board comes
+back when the agent exits. With tmux (3.0+), sessions run side by side.
+Keep the board in a popup (tmux 3.3+; on 3.2, drop `-B`) and bind
+`varde next`:
 
 ```sh
 # ~/.tmux.conf
@@ -267,31 +239,29 @@ bind-key N run-shell -b 'varde next'                           # prefix N: the n
 bind-key B run-shell -b 'varde next --board'                   # prefix B: the board
 ```
 
-Or run the board in a window of its own (`tmux new -s varde varde`).
-Each session gets a tmux window named after its task, which rings the
-bell when it needs you; prefix `l` goes back to the board. The board
-closes a closed task's windows once their shell is idle. `run-shell`
-uses tmux's environment, so `varde` must be on the PATH tmux started
-with.
+Or run the board in its own window (`tmux new -s varde varde`). Each
+session gets a window named after its task that rings the bell when
+it needs you; prefix `l` goes back to the board. Closed tasks' windows
+close once their shell is idle. `run-shell` uses tmux's environment, so
+`varde` must be on tmux's PATH.
 
 ## Cairns
 
-A cairn is short on purpose, since every session is handed it: at most
-200 words, a Status (30 words), up to 7 Findings, 5 Decisions and 5 Open
-items (40 words each). A project's cairn holds Conventions, Gotchas and
-How-to (5, 7 and 5 lines).
+Cairns are short because every session gets one: at most 200 words,
+a Status (30 words), up to 7 Findings, 5 Decisions and 5 Open items
+(40 words each). A project cairn has Conventions, Gotchas and How-to
+(5, 7 and 5 lines).
 
-**Updates.** A session's work goes into its task's cairn when it ends,
-before it compacts, and at most every 30 minutes while it runs; closing
-a task updates it once more. The update is a detached call to the
-agent (`claude -p` on haiku, or pi's default model), with varde's own
-prompt and no tools, reading only the transcript since the last update.
-It answers with edits, which varde checks against the caps and filters
-for secrets, URLs and commands. A task closed as done may add to its
-project's cairn. The agent can pin a finding with `varde note`.
+**Updates.** A task's cairn is updated when a session ends, before it
+compacts, at most every 30 minutes while it runs, and once more on
+close. It's a detached agent call (`claude -p` on haiku, or pi's
+default) with no tools, reading only the new part of the transcript.
+It answers with edits, checked against the caps and filtered for
+secrets, URLs and commands. The project cairn is only ever written by
+you. The agent can pin a finding with `varde note`.
 
-**Editing.** A line you write is yours: updates never change or drop
-it. Edit in the board's view, in Emacs, or by the ids `varde show`
+**Editing.** Lines you write are yours: updates never change or drop
+them. Edit in the board's view, in Emacs, or by the ids `varde show`
 prints:
 
 ```sh
@@ -304,24 +274,23 @@ varde edit --project --add gotchas 'launch.rs tests need tmux.'
 varde edit k3m9qz                  # the whole cairn in $EDITOR
 ```
 
-Nothing is lost: `varde show --history` has every earlier version.
+`varde show --history` keeps every earlier version.
 
-**Stale lines.** A line naming a path or identifier that is no longer
-in the code is shown `(stale?)`, and the next update fixes or drops it.
+**Stale lines.** A line naming a path or identifier that's gone from
+the code shows `(stale?)`; the next update fixes or drops it.
 
-**Delivery.** Through the hooks: a fresh session is given the project
-cairn, its task's cairn, the task it was deferred from and related
-lines from the project; a resume, what changed since it last saw them.
-It stays within about 500 words, introduced as facts to check, not
-instructions.
+**Delivery.** Via the hooks, a fresh session gets the project cairn,
+its task's cairn, the task it was deferred from and related lines; a
+resumed one gets what changed. About 500 words at most, framed as
+facts to check, not instructions.
 
 **Recall.** `varde recall` (`/` on the board) searches cairn lines,
 removed lines, notes and project cairns, one hit per task.
 
-**Evaluation.** `varde eval` reports, over the last 30 days, how much of
-what sessions were shown they used, what was repeated or stale, and
-what the updates cost. `memory.holdout` gives a share of fresh sessions
-no memory for comparison.
+**Evaluation.** `varde eval` shows, over 30 days, how much of what
+sessions were shown got used, what was repeated or stale, and what
+updates cost. `memory.holdout` withholds memory from a share of fresh
+sessions, for comparison.
 
 ## Configure
 
@@ -360,8 +329,7 @@ The actions are `start`, `background`, `fresh`, `fork`, `next-needs`,
 `first`, `last`, `next-group`, `prev-group`, `half-down`, `half-up`,
 `fold`, `scope`, `refresh`, `quit` and `help`.
 
-A repository's own settings live in its git config, so nothing
-committed is ever run:
+Per-repo settings live in git config, so nothing committed ever runs:
 
 ```sh
 git config varde.worktree always       # its first runs get a worktree
@@ -369,44 +337,40 @@ git config varde.base develop          # the branch worktrees start from and lan
 git config varde.setup "pnpm install"  # run in each new worktree
 ```
 
-**What varde trusts.** It runs only what you set yourself, as you: the
-agent `command` in your config, and `varde.setup` in a repository's
-local git config. Memory is written by agents and handed to later
-sessions, so treat it as the agent's own output: what a model writes is
-kept free of secrets, URLs, commands piped into a shell and orders to
-sessions; your own lines are never filtered.
+**What varde trusts.** It only runs what you set: the agent `command`
+in your config and `varde.setup` in a repo's local git config. Memory
+is written by agents, so treat it as agent output; model-written lines
+are filtered for secrets, URLs, piped commands and orders to sessions.
+Your own lines aren't filtered.
 
 **Files.** The store is `~/.local/state/varde/varde.db` (`$VARDE_HOME`
-for the directory), readable by you alone. It holds your prompts.
-Sessions varde launches carry `VARDE_RUN`; its own agent calls carry
+moves it), readable only by you, and it holds your prompts. Sessions
+varde launches carry `VARDE_RUN`; its own agent calls carry
 `VARDE_INTERNAL=1`, which the hooks ignore.
 
 ## Troubleshooting
 
-`varde doctor` checks all of this.
+Start with `varde doctor`.
 
-- **No sessions on the board, or no status changes.** The hooks are
-  missing or old: install the plugin again.
+- **No sessions on the board, or status never changes.** The hooks are
+  missing or old: reinstall the plugin.
 - **Another `varde` on the PATH.** `doctor` says which.
-- **`varde next` does nothing.** It works from a tmux key, with `varde`
-  on tmux's PATH.
-- **A setting is ignored.** One varde cannot use is left out, with a
-  notice.
+- **`varde next` does nothing.** It's meant for a tmux key, with
+  `varde` on tmux's PATH.
+- **A setting is ignored.** Invalid settings are skipped with a notice.
 
 ## Upgrading and uninstalling
 
-Install the new binary as you did the old one; the store upgrades
-itself. Keys that moved since 1.0 are in
-[`CHANGELOG.md`](../CHANGELOG.md).
+Upgrade by installing the new binary; the store migrates itself. Keys
+that moved since 1.0 are in [`CHANGELOG.md`](../CHANGELOG.md).
 
-To uninstall, `/plugin uninstall varde@varde` (for pi, remove the
-link), remove the binary and `~/.local/state/varde`, and in each
-repository remove any worktree left in `.worktrees/`, the refs under
-`refs/varde/`, and the `.worktrees/` line in `.git/info/exclude`.
+To uninstall: `/plugin uninstall varde@varde` (or remove the pi link),
+delete the binary and `~/.local/state/varde`, and in each repo remove
+leftover `.worktrees/`, the `refs/varde/` refs, and the `.worktrees/`
+line in `.git/info/exclude`.
 
 ## Clients
 
 `list`, `show`, `new`, `start`, `edit`, `done`, `park`, `drop`,
-`recall`, `eval`, `doctor` and `agent` take `--json`.
-[`clients.md`](clients.md) is the contract for a client in another
-editor.
+`recall`, `eval`, `doctor` and `agent` take `--json`; see
+[`clients.md`](clients.md) to write your own client.
