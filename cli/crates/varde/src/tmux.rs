@@ -238,10 +238,15 @@ impl Tmux {
 
     /// Mark `pane` as `task`'s, or as nobody's when `task` is empty.
     pub fn tag(&self, pane: &str, task: &str) -> Result<()> {
-        if task.is_empty() {
-            self.tmux(&["set-option", "-p", "-u", "-t", pane, "@varde_task"])?;
+        self.set_pane(pane, "@varde_task", task)
+    }
+
+    /// Set `option` of `pane` to `value`, or unset it when `value` is empty.
+    fn set_pane(&self, pane: &str, option: &str, value: &str) -> Result<()> {
+        if value.is_empty() {
+            self.tmux(&["set-option", "-p", "-u", "-t", pane, option])?;
         } else {
-            self.tmux(&["set-option", "-p", "-t", pane, "@varde_task", task])?;
+            self.tmux(&["set-option", "-p", "-t", pane, option, value])?;
         }
         Ok(())
     }
@@ -254,12 +259,7 @@ impl Tmux {
     /// Mark `pane` as running the board of the store `home`, or as no
     /// board's when `home` is empty: `varde next --board` goes to it.
     pub fn mark_board(&self, pane: &str, home: &str) -> Result<()> {
-        if home.is_empty() {
-            self.tmux(&["set-option", "-p", "-u", "-t", pane, "@varde_board"])?;
-        } else {
-            self.tmux(&["set-option", "-p", "-t", pane, "@varde_board", home])?;
-        }
-        Ok(())
+        self.set_pane(pane, "@varde_board", home)
     }
 
     /// Say `text` in tmux's status line.
@@ -419,6 +419,20 @@ mod tests {
         Some(t)
     }
 
+    /// Whether `pane`'s shell has exec'd `sleep` within a few seconds:
+    /// until then the pane is tmux's fork, then the shell, which looks
+    /// idle. (GNU's is `gsleep` on macOS.) Generous: a loaded machine can
+    /// take seconds to get there.
+    fn sleeping(t: &Tmux, pane: &str) -> bool {
+        (0..500).any(|_| {
+            let running = t.panes().unwrap().iter().any(|p| p.id == pane && p.command.ends_with("sleep"));
+            if !running {
+                std::thread::sleep(std::time::Duration::from_millis(20));
+            }
+            running
+        })
+    }
+
     fn wait_for(t: &Tmux, pane: &str, text: &str) -> String {
         for _ in 0..300 {
             let shown = t.tmux(&["capture-pane", "-p", "-t", pane]).unwrap();
@@ -471,19 +485,10 @@ mod tests {
         let busy = t.tmux(&["new-window", "-d", "-P", "-F", "#{pane_id}", "exec sleep 300"]).unwrap();
         t.tag(&busy, "01TASKAAAAAA").unwrap();
         t.tmux(&["set-option", "-p", "-t", &busy, "@varde_owned", "1"]).unwrap();
-        // Until the shell running it has exec'd, the pane is tmux's fork,
-        // then the shell, which looks idle. (GNU's is `gsleep` on macOS.)
-        let running = || t.panes().unwrap().iter().any(|p| p.id == busy && p.command.ends_with("sleep"));
-        // Generous: a loaded machine can take seconds to get there.
-        for _ in 0..500 {
-            if running() {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
-        let seen: Vec<String> =
-            t.panes().unwrap().into_iter().filter(|p| p.id == busy).map(|p| p.command).collect();
-        assert!(running(), "the busy pane never ran its command: tmux says {seen:?}");
+        let seen = || -> Vec<String> {
+            t.panes().unwrap().into_iter().filter(|p| p.id == busy).map(|p| p.command).collect()
+        };
+        assert!(sleeping(&t, &busy), "the busy pane never ran its command: tmux says {:?}", seen());
         assert_eq!(t.close("01TASKAAAAAA").unwrap(), 1);
         let left: Vec<Pane> = t.panes().unwrap().into_iter().filter(|p| p.task == "01TASKAAAAAA").collect();
         assert_eq!(left.len(), 1);
@@ -549,12 +554,7 @@ mod tests {
         std::fs::create_dir_all(&paths.home).unwrap();
         let board = t.tmux(&["new-window", "-d", "-P", "-F", "#{pane_id}", "exec sleep 300"]).unwrap();
         // A board runs there once its shell has exec'd; until then it looks idle.
-        for _ in 0..500 {
-            if t.panes().unwrap().iter().any(|p| p.id == board && p.command.ends_with("sleep")) {
-                break;
-            }
-            std::thread::sleep(std::time::Duration::from_millis(20));
-        }
+        sleeping(&t, &board);
         // Another store's board is not this one's to go to: it only says so.
         t.mark_board(&board, "/another/store").unwrap();
         next_in(&t, &paths, true).unwrap();

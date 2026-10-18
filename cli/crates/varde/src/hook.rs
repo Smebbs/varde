@@ -158,13 +158,10 @@ fn record(paths: &Paths, agent_name: &str, event: &str, input: &str) -> Result<O
         };
         Ok(context.map(|c| agent.hook_reply(event, &c)))
     };
-    match after() {
-        Ok(answer) => Ok(answer),
-        Err(e) => {
-            log(paths, &format!("hook {event}: after recording: {e:#}"));
-            Ok(None)
-        }
-    }
+    Ok(after().unwrap_or_else(|e| {
+        log(paths, &format!("hook {event}: after recording: {e:#}"));
+        None
+    }))
 }
 
 /// `varde run` records the process it starts, which is a wrapper when the

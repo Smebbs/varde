@@ -267,7 +267,7 @@ fn the_report_measures_reach_use_rediscovery_fidelity_cost_and_holdout() {
     let e = env();
     e.ok(&["list"]);
     // A day ago: eval looks back 30 days at most.
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    let now = now_ms();
     let t0 = now - 86_400_000;
     let m = 60_000;
     let p = proj(&e).to_string_lossy().to_string();
@@ -520,18 +520,11 @@ fn an_edit_past_the_caps_is_refused_and_what_was_typed_is_kept() {
     let p = proj(&e).to_string_lossy().to_string();
     let gotchas: String = (0..9).map(|n| format!("- `g{n}` bites\n")).collect();
     let text = format!("Conventions:\nGotchas:\n{gotchas}How-to:\n");
-    let out = feed(&mut e.cmd(&["edit", "--project", &p, "--stdin"]), &text);
-    assert!(!out.status.success());
-    let err = String::from_utf8_lossy(&out.stderr);
+    let (err, kept) = refused_edit(&e, &["edit", "--project", &p, "--stdin"], &text);
     assert!(err.contains("Gotchas has 9 lines, and holds at most 7"), "{err}");
-    let kept = err.split("kept in ").nth(1).unwrap().trim();
-    assert_eq!(std::fs::read_to_string(kept).unwrap(), text);
-    let _ = std::fs::remove_file(kept);
+    assert_eq!(kept, text);
     // So is one in the wrong shape.
-    let out = feed(&mut e.cmd(&["edit", "--project", &p, "--stdin"]), "Gotchaz:\n- x\n");
-    assert!(String::from_utf8_lossy(&out.stderr).contains("kept in "));
-    let err = String::from_utf8_lossy(&out.stderr).to_string();
-    let _ = std::fs::remove_file(err.split("kept in ").nth(1).unwrap().trim());
+    refused_edit(&e, &["edit", "--project", &p, "--stdin"], "Gotchaz:\n- x\n");
 }
 
 #[test]
@@ -543,12 +536,9 @@ fn an_edit_that_would_lose_a_line_is_refused() {
         ("Status: s\n- typed here\nFindings:\nDecisions:\nOpen:\n", "line 2 is a bullet under no heading"),
         ("Status: s\nFindings:\nDecisions:\nStatus: t\nOpen:\n", "line 4 is a second Status"),
     ] {
-        let out = feed(&mut e.cmd(&["edit", &t, "--stdin"]), text);
-        let err = String::from_utf8_lossy(&out.stderr).to_string();
-        assert!(!out.status.success() && err.contains(says), "{err}");
-        let kept = err.split("kept in ").nth(1).unwrap().trim();
-        assert_eq!(std::fs::read_to_string(kept).unwrap(), text);
-        let _ = std::fs::remove_file(kept);
+        let (err, kept) = refused_edit(&e, &["edit", &t, "--stdin"], text);
+        assert!(err.contains(says), "{err}");
+        assert_eq!(kept, text);
     }
     assert_eq!(e.ok(&["edit", &t, "--print"]), before);
 }
@@ -642,10 +632,8 @@ fn a_linked_task_s_context_is_shown_but_not_edited() {
     assert_eq!(e.ok_in(&["edit", &t, "--stdin"], &printed), "unchanged");
     assert_eq!(e.ok_in(&["edit", &t, "--stdin"], &format!("{printed}- [mine] `x` is new\n")), "saved");
 
-    let out = feed(&mut e.cmd(&["edit", &t, "--stdin"]), &format!("Context:\nOther.\n\n{cairn}\n"));
-    let err = String::from_utf8_lossy(&out.stderr).to_string();
-    assert!(!out.status.success() && err.contains("from org: edit it there"), "{err}");
-    let _ = std::fs::remove_file(err.split("kept in ").nth(1).unwrap().trim());
+    let (err, _) = refused_edit(&e, &["edit", &t, "--stdin"], &format!("Context:\nOther.\n\n{cairn}\n"));
+    assert!(err.contains("from org: edit it there"), "{err}");
     assert_eq!(e.show(&t)["body"], "Why it matters.\nAnd more.");
 }
 

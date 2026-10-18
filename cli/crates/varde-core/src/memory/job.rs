@@ -324,12 +324,20 @@ pub fn finish_job(
     if current != expected || cursor != input.cursor {
         return Ok(false);
     }
-    let owner = Owner::Task(&input.task);
     let took_notes = matches!(outcome, Outcome::New { took_notes: true, .. });
-    let Some(state) = write_outcome(&tx, owner, expected, outcome, &input.run, "left out by an update", now)?
-    else {
-        return Ok(false);
+    let (confirmed, state) = match outcome {
+        Outcome::Skipped => (&[][..], "skipped"),
+        Outcome::Unchanged { confirmed } => (confirmed, "unchanged"),
+        Outcome::New { cairn, gone, capped, confirmed, reason, .. } => {
+            let default_gone = "left out by an update";
+            let w = Write { author: "job", run: Some(&input.run), reason, gone, default_gone, capped, now };
+            if !save_doc(&tx, Owner::Task(&input.task), expected, cairn, &w)? {
+                return Ok(false);
+            }
+            (confirmed, "done")
+        }
     };
+    confirm(&tx, confirmed, now)?;
     // Only a written cairn whose edits took them up holds the notes;
     // otherwise they wait for the next update.
     if state == "done" && took_notes {
@@ -344,32 +352,6 @@ pub fn finish_job(
     tx.execute("UPDATE job SET state = ?2, finished = ?3 WHERE id = ?1", params![job, state, now])?;
     tx.commit()?;
     Ok(true)
-}
-
-/// Write a job's outcome to `owner`'s document, if still at `expected`:
-/// the job's new state, or `None` when the document moved underneath it.
-fn write_outcome(
-    conn: &Connection,
-    owner: Owner,
-    expected: i64,
-    outcome: Outcome,
-    run: &str,
-    default_gone: &str,
-    now: i64,
-) -> Result<Option<&'static str>> {
-    let (confirmed, state) = match outcome {
-        Outcome::Skipped => (&[][..], "skipped"),
-        Outcome::Unchanged { confirmed } => (confirmed, "unchanged"),
-        Outcome::New { cairn, gone, capped, confirmed, reason, .. } => {
-            let w = Write { author: "job", run: Some(run), reason, gone, default_gone, capped, now };
-            if !save_doc(conn, owner, expected, cairn, &w)? {
-                return Ok(None);
-            }
-            (confirmed, "done")
-        }
-    };
-    confirm(conn, confirmed, now)?;
-    Ok(Some(state))
 }
 
 /// A running job failed. Only a running one: a stale process, woken from

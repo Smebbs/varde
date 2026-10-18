@@ -102,7 +102,7 @@ pub fn recall(paths: &Paths, words: &[String], all: bool, dir: Option<PathBuf>, 
     }
     // Outside any repository the scope is the tasks made in this directory.
     let here = match &scope {
-        Some(p) if !std::path::Path::new(p).join(".git").exists() => "the tasks made in this directory",
+        Some(p) if !Path::new(p).join(".git").exists() => "the tasks made in this directory",
         _ => "this project",
     };
     if found.hits.is_empty() {
@@ -152,7 +152,7 @@ pub fn closed(state: &str) -> String {
 /// The mark of a bullet whose code is gone, if it is.
 pub fn stale(stale: bool) -> &'static str {
     if stale {
-        varde_core::cairn::STALE_MARK
+        cairn::STALE_MARK
     } else {
         ""
     }
@@ -434,10 +434,10 @@ fn edit_doc(
             .unwrap_or_default();
         anyhow::anyhow!("not saved: {why}{kept}")
     };
+    let meanwhile =
+        || refuse("it was updated while you were editing: edit it again, and copy your changes in".into());
     if edited_version != version {
-        return Err(refuse(
-            "it was updated while you were editing: edit it again, and copy your changes in".into(),
-        ));
+        return Err(meanwhile());
     }
     if let (Some(link), Some(_)) = (linked, &new_body) {
         return Err(refuse(format!("this task's context is from {link}: edit it there")));
@@ -465,9 +465,7 @@ fn edit_doc(
             now: now_ms(),
         };
         if !memory::save_doc(&store.conn, owner, version, &edited, &w)? {
-            return Err(refuse(
-                "it was updated while you were editing: edit it again, and copy your changes in".into(),
-            ));
+            return Err(meanwhile());
         }
     }
     if let (Some(c), Some(b)) = (&context, &new_body) {

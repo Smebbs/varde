@@ -322,14 +322,7 @@ pub fn prepare(store: &mut Store, task_id: &str, opts: Options, interactive: boo
     // task without one was written down anywhere: the first run asks. Not
     // once another was named for the deferred work (`new --from --project`,
     // `set --project`).
-    let inherited = match (&origin, &project) {
-        (Some(o), Some(p)) if !started => store.conn.query_row(
-            "SELECT EXISTS (SELECT 1 FROM task WHERE id = ?1 AND project = ?2)",
-            [o, p],
-            |r| r.get(0),
-        )?,
-        _ => false,
-    };
+    let unsure = !started && project_unsure(store, origin.as_deref(), project.as_deref())?;
     let chosen = match opts.project {
         Some(_) if started => {
             bail!(
@@ -338,7 +331,7 @@ pub fn prepare(store: &mut Store, task_id: &str, opts: Options, interactive: boo
             )
         }
         Some(dir) => Some(project_of(store, &dir)?),
-        None if !started && (inherited || project.is_none()) => {
+        None if unsure => {
             if !interactive {
                 return Ok(Outcome::Ask(Ask::Project { choices: projects(store, project.as_deref())? }));
             }
@@ -381,8 +374,7 @@ pub fn prepare(store: &mut Store, task_id: &str, opts: Options, interactive: boo
     // A session its schedule started in the background has no terminal to
     // go to: it is taken over, stopped and carried on here, or asked about.
     if let Session::Focus { run } = &session {
-        let background: bool =
-            store.conn.query_row("SELECT background FROM run WHERE id = ?1", [run], |r| r.get(0))?;
+        let background = crate::done::background(store, run)?;
         if background && !opts.take_over {
             return Ok(Outcome::Ask(Ask::TakeOver { run: run.clone() }));
         }
@@ -620,6 +612,20 @@ fn conversation(store: &Store, task_id: &str, run: &str) -> Result<Vec<String>> 
         }
     }
     Ok(out)
+}
+
+/// Whether a task's project is unsure before its first run: it has none,
+/// or only the one it took from the task it was deferred from.
+pub fn project_unsure(store: &Store, origin: Option<&str>, project: Option<&str>) -> Result<bool> {
+    Ok(match (origin, project) {
+        (_, None) => true,
+        (Some(o), Some(p)) => store.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM task WHERE id = ?1 AND project = ?2)",
+            [o, p],
+            |r| r.get(0),
+        )?,
+        (None, Some(_)) => false,
+    })
 }
 
 /// Back to Open from done, parked or dropped; whether it was any of them.

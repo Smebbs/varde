@@ -768,9 +768,12 @@ pub mod tests {
         let made = create(r.path(), "w-abc123", &layout(r.path()), None).unwrap();
         // Git clones a submodule from a local path only when the user's own
         // config allows it, which a test cannot set without touching it: the
-        // update is tried, and its failure reported rather than fatal.
-        assert_eq!(made.notices.len(), 1, "{:?}", made.notices);
-        assert!(made.notices[0].starts_with("submodules not checked out: git submodule update"));
+        // update is tried, and a failure reported rather than fatal.
+        match &made.notices[..] {
+            [] => assert!(made.path.join("sub/.git").exists()),
+            [n] => assert!(n.starts_with("submodules not checked out: git submodule update"), "{n}"),
+            n => panic!("{n:?}"),
+        }
         assert_eq!(std::fs::read_to_string(made.path.join(".env")).unwrap(), "SECRET=1");
         assert!(!made.path.join("debug.log").exists() && !made.path.join("notes.txt").exists());
 

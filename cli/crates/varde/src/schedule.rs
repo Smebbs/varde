@@ -56,15 +56,7 @@ pub fn arm(store: &Store, task_id: &str, text: &str, worktree: Option<bool>) -> 
     )?;
     let short = task::short(task_id);
     if !started {
-        let inherited = match (&origin, &project) {
-            (Some(o), Some(p)) => store.conn.query_row(
-                "SELECT EXISTS (SELECT 1 FROM task WHERE id = ?1 AND project = ?2)",
-                [o, p],
-                |r| r.get(0),
-            )?,
-            _ => false,
-        };
-        if project.is_none() || inherited {
+        if start::project_unsure(store, origin.as_deref(), project.as_deref())? {
             bail!("{short}'s project is unsure, and nobody is there to say when it starts: varde set {short} --project <dir> first");
         }
         if worktree.is_none() && would_ask(Path::new(project.as_deref().unwrap_or_default())) {
@@ -254,13 +246,7 @@ const STARTING: &str = "starts within a minute";
 
 /// Why a start that is due has not happened, as [`fire`] decides.
 fn held(store: &Store, paths: &Paths, id: &str) -> Result<String> {
-    let updating: bool = store.conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM job j JOIN run r ON r.id = j.run
-                        WHERE r.task = ?1 AND j.state IN ('queued', 'running'))",
-        [id],
-        |r| r.get(0),
-    )?;
-    if updating {
+    if updating(store, id)? {
         return Ok("waiting for its cairn update".into());
     }
     if let Some(r) = start::run_facts(store, id)?.into_iter().find(|r| r.live()) {
@@ -279,6 +265,16 @@ fn held(store: &Store, paths: &Paths, id: &str) -> Result<String> {
         Some(d) if d.as_millis() as i64 <= LATE_MS => STARTING.into(),
         _ => "but varde tick is not running: varde doctor".into(),
     })
+}
+
+/// Whether a cairn update of `task` is queued or running.
+fn updating(store: &Store, task: &str) -> Result<bool> {
+    Ok(store.conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM job j JOIN run r ON r.id = j.run
+                        WHERE r.task = ?1 AND j.state IN ('queued', 'running'))",
+        [task],
+        |r| r.get(0),
+    )?)
 }
 
 /// The tick's lock: one at a time, and its file's age says when one last
@@ -342,13 +338,7 @@ pub fn tick(paths: &Paths) -> Result<()> {
 /// for a session of it still at work. A session left at its prompt is
 /// stopped, as `done` stops one, and this one starts on a later tick.
 fn fire(store: &mut Store, task: &str, rule: &str, worktree: Option<bool>, now: i64) -> Result<()> {
-    let updating: bool = store.conn.query_row(
-        "SELECT EXISTS (SELECT 1 FROM job j JOIN run r ON r.id = j.run
-                        WHERE r.task = ?1 AND j.state IN ('queued', 'running'))",
-        [task],
-        |r| r.get(0),
-    )?;
-    if updating {
+    if updating(store, task)? {
         return Ok(());
     }
     let live: Vec<_> = start::run_facts(store, task)?.into_iter().filter(|r| r.live()).collect();
@@ -450,13 +440,6 @@ pub fn install(paths: &Paths, on: bool) -> Result<()> {
     }
 }
 
-fn config_home() -> PathBuf {
-    std::env::var_os("XDG_CONFIG_HOME")
-        .map(PathBuf::from)
-        .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config"))
-}
-
 fn systemctl(args: &[&str]) -> Result<()> {
     let out = std::process::Command::new("systemctl")
         .arg("--user")
@@ -470,7 +453,7 @@ fn systemctl(args: &[&str]) -> Result<()> {
 }
 
 fn systemd(exe: &Path, env: &[(String, String)], on: bool) -> Result<()> {
-    let dir = config_home().join("systemd/user");
+    let dir = systemd_dir();
     let (service, timer) = (dir.join(format!("{UNIT}.service")), dir.join(format!("{UNIT}.timer")));
     if !on {
         let _ = systemctl(&["disable", "--now", &format!("{UNIT}.timer")]);
@@ -503,9 +486,7 @@ fn systemd(exe: &Path, env: &[(String, String)], on: bool) -> Result<()> {
 }
 
 fn launchd(exe: &Path, env: &[(String, String)], on: bool) -> Result<()> {
-    let plist = PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-        .join("Library/LaunchAgents")
-        .join(format!("{LABEL}.plist"));
+    let plist = plist();
     let uid = unsafe { libc::getuid() };
     let launchctl = |args: &[&str]| std::process::Command::new("launchctl").args(args).output();
     let _ = launchctl(&["bootout", &format!("gui/{uid}/{LABEL}")]);
@@ -550,11 +531,15 @@ fn launchd(exe: &Path, env: &[(String, String)], on: bool) -> Result<()> {
 
 /// Where the heartbeat is installed, if it is.
 pub fn heartbeat() -> Option<PathBuf> {
-    let p = if cfg!(target_os = "macos") {
-        PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
-            .join(format!("Library/LaunchAgents/{LABEL}.plist"))
-    } else {
-        config_home().join(format!("systemd/user/{UNIT}.timer"))
-    };
+    let p = if cfg!(target_os = "macos") { plist() } else { systemd_dir().join(format!("{UNIT}.timer")) };
     p.exists().then_some(p)
+}
+
+fn systemd_dir() -> PathBuf {
+    config::home().join("systemd/user")
+}
+
+fn plist() -> PathBuf {
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
+        .join(format!("Library/LaunchAgents/{LABEL}.plist"))
 }

@@ -43,7 +43,9 @@ On Doom:
   :after org
   :config (org-varde-mode 1))
 
-(map! :leader :prefix ("l" . "agent")
+;; SPC v under evil. Without evil Doom's leader is C-c, where v is
+;; version control: pick a free letter.
+(map! :leader :prefix ("v" . "varde")
       :desc "Board"           "b" #'org-varde-board
       :desc "Link a task"     "i" #'org-varde-insert-link
       :desc "New task here"   "t" #'org-varde-new-here
@@ -203,7 +205,8 @@ workspaces (`org-varde-workspaces` nil keeps one).
 - `org-varde-next-needs-you` goes, from anywhere, to the next task that
   needs you. Bind it.
 - `org-varde-board` comes back to the board, in its own workspace.
-- In `term`, `C-c` is term's escape; keys under `C-c v` still work.
+- In `term`, `C-c` is term's escape; the keys under `C-c` you bound
+  org-varde's commands to still work.
 - Under evil, a session's terminal wants insert state, as
   evil-collection sets it.
 

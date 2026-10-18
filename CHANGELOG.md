@@ -6,6 +6,16 @@ follow [Semantic Versioning](https://semver.org).
 
 ## Unreleased
 
+### Fixed
+
+- org-varde: TAB in a task's view, off a section heading, goes to the
+  next task that needs you; it had failed with a `wrong-type-argument`.
+- org-varde: `org-varde-recall` is autoloaded, as its cookie meant.
+- org-varde: in a `term`, any prefix under `C-c` that holds one of
+  org-varde's commands is kept from term's escape, not only `C-c v`.
+- The board no longer exits when a project picker is opened in a
+  terminal one or two rows tall.
+
 ## 1.4.0 - 2026-10-17
 
 ### Changed

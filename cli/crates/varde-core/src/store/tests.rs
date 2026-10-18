@@ -75,33 +75,19 @@ fn a_turn_end_records_what_it_left_running_until_work_resumes() {
     s.ingest("claude", &end(2, 1), "{}", 2, None).unwrap();
     s.ingest("claude", &ev("a", Kind::Idle), "{}", 3, None).unwrap();
     let run = latest_run(&s, "a");
+    let counts = |s: &Store| {
+        let v = view(&s.conn, &run).unwrap();
+        (v.agents, v.shells)
+    };
     assert_eq!(run_status(&s.conn, &run).unwrap(), Some(Status::Delegated));
-    assert_eq!(
-        {
-            let v = view(&s.conn, &run).unwrap();
-            (v.agents, v.shells)
-        },
-        (2, 1)
-    );
+    assert_eq!(counts(&s), (2, 1));
     // A sub-agent reports back: the session is at work, the counts stale.
     s.ingest("claude", &prompt("a", "<task-notification>"), "{}", 4, None).unwrap();
-    assert_eq!(
-        {
-            let v = view(&s.conn, &run).unwrap();
-            (v.agents, v.shells)
-        },
-        (0, 0)
-    );
+    assert_eq!(counts(&s), (0, 0));
     // A server left running holds nothing up, but is still counted.
     s.ingest("claude", &end(0, 1), "{}", 5, None).unwrap();
     assert_eq!(run_status(&s.conn, &run).unwrap(), Some(Status::Waiting));
-    assert_eq!(
-        {
-            let v = view(&s.conn, &run).unwrap();
-            (v.agents, v.shells)
-        },
-        (0, 1)
-    );
+    assert_eq!(counts(&s), (0, 1));
 }
 
 #[test]
@@ -616,23 +602,30 @@ fn a_newer_schema_is_refused() {
     assert!(err.to_string().contains("newer"));
 }
 
-#[test]
-fn a_store_from_before_naming_names_only_its_open_tasks() {
+/// A store left at schema `version` holding what `sql` inserts, then
+/// opened, which migrates it.
+fn migrated_from(version: usize, sql: &str) -> (tempfile::TempDir, Store) {
     let dir = tempfile::tempdir().unwrap();
     let path = dir.path().join("varde.db");
     let c = Connection::open(&path).unwrap();
-    for sql in &MIGRATIONS[..2] {
-        c.execute_batch(sql).unwrap();
+    for m in &MIGRATIONS[..version] {
+        c.execute_batch(m).unwrap();
     }
-    c.pragma_update(None, "user_version", 2).unwrap();
-    c.execute_batch(
+    c.pragma_update(None, "user_version", version as i64).unwrap();
+    c.execute_batch(sql).unwrap();
+    drop(c);
+    let s = Store::open(&path, Duration::from_millis(200)).unwrap();
+    (dir, s)
+}
+
+#[test]
+fn a_store_from_before_naming_names_only_its_open_tasks() {
+    let (_d, s) = migrated_from(
+        2,
         "INSERT INTO task (id, title, prompt_title, state, created) VALUES
            ('OPEN', 'fix the', 'fix the', 'open', 1), ('DONE', 'old', 'old', 'done', 1);
          INSERT INTO task (id, title, created) VALUES ('TYPED', 'Typed', 1);",
-    )
-    .unwrap();
-    drop(c);
-    let s = Store::open(&path, Duration::from_millis(200)).unwrap();
+    );
     let named = |id: &str| -> Option<i64> {
         s.conn.query_row("SELECT named FROM task WHERE id = ?1", [id], |r| r.get(0)).unwrap()
     };
@@ -641,20 +634,11 @@ fn a_store_from_before_naming_names_only_its_open_tasks() {
 
 #[test]
 fn a_store_from_before_bare_titles_indexes_them_once() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("varde.db");
-    let c = Connection::open(&path).unwrap();
-    for sql in &MIGRATIONS[..4] {
-        c.execute_batch(sql).unwrap();
-    }
-    c.pragma_update(None, "user_version", 4).unwrap();
-    c.execute_batch(
+    let (_d, s) = migrated_from(
+        4,
         "INSERT INTO task (id, title, created) VALUES ('BARE', 'Flaky websocket', 1), ('KEPT', 'Websocket', 1);
          INSERT INTO memory_fts (task, kind, ref, title) VALUES ('KEPT', 'title', '', 'Websocket');",
-    )
-    .unwrap();
-    drop(c);
-    let s = Store::open(&path, Duration::from_millis(200)).unwrap();
+    );
     let rows = |id: &str| -> i64 {
         s.conn.query_row("SELECT count(*) FROM memory_fts WHERE task = ?1", [id], |r| r.get(0)).unwrap()
     };
@@ -663,16 +647,10 @@ fn a_store_from_before_bare_titles_indexes_them_once() {
 
 #[test]
 fn a_store_from_before_taking_back_forgets_what_was_taken_back() {
-    let dir = tempfile::tempdir().unwrap();
-    let path = dir.path().join("varde.db");
-    let c = Connection::open(&path).unwrap();
-    for sql in &MIGRATIONS[..6] {
-        c.execute_batch(sql).unwrap();
-    }
-    c.pragma_update(None, "user_version", 6).unwrap();
     // Removed by the user, rewritten by the user, rewritten by an update,
     // and pushed out by the cap: only the user's are taken back.
-    c.execute_batch(
+    let (_d, s) = migrated_from(
+        6,
         "INSERT INTO cairn_item (id, project, section, pos, text, author, created, confirmed, state, reason, left_at)
          VALUES (1, '/p', 'gotchas', 0, 'removed', 'job', 1, 1, 'history', 'removed by you', 5),
                 (2, '/p', 'gotchas', 0, 'mine', 'job', 1, 1, 'history', 'edited', 6),
@@ -682,10 +660,7 @@ fn a_store_from_before_taking_back_forgets_what_was_taken_back() {
          INSERT INTO memory_fts (history, kind, ref, scope) VALUES
            ('removed', 'history', '1', '/p'), ('mine', 'history', '2', '/p'),
            ('theirs', 'history', '3', '/p'), ('capped', 'history', '4', '/p');",
-    )
-    .unwrap();
-    drop(c);
-    let s = Store::open(&path, Duration::from_millis(200)).unwrap();
+    );
     let indexed: Vec<String> = s
         .conn
         .prepare("SELECT history FROM memory_fts ORDER BY rowid")

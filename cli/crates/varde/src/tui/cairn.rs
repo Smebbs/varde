@@ -369,9 +369,7 @@ impl App<'_> {
             KeyCode::Enter if v.session().is_some() => {
                 let start = super::Start { go: true, run: v.session(), ..Default::default() };
                 // A closed task is asked about first, as RET on its row asks.
-                if let Some(r) =
-                    self.current().filter(|r| matches!(r.state.as_str(), "done" | "parked" | "dropped"))
-                {
+                if let Some(r) = self.current().filter(|r| super::is_closed(&r.state)) {
                     self.mode = super::Mode::Reopen(start, r.task.clone());
                     return Some(None);
                 }
@@ -1310,6 +1308,7 @@ mod tests {
     use varde_core::task;
 
     use super::super::draw::render;
+    use super::super::tests::{put_cairn, state};
     use super::super::{App, BUSY};
     use crate::{now_ms, Paths};
 
@@ -1324,6 +1323,13 @@ mod tests {
 
     fn typed(app: &mut App, text: &str) {
         text.chars().for_each(|c| press(app, KeyCode::Char(c)));
+    }
+
+    /// A board over `paths`, read.
+    fn board(paths: &Paths) -> App<'_> {
+        let mut app = App::new(paths, None);
+        app.refresh().unwrap();
+        app
     }
 
     fn screen(app: &mut App) -> String {
@@ -1342,8 +1348,7 @@ mod tests {
         let store = paths.open(BUSY).unwrap();
         let id = task::create(&store, "One", None, Some("/p"), None, 1).unwrap();
         if let Some(text) = text {
-            let cairn = varde_core::cairn::Cairn::from_edit(text, &Default::default());
-            varde_core::memory::put_cairn(&store.conn, &id, &cairn, 0, "user", None, now_ms()).unwrap();
+            put_cairn(&store, &id, text);
         }
         (dir, paths, id)
     }
@@ -1357,8 +1362,7 @@ mod tests {
     #[test]
     fn a_line_is_added_changed_removed_and_brought_back_in_place() {
         let (_dir, paths, id) = store(None);
-        let mut app = App::new(&paths, None);
-        app.refresh().unwrap();
+        let mut app = board(&paths);
         press(&mut app, KeyCode::Char('v'));
         let s = screen(&mut app);
         assert!(s.contains("╭ One  ") && s.contains(" Task   Project ") && s.contains("│ open · p "), "{s}");
@@ -1426,8 +1430,7 @@ mod tests {
     #[test]
     fn every_line_put_away_is_kept_and_outlives_the_board() {
         let (_dir, paths, _) = store(Some("Status: Looking.\nFindings:\n- The locale matters.\n"));
-        let mut app = App::new(&paths, None);
-        app.refresh().unwrap();
+        let mut app = board(&paths);
         press(&mut app, KeyCode::Char('v'));
         press(&mut app, KeyCode::Char('e'));
         typed(&mut app, " a lot");
@@ -1451,8 +1454,7 @@ mod tests {
         assert!(bottom(&mut app).contains("The locale matters. a lot"));
         // Quit while typing: both wait for the next board.
         app.put_draft();
-        let mut again = App::new(&paths, None);
-        again.refresh().unwrap();
+        let mut again = board(&paths);
         again.take_draft();
         assert!(
             again.message.starts_with("2 cairn lines you typed are kept, for \"One\" (Decisions, line #"),
@@ -1478,8 +1480,7 @@ mod tests {
             (c.status, c.status_mine)
         };
         assert_eq!(mine(), ("Looking.".into(), true));
-        let mut app = App::new(&paths, None);
-        app.refresh().unwrap();
+        let mut app = board(&paths);
         press(&mut app, KeyCode::Char('v'));
         press(&mut app, KeyCode::Char('g'));
         press(&mut app, KeyCode::Char('g'));
@@ -1521,8 +1522,7 @@ mod tests {
                 [(0..30).map(|i| format!("line {i}\n")).collect::<String>()],
             )
             .unwrap();
-        let mut app = App::new(&paths, None);
-        app.refresh().unwrap();
+        let mut app = board(&paths);
         press(&mut app, KeyCode::Char('G'));
         press(&mut app, KeyCode::Char('k'));
         press(&mut app, KeyCode::Char('v'));
@@ -1547,9 +1547,7 @@ mod tests {
     #[test]
     fn two_boards_drafts_are_merged_not_written_over() {
         let (_dir, paths, _) = store(Some("Status: Looking.\n"));
-        let (mut one, mut two) = (App::new(&paths, None), App::new(&paths, None));
-        one.refresh().unwrap();
-        two.refresh().unwrap();
+        let (mut one, mut two) = (board(&paths), board(&paths));
         press(&mut one, KeyCode::Char('v'));
         press(&mut one, KeyCode::Char('e'));
         typed(&mut one, " Still.");
@@ -1557,8 +1555,7 @@ mod tests {
         typed(&mut two, "A new one");
         two.put_draft();
         one.put_draft();
-        let mut three = App::new(&paths, None);
-        three.refresh().unwrap();
+        let mut three = board(&paths);
         three.take_draft();
         assert!(three.message.contains("new task is kept") && three.message.contains("cairn line"));
     }
@@ -1566,8 +1563,7 @@ mod tests {
     #[test]
     fn a_change_to_a_line_gone_is_a_line_to_add() {
         let (_dir, paths, id) = store(Some("Status: s\nFindings:\n- First.\n- Second.\n"));
-        let mut app = App::new(&paths, None);
-        app.refresh().unwrap();
+        let mut app = board(&paths);
         press(&mut app, KeyCode::Char('v'));
         press(&mut app, KeyCode::Char('e'));
         typed(&mut app, " More.");
@@ -1587,8 +1583,7 @@ mod tests {
         let change = varde_core::memory::Change::Remove(second);
         let owner = varde_core::memory::Owner::Task(&id);
         varde_core::memory::change(&mut paths.open(BUSY).unwrap(), owner, change, now_ms()).unwrap();
-        let mut again = App::new(&paths, None);
-        again.refresh().unwrap();
+        let mut again = board(&paths);
         again.take_draft();
         press(&mut again, KeyCode::Char('v'));
         // Two lines to add to Findings now: one after the other.
@@ -1605,8 +1600,7 @@ mod tests {
         let full = (1..=7).map(|i| format!("- Finding number {i}.\n")).collect::<String>();
         let (_dir, paths, first) = store(Some(&format!("Status: s\nFindings:\n{full}")));
         task::create(&paths.open(BUSY).unwrap(), "Two", None, Some("/p"), None, 2).unwrap();
-        let mut app = App::new(&paths, None);
-        app.refresh().unwrap();
+        let mut app = board(&paths);
         press(&mut app, KeyCode::Char('G'));
         assert_eq!(app.current_id().as_deref(), Some(first.as_str()));
         press(&mut app, KeyCode::Char('v'));
@@ -1642,12 +1636,8 @@ mod tests {
         app.marked = vec![two];
         assert!(app.view_footer(80).starts_with(&[("1".into(), "marked")]));
         press(&mut app, KeyCode::Char('d'));
-        let state = |id: &str| -> String {
-            let s = paths.open(BUSY).unwrap();
-            s.conn.query_row("SELECT state FROM task WHERE id = ?1", [id], |r| r.get(0)).unwrap()
-        };
-        assert_eq!(state(&first), "done");
-        assert_eq!(state(&app.marked[0]), "open", "marks are the board's");
+        assert_eq!(state(&paths, &first), "done");
+        assert_eq!(state(&paths, &app.marked[0]), "open", "marks are the board's");
         assert!(app.detail, "the view stays");
         assert_eq!(app.current().unwrap().title, "Two", "on the task still open");
         press(&mut app, KeyCode::Esc);
@@ -1659,8 +1649,7 @@ mod tests {
     #[test]
     fn an_empty_cairn_is_its_hint_and_headings_and_e_on_one_adds() {
         let (_dir, paths, _) = store(None);
-        let mut app = App::new(&paths, None);
-        app.refresh().unwrap();
+        let mut app = board(&paths);
         press(&mut app, KeyCode::Char('v'));
         let s = screen(&mut app);
         assert!(s.contains("No cairn yet") && !s.contains("Status") && !s.contains("none yet"), "{s}");
@@ -1695,8 +1684,7 @@ mod tests {
                 )
                 .unwrap();
         }
-        let mut app = App::new(&paths, None);
-        app.refresh().unwrap();
+        let mut app = board(&paths);
         press(&mut app, KeyCode::Char('v'));
         let s = screen(&mut app);
         assert!(s.contains("↓ C-d more ╯") && !s.contains("line 39"), "{s}");
@@ -1716,8 +1704,7 @@ mod tests {
         let store = paths.open(BUSY).unwrap();
         let later = task::create(&store, "Later", None, Some("/p"), None, 2).unwrap();
         store.conn.execute("UPDATE task SET state = 'parked' WHERE id = ?1", [&later]).unwrap();
-        let mut app = App::new(&paths, None);
-        app.refresh().unwrap();
+        let mut app = board(&paths);
         press(&mut app, KeyCode::Char('v'));
         press(&mut app, KeyCode::Char('J'));
         assert_eq!(app.current_id().as_deref(), Some(later.as_str()), "into Parked, opened");
@@ -1730,8 +1717,7 @@ mod tests {
     #[test]
     fn u_in_the_view_reopens_a_task_closed_there_once_its_lines_are_back() {
         let (_dir, paths, id) = store(Some("Status: Looking.\nFindings:\n- The locale matters.\n"));
-        let mut app = App::new(&paths, None);
-        app.refresh().unwrap();
+        let mut app = board(&paths);
         press(&mut app, KeyCode::Char('v'));
         for _ in 0..5 {
             screen(&mut app);
@@ -1748,14 +1734,7 @@ mod tests {
         assert!(app.view_footer(80).contains(&("u".into(), "reopen")));
         press(&mut app, KeyCode::Char('u'));
         assert!(app.message.starts_with("reopened"), "{}", app.message);
-        let state = |paths: &Paths| {
-            let store = paths.open(BUSY).unwrap();
-            store
-                .conn
-                .query_row("SELECT state FROM task WHERE id = ?1", [&id], |r| r.get::<_, String>(0))
-                .unwrap()
-        };
-        assert_eq!(state(&paths), "open");
+        assert_eq!(state(&paths, &id), "open");
         assert!(app.detail && app.current_id().as_deref() == Some(id.as_str()));
         press(&mut app, KeyCode::Char('u'));
         assert_eq!(app.message, "nothing here to undo");

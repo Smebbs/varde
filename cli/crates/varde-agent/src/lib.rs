@@ -5,7 +5,7 @@
 use std::path::Path;
 
 use serde_json::Value;
-use varde_core::event::Norm;
+use varde_core::event::{Kind, Norm};
 
 mod claude;
 mod pi;
@@ -138,6 +138,19 @@ pub struct Answer {
     /// Everything the model read, cached or not.
     pub input_tokens: Option<i64>,
     pub output_tokens: Option<i64>,
+}
+
+/// A hook's payload as an event of `kind`, its transcript under the key
+/// `transcript`. `None` without a session id.
+fn norm(p: &Value, kind: Kind, transcript: &str) -> Option<Norm> {
+    let s = |k: &str| p.get(k).and_then(Value::as_str);
+    Some(Norm {
+        native_id: s("session_id").filter(|id| !id.is_empty())?.to_string(),
+        kind,
+        cwd: s("cwd").map(Into::into),
+        transcript: s(transcript).map(Into::into),
+        prompt: s("prompt").map(Into::into),
+    })
 }
 
 /// The text of a message's `content`: a string, or its text blocks.

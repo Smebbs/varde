@@ -120,11 +120,15 @@ pub fn path() -> PathBuf {
     if let Some(p) = std::env::var_os("VARDE_CONFIG").filter(|p| !p.is_empty()) {
         return PathBuf::from(p);
     }
-    let base = std::env::var_os("XDG_CONFIG_HOME")
+    home().join("varde/config.toml")
+}
+
+/// `$XDG_CONFIG_HOME`, else `~/.config`.
+pub fn home() -> PathBuf {
+    std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .filter(|p| p.is_absolute())
-        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config"));
-    base.join("varde/config.toml")
+        .unwrap_or_else(|| PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(".config"))
 }
 
 /// Reads the file; a missing one is the defaults.
@@ -132,23 +136,8 @@ pub fn load(path: &Path) -> Result<Config> {
     match std::fs::read_to_string(path) {
         Ok(text) => {
             let c: Config = toml::from_str(&text).with_context(|| format!("reading {}", path.display()))?;
-            if let Some((name, _)) =
-                c.agents.iter().find(|(_, a)| a.command.as_ref().is_some_and(Vec::is_empty))
-            {
-                anyhow::bail!(
-                    "reading {}: agents.{name}.command is empty: name the program, or leave the key out",
-                    path.display()
-                );
-            }
-            if let Err(e) = crate::tui::check_keys(&c.keys) {
+            if let Err(e) = check(&c) {
                 anyhow::bail!("reading {}: {e}", path.display());
-            }
-            if !(0.0..=1.0).contains(&c.memory.holdout) {
-                anyhow::bail!(
-                    "reading {}: memory.holdout is a share of sessions, from 0 to 1, not {}",
-                    path.display(),
-                    c.memory.holdout
-                );
             }
             Ok(c)
         }
@@ -179,15 +168,19 @@ pub fn warning() -> Option<&'static str> {
 
 fn loaded() -> &'static (Config, Option<String>) {
     static CONFIG: OnceLock<(Config, Option<String>)> = OnceLock::new();
-    CONFIG.get_or_init(|| match load(&path()) {
-        Ok(c) => (c, None),
-        Err(e) => {
-            let warning = format!("ignoring what varde cannot use in the config: {e:#}");
-            if !QUIET.load(std::sync::atomic::Ordering::Relaxed) {
-                eprintln!("varde: {warning}");
+    CONFIG.get_or_init(|| {
+        // Unit tests run with the defaults, never the user's own file.
+        let file = if cfg!(test) { PathBuf::new() } else { path() };
+        match load(&file) {
+            Ok(c) => (c, None),
+            Err(e) => {
+                let warning = format!("ignoring what varde cannot use in the config: {e:#}");
+                if !QUIET.load(std::sync::atomic::Ordering::Relaxed) {
+                    eprintln!("varde: {warning}");
+                }
+                let text = std::fs::read_to_string(&file).unwrap_or_default();
+                (lenient(&text), Some(warning))
             }
-            let text = std::fs::read_to_string(path()).unwrap_or_default();
-            (lenient(&text), Some(warning))
         }
     })
 }
@@ -200,7 +193,8 @@ fn loaded() -> &'static (Config, Option<String>) {
 fn lenient(text: &str) -> Config {
     use serde::de::IntoDeserializer;
     let ok = |t: &toml::Table| -> bool {
-        Config::deserialize(toml::Value::Table(t.clone()).into_deserializer()).is_ok_and(|c| valid(&c))
+        Config::deserialize(toml::Value::Table(t.clone()).into_deserializer())
+            .is_ok_and(|c| check(&c).is_ok())
     };
     let Ok(file) = text.parse::<toml::Table>() else {
         let off = text.lines().any(|l| l.split('#').next().unwrap_or("").replace(' ', "") == "enabled=false");
@@ -236,11 +230,16 @@ fn lenient(text: &str) -> Config {
     Config::deserialize(toml::Value::Table(good).into_deserializer()).unwrap_or_default()
 }
 
-/// Whether `c` holds only values varde can use, as `load` checks them.
-fn valid(c: &Config) -> bool {
-    !c.agents.values().any(|a| a.command.as_ref().is_some_and(Vec::is_empty))
-        && (0.0..=1.0).contains(&c.memory.holdout)
-        && crate::tui::check_keys(&c.keys).is_ok()
+/// The first value in `c` varde cannot use.
+fn check(c: &Config) -> std::result::Result<(), String> {
+    if let Some((name, _)) = c.agents.iter().find(|(_, a)| a.command.as_ref().is_some_and(Vec::is_empty)) {
+        return Err(format!("agents.{name}.command is empty: name the program, or leave the key out"));
+    }
+    crate::tui::check_keys(&c.keys)?;
+    if !(0.0..=1.0).contains(&c.memory.holdout) {
+        return Err(format!("memory.holdout is a share of sessions, from 0 to 1, not {}", c.memory.holdout));
+    }
+    Ok(())
 }
 
 impl Config {

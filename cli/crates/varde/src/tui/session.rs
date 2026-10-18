@@ -9,7 +9,7 @@ use varde_core::board::{Board, Row};
 use varde_core::store::Store;
 use varde_core::task;
 
-use super::{App, Asked, Away, Mode, Pick, Start, BUSY, OPEN_GROUPS};
+use super::{is_closed, App, Asked, Away, Mode, Pick, Start, BUSY, OPEN_GROUPS};
 use crate::{now_ms, run, start, tmux};
 
 impl App<'_> {
@@ -31,7 +31,7 @@ impl App<'_> {
         for p in
             panes.iter().filter(|p| p.owned && p.home == home && !open.contains(p.task.as_str()) && p.idle())
         {
-            if state_of(store, &p.task).is_some_and(|s| matches!(s.as_str(), "done" | "parked" | "dropped")) {
+            if state_of(store, &p.task).is_some_and(|s| is_closed(&s)) {
                 let _ = t.kill(&p.id);
             }
         }
@@ -154,12 +154,7 @@ impl App<'_> {
             None | Some(start::Outcome::Ask(_)) => None,
             Some(start::Outcome::Focus { run, .. }) => {
                 let tty = start::tty_of(&store, &run)?;
-                self.message = format!(
-                    "{} is already running {}; {} forks it",
-                    task::short(id),
-                    where_runs(id, tty.as_deref()),
-                    self.keys.label(super::keys::Act::Fork)
-                );
+                self.message = self.running_elsewhere(id, tty.as_deref());
                 None
             }
             Some(start::Outcome::Ready { run, notices, .. }) => {
@@ -200,12 +195,7 @@ impl App<'_> {
                     self.quit |= self.popup;
                     String::new()
                 } else {
-                    format!(
-                        "{} is already running {}; {} forks it",
-                        task::short(id),
-                        where_runs(id, tty.as_deref()),
-                        self.keys.label(super::keys::Act::Fork)
-                    )
+                    self.running_elsewhere(id, tty.as_deref())
                 })
             }
             Some(start::Outcome::Ready { run, cwd, mut notices }) => {
@@ -219,6 +209,13 @@ impl App<'_> {
                 Ok(notices.join("; "))
             }
         }
+    }
+
+    /// That `id` already runs where the board cannot go to it, and how to
+    /// have another session of it.
+    fn running_elsewhere(&self, id: &str, tty: Option<&str>) -> String {
+        let fork = self.keys.label(super::keys::Act::Fork);
+        format!("{} is already running {}; {fork} forks it", task::short(id), where_runs(id, tty))
     }
 
     /// The store, as the windows the board opens are tagged with it.
@@ -278,7 +275,7 @@ fn where_runs(task: &str, tty: Option<&str>) -> String {
     }
 }
 
-fn state_of(store: &Store, task: &str) -> Option<String> {
+pub(super) fn state_of(store: &Store, task: &str) -> Option<String> {
     store.conn.query_row("SELECT state FROM task WHERE id = ?1", [task], |r| r.get(0)).ok()
 }
 

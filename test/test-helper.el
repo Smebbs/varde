@@ -13,7 +13,6 @@
 (require 'org)
 
 (defvar org-varde--timer)
-(defvar org-varde--listing)
 (defvar org-varde--agent)
 (defvar org-varde-board-data)
 (defvar org-varde--too-new)

@@ -23,7 +23,7 @@ const MODEL_TIMEOUT: Duration = Duration::from_secs(180);
 /// Not while cairn updates are off: a hook never reads the config, so
 /// what it says is left in a file beside the store (`sync_memory`).
 pub fn maybe_fold(paths: &Paths, store: &Store, run: &str, kind: &str, now: i64) -> Result<()> {
-    if !memory::fold_due(&store.conn, run, kind, now)? || paths.home.join(MEMORY_OFF).exists() {
+    if !memory::fold_due(&store.conn, run, kind, now)? || !updates_on(paths) {
         return Ok(());
     }
     let transcript: Option<String> =
@@ -142,10 +142,6 @@ fn hygienic_all<'a>(texts: impl IntoIterator<Item = &'a str>) -> Vec<String> {
     texts.into_iter().map(|t| hygienic(t).trim().to_string()).filter(|t| !t.is_empty()).collect()
 }
 
-fn agent_of(input: &JobInput) -> Result<Box<dyn varde_agent::Agent>> {
-    varde_agent::by_name(&input.agent).with_context(|| format!("unknown agent {}", input.agent))
-}
-
 /// Asks the model about `material`, with what `extra` adds. Each call can
 /// take minutes: the job says it is alive before each, so it is not taken
 /// for dead and started twice.
@@ -166,7 +162,8 @@ fn asker<'a>(
 }
 
 fn fold(paths: &Paths, store: &mut Store, job: &str, input: &JobInput) -> Result<bool> {
-    let agent = agent_of(input)?;
+    let agent =
+        varde_agent::by_name(&input.agent).with_context(|| format!("unknown agent {}", input.agent))?;
     let before = input.cairn.as_ref().map(|(c, _)| c.clone()).unwrap_or_default();
     let closing = input.kind == "close" && input.state != "open";
     let transcript = input.transcript.as_deref().map(Path::new);

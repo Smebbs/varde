@@ -455,12 +455,9 @@ pub fn detail(store: &Store, id: &str, alive: &dyn Fn(i64, i64) -> bool) -> Resu
     }
     // A run prepared and never launched, as by a client that only asked,
     // says nothing once a later one exists. It is kept in the store.
-    let last = d.runs.len().saturating_sub(1);
-    let mut i = 0;
-    d.runs.retain(|r| {
-        i += 1;
-        r.launched || i - 1 == last
-    });
+    let newest = d.runs.pop();
+    d.runs.retain(|r| r.launched);
+    d.runs.extend(newest);
     d.worktree = store
         .conn
         .query_row(
@@ -512,7 +509,7 @@ fn conversations(runs: &[RunDetail]) -> Vec<Conversation> {
             c.status = Some(s);
         }
         c.unread |= r.unread;
-        c.quiet |= r.background && r.done.is_some();
+        c.quiet |= r.background && done;
         c.launched |= r.launched;
         if c.run != r.id {
             c.continued = Some((r.started, r.relation.clone()));
@@ -526,6 +523,10 @@ fn conversations(runs: &[RunDetail]) -> Vec<Conversation> {
 mod tests {
     use super::*;
     use crate::store::temp as store;
+
+    fn get(s: &Store, id: &str) -> Detail {
+        detail(s, id, &|_, _| true).unwrap()
+    }
 
     #[test]
     fn its_runs_are_listed_as_conversations_newest_first() {
@@ -561,7 +562,7 @@ mod tests {
                 .unwrap();
         }
         s.conn.execute("UPDATE run SET done = 51 WHERE id = 'R5'", []).unwrap();
-        let d = detail(&s, &id, &|_, _| true).unwrap();
+        let d = get(&s, &id);
         let got: Vec<_> =
             d.conversations.iter().map(|c| (c.run.as_str(), c.status, c.unread, c.quiet)).collect();
         assert_eq!(
@@ -620,16 +621,15 @@ mod tests {
                 [],
             )
             .unwrap();
-        let get = |id| detail(&s, id, &|_, _| true).unwrap();
         accept(&s, "T1XXXXXX").unwrap();
-        assert!(!get("T1XXXXXX").inbox);
-        assert_eq!(get("T1XXXXXX").external, None);
+        assert!(!get(&s, "T1XXXXXX").inbox);
+        assert_eq!(get(&s, "T1XXXXXX").external, None);
         link(&s, "T2XXXXXX", "org").unwrap();
-        assert!(!get("T2XXXXXX").inbox);
-        assert_eq!(get("T2XXXXXX").external.as_deref(), Some("org"));
+        assert!(!get(&s, "T2XXXXXX").inbox);
+        assert_eq!(get(&s, "T2XXXXXX").external.as_deref(), Some("org"));
         assert!(link(&s, "T2XXXXXX", " ").is_err());
         unlink(&s, "T2XXXXXX").unwrap();
-        let d = get("T2XXXXXX");
+        let d = get(&s, "T2XXXXXX");
         assert_eq!((d.inbox, d.external), (false, None));
     }
 
@@ -643,32 +643,31 @@ mod tests {
                 [],
             )
             .unwrap();
-        let get = |id| detail(&s, id, &|_, _| true).unwrap();
         let mine = create(&s, "Typed by you", None, None, None, 1).unwrap();
         assert!(!name(&s, &mine, "Renamed").unwrap());
-        assert_eq!(get(&mine).title, "Typed by you");
+        assert_eq!(get(&s, &mine).title, "Typed by you");
         // Named once, and the first prompt's words are kept.
         assert!(name(&s, "T1XXXXXX", "Fix the login").unwrap());
         assert!(!name(&s, "T1XXXXXX", "Again").unwrap());
-        let d = get("T1XXXXXX");
+        let d = get(&s, "T1XXXXXX");
         assert_eq!((d.title.as_str(), d.prompt_title.as_deref()), ("Fix the login", Some("fix the")));
         // A title you set, or a link, wins.
         set(&s, "T2XXXXXX", Some("Yours"), None).unwrap();
         assert!(!name(&s, "T2XXXXXX", "Renamed").unwrap());
-        assert_eq!(get("T2XXXXXX").prompt_title, None);
+        assert_eq!(get(&s, "T2XXXXXX").prompt_title, None);
         link(&s, "T3XXXXXX", "org").unwrap();
         assert!(!name(&s, "T3XXXXXX", "Renamed").unwrap());
         // Saving the same words is not setting a title.
         set(&s, "T1XXXXXX", Some("Fix the login"), None).unwrap();
-        assert_eq!(get("T1XXXXXX").prompt_title.as_deref(), Some("fix the"));
-        assert_eq!(get("T3XXXXXX").prompt_title, None, "shown only once named");
+        assert_eq!(get(&s, "T1XXXXXX").prompt_title.as_deref(), Some("fix the"));
+        assert_eq!(get(&s, "T3XXXXXX").prompt_title, None, "shown only once named");
     }
 
     #[test]
     fn a_task_made_on_purpose_is_never_in_the_inbox() {
         let (_d, s) = store();
         let id = create(&s, "Fix it", None, None, None, 1).unwrap();
-        assert!(!detail(&s, &id, &|_, _| true).unwrap().inbox);
+        assert!(!get(&s, &id).inbox);
     }
 
     #[test]
@@ -683,13 +682,13 @@ mod tests {
             )
             .unwrap();
         let id = defer(&s, "Later bit", Some("why"), "R1", None, 2).unwrap();
-        let d = detail(&s, &id, &|_, _| true).unwrap();
+        let d = get(&s, &id);
         assert!(d.inbox);
         assert_eq!(d.origin.as_deref(), Some(origin.as_str()));
         assert_eq!((d.project.as_deref(), d.external), (Some("/p"), None));
         assert!(defer(&s, "x", None, "nope", None, 3).is_err());
         let other = defer(&s, "Elsewhere", None, "R1", Some("/q"), 4).unwrap();
-        let d = detail(&s, &other, &|_, _| true).unwrap();
+        let d = get(&s, &other);
         assert_eq!((d.project.as_deref(), d.origin.as_deref()), (Some("/q"), Some(origin.as_str())));
     }
 
@@ -698,7 +697,7 @@ mod tests {
         let (_d, s) = store();
         let id = create(&s, "Old", Some("old body"), None, None, 1).unwrap();
         set(&s, &id, Some("New"), Some("  ")).unwrap();
-        let d = detail(&s, &id, &|_, _| true).unwrap();
+        let d = get(&s, &id);
         assert_eq!((d.title.as_str(), d.body), ("New", None));
         assert!(set(&s, &id, Some(" "), None).is_err());
     }
@@ -716,13 +715,13 @@ mod tests {
         let (_d, s) = store();
         let body = "\nhey so the login page is in english for everyone\nmore";
         let id = create(&s, " ", Some(body), None, None, 1).unwrap();
-        let d = detail(&s, &id, &|_, _| true).unwrap();
+        let d = get(&s, &id);
         assert_eq!(
             (d.title.as_str(), d.body.as_deref()),
             ("hey so the login page is in english…", Some(body))
         );
         assert!(name(&s, &id, "Login page shown in English").unwrap());
-        assert_eq!(detail(&s, &id, &|_, _| true).unwrap().prompt_title.as_deref(), Some(d.title.as_str()));
+        assert_eq!(get(&s, &id).prompt_title.as_deref(), Some(d.title.as_str()));
         assert!(!name(&s, &id, "Again").unwrap());
         // A title typed, even beside a context, is yours.
         let typed = create(&s, "Fix it", Some("the login page"), None, None, 1).unwrap();
@@ -775,21 +774,21 @@ mod tests {
         let id = create(&s, "Typed by hand", None, None, None, 1).unwrap();
         let changed = set(&s, &id, Some(" "), Some("the cart total rounds the wrong way")).unwrap();
         assert!(changed.title && changed.body);
-        let d = detail(&s, &id, &|_, _| true).unwrap();
+        let d = get(&s, &id);
         assert_eq!(d.title, "the cart total rounds the wrong way");
         assert!(name(&s, &id, "Cart total rounding").unwrap(), "nameable again");
         // With neither, nothing is saved.
         let bare = create(&s, "Bare", None, None, None, 1).unwrap();
         assert!(set(&s, &bare, Some(""), Some(" ")).is_err());
-        assert_eq!(detail(&s, &bare, &|_, _| true).unwrap().title, "Bare");
+        assert_eq!(get(&s, &bare).title, "Bare");
     }
 
     #[test]
     fn a_title_never_carries_control_characters() {
         let (_d, s) = store();
         let id = create(&s, "\x1b]0;PWNED\x07Fix\tit\n", None, None, None, 1).unwrap();
-        assert_eq!(detail(&s, &id, &|_, _| true).unwrap().title, "]0;PWNEDFix it");
+        assert_eq!(get(&s, &id).title, "]0;PWNEDFix it");
         set(&s, &id, Some("New\x1b[2J"), None).unwrap();
-        assert_eq!(detail(&s, &id, &|_, _| true).unwrap().title, "New[2J");
+        assert_eq!(get(&s, &id).title, "New[2J");
     }
 }

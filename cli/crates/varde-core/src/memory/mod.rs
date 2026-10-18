@@ -576,21 +576,16 @@ pub struct Saw {
     pub held: bool,
 }
 
-/// What the conversation `run` belongs to has been shown of `task`'s
-/// cairn and its project's cairn: by this run, or by the runs it carries
+/// The runs of the conversation `run` belongs to, newest first, and
+/// whether each was held out of memory: this run and the runs it carries
 /// on, through resumes and forks back to its fresh start, or its last 32,
 /// which keeps a hook's cost flat however often a conversation goes on.
-pub fn conversation_saw(conn: &Connection, run: &str, task: &str) -> Result<Saw> {
-    // Walked a run at a time: two indexed lookups each, where one
-    // recursive query cost a hook half a millisecond to plan.
+fn conversation(conn: &Connection, run: &str) -> Result<Vec<(String, bool)>> {
+    // Walked a run at a time: an indexed lookup each, where one recursive
+    // query cost a hook half a millisecond to plan.
     let mut step =
         conn.prepare_cached("SELECT parent_run, relation, coalesce(holdout, 0) FROM run WHERE id = ?1")?;
-    let mut saw = conn.prepare_cached(
-        "SELECT max(CASE WHEN kind = 'cairn' AND task = ?2 THEN version END),
-                max(CASE WHEN kind = 'project' THEN version END)
-         FROM shown WHERE run = ?1 AND kind IN ('cairn', 'project')",
-    )?;
-    let mut out = Saw::default();
+    let mut out = Vec::new();
     let mut at = run.to_string();
     for _ in 0..32 {
         let Some((parent, relation, holdout)) = step
@@ -601,15 +596,30 @@ pub fn conversation_saw(conn: &Connection, run: &str, task: &str) -> Result<Saw>
         else {
             break;
         };
+        out.push((at, holdout));
+        match parent {
+            Some(p) if matches!(relation.as_str(), "resume" | "fork") => at = p,
+            _ => break,
+        }
+    }
+    Ok(out)
+}
+
+/// What the conversation `run` belongs to has been shown of `task`'s
+/// cairn and its project's cairn, as `conversation` walks it.
+pub fn conversation_saw(conn: &Connection, run: &str, task: &str) -> Result<Saw> {
+    let mut saw = conn.prepare_cached(
+        "SELECT max(CASE WHEN kind = 'cairn' AND task = ?2 THEN version END),
+                max(CASE WHEN kind = 'project' THEN version END)
+         FROM shown WHERE run = ?1 AND kind IN ('cairn', 'project')",
+    )?;
+    let mut out = Saw::default();
+    for (at, holdout) in conversation(conn, run)? {
         out.held |= holdout;
         let (c, p): (Option<i64>, Option<i64>) =
             saw.query_row(params![at, task], |r| Ok((r.get(0)?, r.get(1)?)))?;
         out.cairn = out.cairn.max(c);
         out.project = out.project.max(p);
-        match parent {
-            Some(p) if matches!(relation.as_str(), "resume" | "fork") => at = p,
-            _ => break,
-        }
     }
     Ok(out)
 }
@@ -625,28 +635,16 @@ pub fn fold_pending(conn: &Connection, run: &str) -> Result<bool> {
 }
 
 /// The text of every bullet and note the conversation `run` belongs to
-/// was shown, through resumes and forks as `conversation_saw` walks them:
-/// what an update can tell it re-discovered.
+/// was shown, as `conversation` walks it: what an update can tell it
+/// re-discovered.
 pub fn conversation_shown(conn: &Connection, run: &str) -> Result<Vec<String>> {
-    let mut step = conn.prepare_cached("SELECT parent_run, relation FROM run WHERE id = ?1")?;
     let mut items = conn.prepare_cached(
         "SELECT items FROM shown WHERE run = ?1 AND kind IN ('cairn', 'project', 'related', 'origin')",
     )?;
     let mut ids: Vec<String> = Vec::new();
-    let mut at = run.to_string();
-    for _ in 0..32 {
-        let Some((parent, relation)) = step
-            .query_row([&at], |r| Ok((r.get::<_, Option<String>>(0)?, r.get::<_, String>(1)?)))
-            .optional()?
-        else {
-            break;
-        };
+    for (at, _) in conversation(conn, run)? {
         for list in items.query_map([&at], |r| r.get::<_, String>(0))? {
             ids.extend(serde_json::from_str::<Vec<String>>(&list?).unwrap_or_default());
-        }
-        match parent {
-            Some(p) if matches!(relation.as_str(), "resume" | "fork") => at = p,
-            _ => break,
         }
     }
     ids.sort();

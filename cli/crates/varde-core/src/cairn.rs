@@ -754,23 +754,21 @@ fn grows_past(c: &Cairn, old: &str, new: &str, max: usize) -> bool {
     count(new) > count(old) && c.words() - count(old) + count(new) > max
 }
 
+/// A bullet's words, lower case, without punctuation.
+fn words(text: &str) -> Vec<String> {
+    text.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect()
+}
+
 /// A bullet's words alone: lower case, without punctuation, one space
 /// between them.
 pub fn normalized(text: &str) -> String {
-    text.split(|c: char| !c.is_alphanumeric())
-        .filter(|w| !w.is_empty())
-        .map(str::to_lowercase)
-        .collect::<Vec<_>>()
-        .join(" ")
+    words(text).join(" ")
 }
 
 /// Whether two bullets say the same thing: most of their words, in the
 /// same order, are the same, and they deny the same things. "15, not 14"
 /// and "14, not 15" share every word, and "done" and "not done" most.
 pub fn similar(a: &str, b: &str) -> bool {
-    let words = |s: &str| -> Vec<String> {
-        s.split(|c: char| !c.is_alphanumeric()).filter(|w| !w.is_empty()).map(str::to_lowercase).collect()
-    };
     let (a, b) = (words(a), words(b));
     // "isn't" splits into "isn" and "t".
     let negations = |w: &[String]| {
@@ -2127,12 +2125,12 @@ mod tests {
         for t in [
             "Proposed order: eval baseline, then prompt fixes with before/after",
             "Dev/staging scope: whether those environments are moving remains unresolved.",
-            "Use group membership: it grants related Azure/AKS access",
-            "About 2 calls/min reach the gateway, 40 NOK/day",
+            "Use group membership: it grants related CI/CD access",
+            "About 2 calls/min reach the gateway, 40 EUR/day",
             "The user prefers and/or in lists; Microsoft/OpenAI both",
-            "Rebase onto origin/main before pushing feat/492-soniox-staging",
-            "Health checks use /status/ping and /v1/transcriptions",
-            "Pin @lingui/cli@6.6.0 and @fastify/proxy-addr",
+            "Rebase onto origin/main before pushing feat/492-billing-staging",
+            "Health checks use /status/ping and /v1/orders",
+            "Pin @scope/cli@6.6.0 and @scope/proxy-addr",
             "The backup is /tmp/varde-backup-before-repair.db",
         ] {
             assert_eq!(anchor(t), None, "{t}");
@@ -2151,8 +2149,8 @@ mod tests {
         assert_eq!(a("Tests are under tests/ and docs/.").as_deref(), Some("tests/"));
         assert_eq!(a("Generated into src/generated").as_deref(), Some("src/generated"));
         assert_eq!(
-            a("Build ki-gitops/environments/clusters.yaml first").as_deref(),
-            Some("ki-gitops/environments/clusters.yaml")
+            a("Build infra-gitops/environments/clusters.yaml first").as_deref(),
+            Some("infra-gitops/environments/clusters.yaml")
         );
         // In backticks, a name is taken as written.
         assert_eq!(a("Rebase onto `origin/main`").as_deref(), Some("origin/main"));

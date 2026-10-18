@@ -8,12 +8,6 @@
 
 (defconst org-varde-test--id "01K5ZZZZZZZZZZZZZZZZXYZ123")
 
-(defconst org-varde-test--proj
-  (let ((dir (expand-file-name "proj" (default-value 'org-directory))))
-    (make-directory dir t)
-    dir)
-  "A project directory that exists.")
-
 (defconst org-varde-test--shown
   (concat "{\"v\":2,\"id\":\"" org-varde-test--id "\",\"short\":\"xyz123\","
           "\"title\":\"Fix the login bug\",\"project\":\"/p/app\",\"state\":\"open\","
@@ -32,13 +26,13 @@
   (org-varde-test-with-varde
     (org-varde-test--run-plan)
     (save-window-excursion
-      (org-varde-start-task org-varde-test--id "t")
+      (org-varde-go-task org-varde-test--id "t")
       (org-varde-test-wait)
       (should (equal org-varde-test-terminals '(("/tmp/proj" "*varde xyz123*"))))
       (should (equal org-varde-test-sent '("varde run R1")))
       (should (equal (buffer-local-value 'org-varde--task (get-buffer "*varde xyz123*"))
                      org-varde-test--id))
-      ;; It goes there, unless it starts in the background.
+      ;; It goes there.
       (should (eq (window-buffer) (get-buffer "*varde xyz123*")))
       ;; C-u is a fresh conversation, C-u C-u a fork.
       (org-varde-start-task org-varde-test--id "t" '(4))
@@ -189,46 +183,47 @@
 ;; The board's RET on a region: the worktree answer holds for every task
 ;; in it, and a task's project question offers the one before's answer.
 (ert-deftest org-varde-a-region-is-asked-about-worktrees-once ()
-  (let (calls prompts defaults (worktree-asked 0))
-    (cl-letf (((symbol-function 'org-varde--varde-async)
-               (lambda (args callback &rest _)
-                 (push args calls)
-                 (funcall callback
-                          (cond ((not (member "--project" args))
-                                 "{\"v\":1,\"action\":\"ask\",\"ask\":\"project\",\"choices\":[\"/p/a\"]}")
-                                ((not (member "--worktree" args)) "{\"v\":1,\"action\":\"ask\",\"ask\":\"worktree\"}")
-                                (t "{\"v\":1,\"action\":\"run\"}")))))
-              ((symbol-function 'completing-read)
-               (lambda (prompt collection &rest _)
-                 (push prompt prompts)
-                 (funcall (org-varde-test-pick (and (= (length prompts) 1) "/p/b/")) prompt collection)
-                 (push (car org-varde-test-offered) defaults)
-                 (if (= (length prompts) 1) "/p/b/" (car (all-completions "" collection)))))
-              ((symbol-function 'y-or-n-p) (lambda (&rest _) (setq worktree-asked (1+ worktree-asked)))))
-      (let ((org-varde--background t)
-            (org-varde--answers (list :region t)))
-        ;; As the board does: each starts once the one before is planned.
-        (org-varde--plan-answering '("start" "T1" "--json") "One"
-                                   (lambda (_) (org-varde--plan-answering '("start" "T2" "--json") "Two"
-                                                                          #'ignore #'ignore))
-                                   #'ignore))
-      (should (= worktree-asked 1))
-      (should (equal (nreverse prompts) '("Project for One (default a): " "Project for Two (default b): ")))
-      (should (equal (nreverse defaults) '("/p/a" "/p/b")))
-      (should (equal (car calls) '("start" "T2" "--json" "--project" "/p/b" "--worktree" "always")))
-      ;; A start of its own keeps nothing.
-      (should-not org-varde--answers)
-      (org-varde--plan-answering '("start" "T3" "--json") "Three" #'ignore #'ignore)
-      (should (= worktree-asked 2))
-      (should (equal (car defaults) "/p/a"))
-      ;; Nor does one started in the background, as s on the board does,
-      ;; and it is asked about itself, not a region.
-      (let (asked)
-        (cl-letf (((symbol-function 'y-or-n-p) (lambda (prompt) (push prompt asked) t)))
-          (let ((org-varde--background t))
-            (org-varde--plan-answering '("start" "T4" "--json" "--project" "/p/app/") "Four" #'ignore #'ignore)))
-        (should (equal asked '("Start \"Four\" in a worktree of its own (app)? ")))
-        (should-not org-varde--answers)))))
+  (org-varde-test-with-varde
+    (let (calls prompts defaults (worktree-asked 0))
+      (cl-letf (((symbol-function 'org-varde--varde-async)
+                 (lambda (args callback &rest _)
+                   (push args calls)
+                   (funcall callback
+                            (cond ((not (member "--project" args))
+                                   "{\"v\":1,\"action\":\"ask\",\"ask\":\"project\",\"choices\":[\"/p/a\"]}")
+                                  ((not (member "--worktree" args)) "{\"v\":1,\"action\":\"ask\",\"ask\":\"worktree\"}")
+                                  (t "{\"v\":1,\"action\":\"run\"}")))))
+                ((symbol-function 'completing-read)
+                 (lambda (prompt collection &rest _)
+                   (push prompt prompts)
+                   (funcall (org-varde-test-pick (and (= (length prompts) 1) "/p/b/")) prompt collection)
+                   (push (car org-varde-test-offered) defaults)
+                   (if (= (length prompts) 1) "/p/b/" (car (all-completions "" collection)))))
+                ((symbol-function 'y-or-n-p) (lambda (&rest _) (setq worktree-asked (1+ worktree-asked)))))
+        (let ((org-varde--background t)
+              (org-varde--answers (list :region t)))
+          ;; As the board does: each starts once the one before is planned.
+          (org-varde--plan-answering '("start" "T1" "--json") "One"
+                                     (lambda (_) (org-varde--plan-answering '("start" "T2" "--json") "Two"
+                                                                            #'ignore #'ignore))
+                                     #'ignore))
+        (should (= worktree-asked 1))
+        (should (equal (nreverse prompts) '("Project for One (default a): " "Project for Two (default b): ")))
+        (should (equal (nreverse defaults) '("/p/a" "/p/b")))
+        (should (equal (car calls) '("start" "T2" "--json" "--project" "/p/b" "--worktree" "always")))
+        ;; A start of its own keeps nothing.
+        (should-not org-varde--answers)
+        (org-varde--plan-answering '("start" "T3" "--json") "Three" #'ignore #'ignore)
+        (should (= worktree-asked 2))
+        (should (equal (car defaults) "/p/a"))
+        ;; Nor does one started in the background, as s on the board does,
+        ;; and it is asked about itself, not a region.
+        (let (asked)
+          (cl-letf (((symbol-function 'y-or-n-p) (lambda (prompt) (push prompt asked) t)))
+            (let ((org-varde--background t))
+              (org-varde--plan-answering '("start" "T4" "--json" "--project" "/p/app/") "Four" #'ignore #'ignore)))
+          (should (equal asked '("Start \"Four\" in a worktree of its own (app)? ")))
+          (should-not org-varde--answers))))))
 
 (ert-deftest org-varde-a-question-asked-again-is-not-asked-forever ()
   (org-varde-test-with-varde
@@ -255,20 +250,6 @@
     (with-current-buffer "*varde doctor*"
       (should (string-match-p "hooks    not installed" (buffer-string)))
       (should (string-match-p "some checks failed" (buffer-string))))))
-
-(ert-deftest org-varde-a-running-task-is-focused-not-restarted ()
-  (org-varde-test-with-varde
-    (org-varde-test-reply "start" "{\"v\":1,\"action\":\"focus\",\"run\":\"R1\"}")
-    (let* ((buffer (get-buffer-create "*varde xyz123*"))
-           (proc (make-process :name "fake-shell" :buffer buffer :command '("cat") :noquery t)))
-      (unwind-protect
-          (progn
-            (with-current-buffer buffer (setq org-varde--task org-varde-test--id))
-            (org-varde--start org-varde-test--id "t" nil nil)
-            (org-varde-test-wait)
-            (should (eq (window-buffer) buffer))
-            (should-not org-varde-test-sent))
-        (delete-process proc)))))
 
 (ert-deftest org-varde-a-session-typed-into-a-terminal-is-focused-there ()
   (org-varde-test-with-varde
@@ -679,41 +660,45 @@ fetches them again."
 
 (ert-deftest org-varde-busy-is-what-varde-says ()
   "A row's busy, when varde gives it, wins over its latest session's status."
-  (let ((org-varde-board-data '(:groups ((:key "working" :rows ((:task "A" :status "waiting" :busy t)
-                                                                (:task "B" :status "working" :busy nil)
-                                                                (:task "C" :status "working")))))))
-    (should (org-varde--busy-p "A"))
-    (should-not (org-varde--busy-p "B"))
-    (should (org-varde--busy-p "C"))))
+  (org-varde-test-with-varde
+    (let ((org-varde-board-data '(:groups ((:key "working" :rows ((:task "A" :status "waiting" :busy t)
+                                                                  (:task "B" :status "working" :busy nil)
+                                                                  (:task "C" :status "working")))))))
+      (should (org-varde--busy-p "A"))
+      (should-not (org-varde--busy-p "B"))
+      (should (org-varde--busy-p "C")))))
 
 ;;; --- Review findings -------------------------------------------------------
 
 (ert-deftest org-varde-json-reads-the-same-without-native-json ()
   "Emacs 29 can be built without libjansson."
-  (let ((text "{\"v\":2,\"a\":[1,null,false],\"b\":{\"c\":true,\"d\":\"x\"}}"))
-    (should (equal (org-varde--json text) '(:v 2 :a (1 nil nil) :b (:c t :d "x"))))
-    (cl-letf (((symbol-function 'json-available-p) #'ignore))
-      (should (equal (org-varde--json text) '(:v 2 :a (1 nil nil) :b (:c t :d "x")))))))
+  (org-varde-test-with-varde
+    (let ((text "{\"v\":2,\"a\":[1,null,false],\"b\":{\"c\":true,\"d\":\"x\"}}"))
+      (should (equal (org-varde--json text) '(:v 2 :a (1 nil nil) :b (:c t :d "x"))))
+      (cl-letf (((symbol-function 'json-available-p) #'ignore))
+        (should (equal (org-varde--json text) '(:v 2 :a (1 nil nil) :b (:c t :d "x"))))))))
 
 (ert-deftest org-varde-watches-the-store-varde-uses ()
-  (let ((process-environment (append '("VARDE_HOME" "XDG_STATE_HOME=relative/state") process-environment)))
-    (should (equal (org-varde--home) (expand-file-name "~/.local/state/varde/")))
-    (setenv "XDG_STATE_HOME" "/xdg")
-    (should (equal (org-varde--home) "/xdg/varde/"))
-    (setenv "VARDE_HOME" "/v")
-    (should (equal (org-varde--home) "/v/"))))
+  (org-varde-test-with-varde
+    (let ((process-environment (append '("VARDE_HOME" "XDG_STATE_HOME=relative/state") process-environment)))
+      (should (equal (org-varde--home) (expand-file-name "~/.local/state/varde/")))
+      (setenv "XDG_STATE_HOME" "/xdg")
+      (should (equal (org-varde--home) "/xdg/varde/"))
+      (setenv "VARDE_HOME" "/v")
+      (should (equal (org-varde--home) "/v/")))))
 
 (ert-deftest org-varde-only-store-writes-refresh-the-board ()
-  (let (refreshed)
-    (cl-letf (((symbol-function 'org-varde-refresh) (lambda () (setq refreshed t))))
-      ;; What every `varde list' does to the directory: no refresh.
-      (dolist (e '((1 created "/h/varde.db-wal") (1 created "/h/varde.db-shm")
-                   (1 changed "/h/varde.db-shm") (1 deleted "/h/varde.db-wal")
-                   (1 changed "/h/pending.jsonl")))
-        (org-varde--on-store-change e))
-      (should-not refreshed)
-      (org-varde--on-store-change '(1 changed "/h/varde.db-wal"))
-      (should refreshed))))
+  (org-varde-test-with-varde
+    (let (refreshed)
+      (cl-letf (((symbol-function 'org-varde-refresh) (lambda () (setq refreshed t))))
+        ;; What every `varde list' does to the directory: no refresh.
+        (dolist (e '((1 created "/h/varde.db-wal") (1 created "/h/varde.db-shm")
+                     (1 changed "/h/varde.db-shm") (1 deleted "/h/varde.db-wal")
+                     (1 changed "/h/pending.jsonl")))
+          (org-varde--on-store-change e))
+        (should-not refreshed)
+        (org-varde--on-store-change '(1 changed "/h/varde.db-wal"))
+        (should refreshed)))))
 
 (ert-deftest org-varde-watches-the-wal-itself ()
   "Under kqueue a directory's watch sees nothing written to a file in it:
@@ -764,15 +749,16 @@ not a hook's commit to the -wal a running session keeps open."
 
 (ert-deftest org-varde-a-heading-s-text-leaves-out-org-s-own-lines ()
   "State changes, notes and clocks logged under the heading are org's, not the task."
-  (org-varde-test-with-org (concat "* TODO Fix [[https://x/issues/12][#12]] login [1/3]\n"
-                                   "SCHEDULED: <2026-10-12 Mon>\n"
-                                   "- State \"TODO\"       from \"DONE\"       [2026-10-12 Mon 10:00]\n"
-                                   "- Note taken on [2026-10-11 Sun 09:00] \\\\\n"
-                                   "  a note of my own\n"
-                                   "CLOCK: [2026-10-11 Sun 09:00]--[2026-10-11 Sun 10:00] =>  1:00\n"
-                                   "Real body.\n- a list of mine\n")
-    (should (equal (org-varde--title) "Fix #12 login"))
-    (should (equal (org-varde--body) "Real body.\n- a list of mine"))))
+  (org-varde-test-with-varde
+    (org-varde-test-with-org (concat "* TODO Fix [[https://x/issues/12][#12]] login [1/3]\n"
+                                     "SCHEDULED: <2026-10-12 Mon>\n"
+                                     "- State \"TODO\"       from \"DONE\"       [2026-10-12 Mon 10:00]\n"
+                                     "- Note taken on [2026-10-11 Sun 09:00] \\\\\n"
+                                     "  a note of my own\n"
+                                     "CLOCK: [2026-10-11 Sun 09:00]--[2026-10-11 Sun 10:00] =>  1:00\n"
+                                     "Real body.\n- a list of mine\n")
+      (should (equal (org-varde--title) "Fix #12 login"))
+      (should (equal (org-varde--body) "Real body.\n- a list of mine")))))
 
 ;;; --- Memory ----------------------------------------------------------------
 
@@ -1289,31 +1275,21 @@ time and yanked anywhere; cleared and quit, it is dropped."
         (should (equal (cadr (should-error (with-temp-buffer (org-varde-next-needs-you)) :type 'user-error))
                        "Nothing else needs you that Emacs can go to: the rest run outside it"))))))
 
-;; A task already on screen is gone to where it is, not shown twice.
+;; A running task is gone to, not started again; one already on screen
+;; where it is, not shown twice.
 (ert-deftest org-varde-going-to-a-terminal-in-sight-selects-its-window ()
   (org-varde-test-with-varde
     (org-varde-test-reply "start" "{\"v\":1,\"action\":\"focus\",\"run\":\"R1\"}")
-    (let* ((buffer (get-buffer-create "*varde xyz123*"))
-           (proc (make-process :name "fake-shell" :buffer buffer :command '("cat") :noquery t)))
-      (with-current-buffer buffer (setq org-varde--task org-varde-test--id))
-      (unwind-protect
-          (save-window-excursion
-            (delete-other-windows)
-            (let ((other (split-window)))
-              (set-window-buffer other buffer)
-              (org-varde-go-task org-varde-test--id "t")
-              (org-varde-test-wait)
-              (should (eq (selected-window) other))
-              (should (= 1 (length (get-buffer-window-list buffer))))))
-        (delete-process proc)))))
-
-(ert-deftest org-varde-going-to-a-task-goes-to-its-terminal ()
-  (org-varde-test-with-varde
-    (org-varde-test--run-plan)
-    (with-temp-buffer
-      (org-varde-go-task org-varde-test--id "t")
-      (org-varde-test-wait)
-      (should (eq (window-buffer) (get-buffer "*varde xyz123*"))))))
+    (org-varde-test--with-terminal
+      (save-window-excursion
+        (delete-other-windows)
+        (let ((other (split-window)))
+          (set-window-buffer other terminal)
+          (org-varde-go-task org-varde-test--id "t")
+          (org-varde-test-wait)
+          (should (eq (selected-window) other))
+          (should (= 1 (length (get-buffer-window-list terminal))))
+          (should-not org-varde-test-sent))))))
 
 (ert-deftest org-varde-a-session-of-your-own-runs-varde-s-agent ()
   (org-varde-test-with-varde
@@ -1437,8 +1413,10 @@ They start in insert state, and :w, ZZ and ZQ do what they say."
           (org-varde-show-next-task 1)
           (org-varde-show-previous-task 1)
           (org-varde-show-next-needs-you 1)
-          (org-varde-show-previous-needs-you 1))
-        (should (equal (nreverse shown) '("C3" "A1" "A1" "A1")))
+          (org-varde-show-previous-needs-you 1)
+          ;; TAB off a section's heading, as the key gives it, with no count.
+          (org-varde-show-tab))
+        (should (equal (nreverse shown) '("C3" "A1" "A1" "A1" "A1")))
         (cl-letf (((symbol-function 'org-varde--show-fill) #'ignore))
           (setq org-varde--task "C3")
           (should-error (org-varde-show-next-task 1) :type 'user-error))))))
@@ -1490,19 +1468,6 @@ whether to take it over, and starts it again with that answer."
     (should (seq-find (lambda (c) (string-suffix-p "--take-over" c)) (org-varde-test-calls)))
     (should (equal org-varde-test-sent '("varde run R1")))))
 
-(ert-deftest org-varde-next-needs-you-goes-on-from-a-task-outside-emacs ()
-  "A task running in a terminal outside Emacs is not gone to: the next
-press goes on from it, not back to it."
-  (org-varde-test-with-varde
-    (setq org-varde-board-data
-          (org-varde--json "{\"v\":2,\"groups\":[{\"key\":\"needs_you\",\"rows\":[{\"task\":\"A1\"},{\"task\":\"B2\"}]}]}"))
-    (let (went)
-      (cl-letf (((symbol-function 'org-varde-go-task) (lambda (task &rest _) (push task went))))
-        (with-temp-buffer
-          (org-varde-next-needs-you)
-          (let ((last-command 'org-varde-next-needs-you)) (org-varde-next-needs-you))))
-      (should (equal (nreverse went) '("A1" "B2"))))))
-
 (ert-deftest org-varde-a-varde-that-exits-early-is-answered-once ()
   (org-varde-test-with-varde
     (let ((org-varde-varde-program "true") (n 0))
@@ -1533,12 +1498,13 @@ press goes on from it, not back to it."
 ;;; --- Round 3 --------------------------------------------------------------
 
 (ert-deftest org-varde-a-busy-session-is-said-as-it-is-busy ()
-  (should (equal (org-varde--busy-words '(:status "blocked")) "is waiting for your answer"))
-  (should (equal (org-varde--busy-words '(:status "working" :agents 2)) "is working"))
-  ;; A turn that ended with work left running.
-  (should (equal (org-varde--busy-words '(:status "waiting" :agents 3 :shells 1))
-                 "has 3 agents and a shell running"))
-  (should (equal (org-varde--busy-words '(:status "waiting" :agents 1)) "has an agent running")))
+  (org-varde-test-with-varde
+    (should (equal (org-varde--busy-words '(:status "blocked")) "is waiting for your answer"))
+    (should (equal (org-varde--busy-words '(:status "working" :agents 2)) "is working"))
+    ;; A turn that ended with work left running.
+    (should (equal (org-varde--busy-words '(:status "waiting" :agents 3 :shells 1))
+                   "has 3 agents and a shell running"))
+    (should (equal (org-varde--busy-words '(:status "waiting" :agents 1)) "has an agent running"))))
 
 (ert-deftest org-varde-varde-links-are-stored-and-completed ()
   (org-varde-test-with-varde
@@ -1703,21 +1669,14 @@ press goes on from it, not back to it."
   (org-varde-test-with-varde
     (org-varde-test-reply "show" "{\"v\":1,\"state\":\"open\"}")
     (org-varde-test-reply "done" "{\"v\":1,\"worktree\":{\"action\":\"kept\",\"branch\":\"varde/x\"}}")
-    (let (said)
-      (cl-letf (((symbol-function 'message) (lambda (f &rest a) (when f (push (apply #'format f a) said))))
-                ((symbol-function 'org-varde-refresh) #'ignore))
-        (org-varde--finish "AAA111" "Finish it")
-        (org-varde-test-wait))
-      (should (member "Done \"Finish it\"; varde/x is kept until its work lands" said))
-      ;; From the board, where RET reopens it.
-      (setq said nil)
+    (cl-letf (((symbol-function 'org-varde-refresh) #'ignore))
+      (should (member "Done \"Finish it\"; varde/x is kept until its work lands"
+                      (org-varde-test--saying (org-varde--finish "AAA111" "Finish it") (org-varde-test-wait))))
+      ;; From the board, where u reopens it.
       (org-varde-test-reply "done" "{\"v\":1,\"worktree\":null}")
-      (cl-letf (((symbol-function 'message) (lambda (f &rest a) (when f (push (apply #'format f a) said))))
-                ((symbol-function 'org-varde-refresh) #'ignore))
-        (let ((org-varde--on-board t))
-          (org-varde--finish "AAA111" "Finish it"))
-        (org-varde-test-wait))
-      (should (member "Done \"Finish it\"; u reopens" said)))))
+      (let ((org-varde--on-board t))
+        (should (member "Done \"Finish it\"; u reopens"
+                        (org-varde-test--saying (org-varde--finish "AAA111" "Finish it") (org-varde-test-wait))))))))
 
 (ert-deftest org-varde-the-view-opens-below-and-says-where-there-is-no-task ()
   (org-varde-test-with-varde
@@ -1747,24 +1706,31 @@ press goes on from it, not back to it."
           (org-varde-show-next-needs-you 1))
         (should (equal said "Nothing here needs you; 1 in other projects: . shows them"))))))
 
-(ert-deftest org-varde-a-term-keeps-your-c-c-v-keys ()
-  "In term's char mode, C-c is its escape, where C-c v is C-x v."
+(ert-deftest org-varde-a-term-keeps-your-keys-for-org-varde ()
+  "In term's char mode, C-c is its escape, where C-c v is C-x v: the keys
+under C-c you bound org-varde's commands to are kept, at any depth and
+with a label, and a prefix that holds one is kept whole."
   (skip-unless (not (locate-library "vterm")))
   (require 'term)
-  (let ((was (keymap-lookup global-map "C-c v"))
-        (yours (define-keymap "n" #'org-varde-next-needs-you)))
-    (keymap-set global-map "C-c v" yours)
-    (unwind-protect
-        (cl-letf (((symbol-function 'make-term) (lambda (name _program) (get-buffer-create (concat "*" name "*"))))
-                  ((symbol-function 'term-char-mode) (lambda () (use-local-map term-raw-map))))
-          (with-current-buffer (org-varde--open-shell "/tmp" "*varde t*")
-            (unwind-protect
-                (progn
-                  (should (eq (key-binding (kbd "C-c v n")) #'org-varde-next-needs-you))
-                  ;; Term's own escapes are still there.
-                  (should (eq (key-binding (kbd "C-c C-j")) #'term-line-mode)))
-              (kill-buffer))))
-      (keymap-set global-map "C-c v" was))))
+  (org-varde-test-with-varde
+    (let* ((keys '("C-c a" "C-c b" "C-c d" "C-c o"))
+           (was (mapcar (lambda (k) (keymap-lookup global-map k)) keys)))
+      (keymap-set global-map "C-c a" (define-keymap "n" #'org-varde-next-needs-you "m" #'ignore))
+      (keymap-set global-map "C-c b" #'org-varde-board)
+      (keymap-set global-map "C-c d" (define-keymap "s" (define-keymap "v" '(menu-item "View" org-varde-show))))
+      (keymap-set global-map "C-c o" #'ignore)
+      (unwind-protect
+          (cl-letf (((symbol-function 'make-term) (lambda (name _program) (get-buffer-create (concat "*" name "*"))))
+                    ((symbol-function 'term-char-mode) (lambda () (use-local-map term-raw-map))))
+            (with-current-buffer (org-varde--open-shell "/tmp" "*varde t*")
+              (should (eq (key-binding (kbd "C-c a n")) #'org-varde-next-needs-you))
+              (should (eq (key-binding (kbd "C-c a m")) #'ignore))
+              (should (eq (key-binding (kbd "C-c b")) #'org-varde-board))
+              (should (eq (key-binding (kbd "C-c d s v")) #'org-varde-show))
+              ;; Your other keys there are term's.
+              (should-not (eq (key-binding (kbd "C-c o")) #'ignore))
+              (should (eq (key-binding (kbd "C-c C-j")) #'term-line-mode))))
+        (cl-mapc (lambda (k w) (keymap-set global-map k w)) keys was)))))
 
 ;;; --- Org through links -------------------------------------------------------
 

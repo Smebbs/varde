@@ -199,14 +199,18 @@ mod tests {
         std::fs::write(dir.path().join("run.rs"), "fn main() {}\n").unwrap();
         ok(&["add", "run.rs"]);
         let inside = format!("{}/gone.rs", dir.path().display());
-        let items: Vec<Anchored> =
-            [(1, "~/.config/nowhere/config.toml"), (2, "/etc/nowhere.conf"), (3, &inside)]
-                .iter()
-                .map(|(id, a)| Anchored { id: *id, anchor: a.to_string(), dir: String::new() })
-                .collect();
+        let anchors = ["~/.config/nowhere/config.toml", "/etc/nowhere.conf", &inside];
+        assert_eq!(stale_in(dir.path(), &anchors), [(1, false), (2, false), (3, true)]);
+    }
+
+    /// `resolve` of `anchors`, numbered from 1, in checkout `dir`.
+    fn stale_in(dir: &Path, anchors: &[&str]) -> Vec<(i64, bool)> {
+        let items: Vec<Anchored> = (1..)
+            .zip(anchors)
+            .map(|(id, a)| Anchored { id, anchor: a.to_string(), dir: String::new() })
+            .collect();
         let refs: Vec<&Anchored> = items.iter().collect();
-        let until = Instant::now() + Duration::from_secs(5);
-        assert_eq!(resolve(dir.path(), &refs, until), [(1, false), (2, false), (3, true)]);
+        resolve(dir, &refs, Instant::now() + Duration::from_secs(5))
     }
 
     #[test]
@@ -228,21 +232,16 @@ mod tests {
         std::fs::write(dir.path().join("deploy/Dockerfile"), "FROM scratch\n").unwrap();
         std::fs::write(dir.path().join("config.toml"), "# the config\n[memory]\nenabled = true\n").unwrap();
         ok(&["add", "."]);
-        let items: Vec<Anchored> = [
-            (1, "../shared/env.toml"),
-            (2, "Makefile"),
-            (3, "Dockerfile"),
-            (4, "config.memory.enabled"),
-            (5, "Justfile"),
-            (6, "config.memory.disabled_by"),
-        ]
-        .iter()
-        .map(|(id, a)| Anchored { id: *id, anchor: a.to_string(), dir: String::new() })
-        .collect();
-        let refs: Vec<&Anchored> = items.iter().collect();
-        let until = Instant::now() + Duration::from_secs(5);
+        let anchors = [
+            "../shared/env.toml",
+            "Makefile",
+            "Dockerfile",
+            "config.memory.enabled",
+            "Justfile",
+            "config.memory.disabled_by",
+        ];
         assert_eq!(
-            resolve(dir.path(), &refs, until),
+            stale_in(dir.path(), &anchors),
             [(1, false), (2, false), (3, false), (4, false), (5, true), (6, true)]
         );
     }

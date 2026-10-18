@@ -313,7 +313,7 @@ pub struct View {
     /// Its schedule, as `varde schedule` says it.
     pub schedule: Option<String>,
     /// The store's directory, under which a background run's log is.
-    pub home: std::path::PathBuf,
+    pub home: PathBuf,
 }
 
 impl View {
@@ -448,7 +448,6 @@ impl View {
 
 /// `path` with the home directory as `~`.
 pub fn tilde(path: &str) -> String {
-    use std::path::{Path, PathBuf};
     let home = std::env::var_os("HOME").map(PathBuf::from).filter(|h| h.is_absolute() && h != Path::new("/"));
     match home.and_then(|h| Path::new(path).strip_prefix(h).ok().map(Path::to_path_buf)) {
         Some(rest) if rest.as_os_str().is_empty() => "~".into(),
@@ -514,9 +513,9 @@ fn clock(ms: i64, now: i64) -> String {
 /// checkout, which it shares. `None` when there is neither to read.
 fn git_facts(d: &task::Detail) -> Option<git::Facts> {
     match &d.worktree {
-        Some(w) if w.state == "active" => git::facts(std::path::Path::new(&w.path), Some(&w.base), true).ok(),
+        Some(w) if w.state == "active" => git::facts(Path::new(&w.path), Some(&w.base), true).ok(),
         Some(_) => None,
-        None => git::facts(std::path::Path::new(d.project.as_deref()?), None, true).ok(),
+        None => git::facts(Path::new(d.project.as_deref()?), None, true).ok(),
     }
 }
 

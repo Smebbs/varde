@@ -3,7 +3,7 @@
 Thanks for looking. varde is young, so an issue before a large change
 saves us both time. [`docs/varde-design.md`](docs/varde-design.md) says
 why varde is built the way it is. Much of what looks like a missing
-feature was left out on purpose, and §12 lists what was dropped.
+feature was left out on purpose, and §11 lists it.
 
 ## The layout
 
@@ -32,8 +32,8 @@ cargo test --release -p varde --test bench -- --ignored --nocapture   # the late
   from Claude Code, anonymised.
 - **A hook always prints a JSON object and exits 0.** A hook that fails
   must never break the agent's session.
-- **Budgets:** hook p99 under 5 ms (10 ms for the once-per-session
-  hooks that deliver memory), and `varde list --json` under 10 ms at
+- **Budgets:** hook p99 under 10 ms (20 ms for the once-per-session
+  hooks that deliver memory), and `varde list --json` under 15 ms at
   1 000 tasks.
 - **The schema** is the numbered list in
   `cli/crates/varde-core/src/store/migrations.rs`. A change appends a

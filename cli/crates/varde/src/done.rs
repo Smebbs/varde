@@ -101,9 +101,7 @@ fn end_run(store: &Store, id: &str, opts: Options, schedule: &crate::schedule::S
     // finding stays unread, and a session of yours keeps running.
     if !own.is_empty() {
         for run in &own {
-            store
-                .conn
-                .execute("UPDATE run SET done = ?2 WHERE id = ?1 AND done IS NULL", params![run, now])?;
+            mark_done(store, run, now)?;
         }
         return Ok(json!({"v": 1, "task": id, "repeats": schedule.rule, "next": schedule.due,
                          "stopped": [], "left": own, "read": 0}));
@@ -124,9 +122,7 @@ fn end_run(store: &Store, id: &str, opts: Options, schedule: &crate::schedule::S
     let (stopped, left, kept) = if opts.keep_running {
         let kept: Vec<String> = live_runs(store, id)?.into_iter().map(|(run, _, _)| run).collect();
         for run in &kept {
-            store
-                .conn
-                .execute("UPDATE run SET done = ?2 WHERE id = ?1 AND done IS NULL", params![run, now])?;
+            mark_done(store, run, now)?;
         }
         (vec![], vec![], kept)
     } else {
@@ -245,11 +241,7 @@ fn close_task(store: &Store, id: &str, opts: Options) -> Result<Value> {
                     if is_own(&run, pid, start) {
                         bail!("this session runs in {path}; end it, then drop the task");
                     }
-                    let background: bool =
-                        store
-                            .conn
-                            .query_row("SELECT background FROM run WHERE id = ?1", [&run], |r| r.get(0))?;
-                    if in_agent() && !background {
+                    if in_agent() && !background(store, &run)? {
                         bail!("a session of yours runs in {path}; end it, then drop the task");
                     }
                 }
@@ -479,18 +471,14 @@ fn stop_sessions(store: &Store, id: &str, wait: bool) -> Result<(Vec<String>, Ve
     let mut spared = Vec::new();
     let mut live = Vec::new();
     for r in live_runs(store, id)? {
-        let background: bool =
-            store.conn.query_row("SELECT background FROM run WHERE id = ?1", [&r.0], |row| row.get(0))?;
+        let background = background(store, &r.0)?;
         if is_own(&r.0, r.1, r.2) {
             own.push(r);
         } else if agent && !background {
             spared.push(r);
         } else {
             if background {
-                store.conn.execute(
-                    "UPDATE run SET done = ?2 WHERE id = ?1 AND done IS NULL",
-                    params![r.0, now_ms()],
-                )?;
+                mark_done(store, &r.0, now_ms())?;
             }
             live.push(r);
         }
@@ -513,6 +501,17 @@ fn stop_sessions(store: &Store, id: &str, wait: bool) -> Result<(Vec<String>, Ve
     // and the terminal it ran in.
     crate::detach(&args, "the session reaper")?;
     Ok((live, own))
+}
+
+/// Whether `run` is one its schedule started in the background.
+pub fn background(store: &Store, run: &str) -> Result<bool> {
+    Ok(store.conn.query_row("SELECT background FROM run WHERE id = ?1", [run], |r| r.get(0))?)
+}
+
+/// `run` needs nothing more of you.
+fn mark_done(store: &Store, run: &str, now: i64) -> Result<()> {
+    store.conn.execute("UPDATE run SET done = ?2 WHERE id = ?1 AND done IS NULL", params![run, now])?;
+    Ok(())
 }
 
 /// Whether live run `run`, its agent `pid` started at `start`, is the
@@ -661,15 +660,13 @@ fn describe_as(report: &Value, verb: &str) -> String {
     let done = closed_as(report, verb);
     if let Some(w) = report["worktree"].as_object() {
         let s = |k: &str| w[k].as_str().unwrap_or("");
-        let included: Vec<&str> = w["included"]
-            .as_array()
-            .map(|a| a.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default();
-        let stranded: Vec<&str> = w
-            .get("stranded")
-            .and_then(Value::as_array)
-            .map(|a| a.iter().filter_map(Value::as_str).collect())
-            .unwrap_or_default();
+        let strs = |k: &str| -> Vec<&str> {
+            w.get(k)
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_str).collect())
+                .unwrap_or_default()
+        };
+        let (included, stranded) = (strs("included"), strs("stranded"));
         let what = match w["action"].as_str() {
             Some("merged" | "removed") if w["pr"].is_object() => {
                 format!(

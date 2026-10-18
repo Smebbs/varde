@@ -14,41 +14,8 @@ use serde_json::Value;
 
 use common::*;
 
-fn now_ms() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64
-}
-
-fn due_now(e: &Env, task: &str) {
-    e.db()
-        .execute(
-            "UPDATE schedule SET next_due = ?2 WHERE task LIKE '%' || upper(?1)",
-            (task, now_ms() - 1000),
-        )
-        .unwrap();
-}
-
-fn runs(e: &Env, task: &str) -> Vec<Value> {
-    e.show(task)["runs"].as_array().unwrap().clone()
-}
-
 fn id_of(run: &Value) -> String {
     run["id"].as_str().unwrap().to_string()
-}
-
-/// Fire `task` and wait for that run to end.
-fn fire(e: &Env, task: &str, env: &[(&str, &str)]) -> String {
-    let before = runs(e, task).len();
-    due_now(e, task);
-    poll(200, || {
-        let mut cmd = e.cmd(&["tick"]);
-        for (k, v) in env {
-            cmd.env(k, v);
-        }
-        cmd.output().unwrap();
-        let runs = runs(e, task);
-        runs.len() > before && runs.last().is_some_and(|r| r["status"] == "exited")
-    });
-    id_of(runs(e, task).last().unwrap())
 }
 
 /// Fire `task` with a session that stays at work, and wait until it is.
@@ -74,7 +41,12 @@ fn open_live(e: &Env, task: &str, run: &str) -> (String, Child) {
     let plan: Value = serde_json::from_str(&e.ok(&["start", task, "--json", "--run", &run[20..]])).unwrap();
     let id = plan["run"].as_str().unwrap().to_string();
     let child = e.cmd(&["run", &id]).env("FAKE_SLEEP", "60").spawn().unwrap();
-    poll(100, || runs(e, task).iter().any(|r| r["id"] == id.as_str() && r["why"]["alive"] == true));
+    // Alive once its pid is recorded; at its prompt once its turn ends.
+    poll(100, || {
+        runs(e, task)
+            .iter()
+            .any(|r| r["id"] == id.as_str() && r["why"]["alive"] == true && r["why"]["event"] == "turn_end")
+    });
     (id, child)
 }
 
@@ -197,11 +169,13 @@ fn a_monday_update_over_weeks_keeps_every_finding_until_opened() {
     check(&e, &t, "reopened", &[&w3]);
 
     // d from the terminal marks what waits read, and says so.
-    let w6 = fire(&e, &t, &[]);
+    fire(&e, &t, &[]);
     let said = e.ok(&["done", &t]);
-    assert!(said.starts_with(&format!("marked 2 unread runs of {t} read")), "{said}");
+    assert!(
+        said.starts_with(&format!("marked 2 unread runs of {t} read; it repeats (every tue 10:00")),
+        "{said}"
+    );
     check(&e, &t, "d", &[]);
-    let _ = w6;
 
     // Ending the series.
     e.ok(&["schedule", &t, "--off"]);
@@ -215,7 +189,6 @@ fn runs_that_overlap_never_read_or_stop_each_other() {
     let t = e.new_task("Watch the error rate");
     e.ok(&["schedule", &t, "every", "30m", "--worktree", "never"]);
     let nothing = format!("done {t}");
-    let quiet = [("FAKE_DONE", nothing.as_str())];
 
     // A finding, then a run at work: the row is where the work is, and
     // says the finding waits.
@@ -260,7 +233,6 @@ fn runs_that_overlap_never_read_or_stop_each_other() {
 
     let _ = child.kill();
     let _ = child.wait();
-    let _ = quiet;
 }
 
 #[test]

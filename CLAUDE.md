@@ -2,7 +2,7 @@
 
 The design and its rationale are in `docs/varde-design.md`. Read it
 before changing the architecture. Much of what looks like a missing
-feature was left out on purpose: §12 lists what was dropped.
+feature was left out on purpose, and §11 lists it.
 
 ## varde (`cli/`)
 

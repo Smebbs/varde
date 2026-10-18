@@ -142,12 +142,22 @@ pub fn age(ms: i64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use varde_core::store::Store;
+
+    fn store() -> (tempfile::TempDir, Store) {
+        let dir = tempfile::tempdir().unwrap();
+        let store = Store::open(&dir.path().join("varde.db"), Duration::from_secs(1)).unwrap();
+        (dir, store)
+    }
+
+    /// The board at 10, every session alive.
+    fn built(store: &Store) -> Board {
+        board::build(store, 10, 0, false, &|_, _| true).unwrap()
+    }
 
     #[test]
     fn the_table_marks_unread_rows_and_origins_and_folds_parked() {
-        let dir = tempfile::tempdir().unwrap();
-        let store =
-            varde_core::store::Store::open(&dir.path().join("varde.db"), Duration::from_secs(1)).unwrap();
+        let (_d, store) = store();
         let origin = varde_core::task::create(&store, "Big job", None, Some("/p"), None, 1).unwrap();
         store
             .conn
@@ -159,13 +169,13 @@ mod tests {
         varde_core::task::defer(&store, "Later bit", None, "R1", None, 2).unwrap();
         let parked = varde_core::task::create(&store, "Someday", None, Some("/p"), None, 3).unwrap();
         store.conn.execute("UPDATE task SET state = 'parked' WHERE id = ?1", [&parked]).unwrap();
-        let board = board::build(&store, 10, 0, false, &|_, _| true).unwrap();
+        let board = built(&store);
         let t = table(&board, 10, false, 80);
         assert!(t.contains(&format!("← {}", varde_core::task::short(&origin))), "{t}");
         assert!(t.contains("Parked  1 ▸ (--all lists them)") && !t.contains("Someday"), "{t}");
         assert!(t.contains("Working  0\n") && !t.contains("Dropped"), "an empty group is its count:\n{t}");
         store.conn.execute("UPDATE task SET state = 'open' WHERE id = ?1", [&parked]).unwrap();
-        let t = table(&board::build(&store, 10, 0, false, &|_, _| true).unwrap(), 10, false, 80);
+        let t = table(&built(&store), 10, false, 80);
         assert!(t.contains("Parked  0\n"), "an empty folded group has no hint:\n{t}");
         let mut board = board;
         let row =
@@ -177,13 +187,11 @@ mod tests {
 
     #[test]
     fn the_table_fits_the_terminal() {
-        let dir = tempfile::tempdir().unwrap();
-        let store =
-            varde_core::store::Store::open(&dir.path().join("varde.db"), Duration::from_secs(1)).unwrap();
+        let (_d, store) = store();
         let long = "A rather long title for a task, longer than any column would hold, 日本語 too";
         varde_core::task::create(&store, long, None, Some("/src/a-project-with-a-long-name"), None, 1)
             .unwrap();
-        let board = board::build(&store, 10, 0, false, &|_, _| true).unwrap();
+        let board = built(&store);
         for width in [80, 120] {
             let t = table(&board, 10, false, width);
             assert!(t.lines().all(|l| l.width() <= width), "{width}:\n{t}");
@@ -193,15 +201,12 @@ mod tests {
 
     #[test]
     fn a_title_is_printed_without_its_control_characters() {
-        let dir = tempfile::tempdir().unwrap();
-        let store =
-            varde_core::store::Store::open(&dir.path().join("varde.db"), Duration::from_secs(1)).unwrap();
+        let (_d, store) = store();
         store
             .conn
             .execute("INSERT INTO task (id, title, created) VALUES ('T', ?1, 1)", ["\x1b[2JEvil\ttitle"])
             .unwrap();
-        let board = board::build(&store, 10, 0, false, &|_, _| true).unwrap();
-        let t = table(&board, 10, false, 80);
+        let t = table(&built(&store), 10, false, 80);
         assert!(!t.contains(|c: char| c.is_control() && c != '\n') && t.contains("[2JEvil title"), "{t:?}");
     }
 

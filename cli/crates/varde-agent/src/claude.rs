@@ -104,14 +104,7 @@ impl Agent for Claude {
             "PreCompact" => Kind::Compacting,
             _ => return None,
         };
-        let native_id = s("session_id").filter(|id| !id.is_empty())?.to_string();
-        Some(Norm {
-            native_id,
-            kind,
-            cwd: s("cwd").map(Into::into),
-            transcript: s("transcript_path").map(Into::into),
-            prompt: s("prompt").map(Into::into),
-        })
+        crate::norm(p, kind, "transcript_path")
     }
 
     fn new_native_id(&self) -> Option<String> {
@@ -321,7 +314,6 @@ impl Agent for Claude {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::path::Path;
 
     /// Real payloads captured from Claude Code 2.1.280.
     fn fixture(name: &str) -> Value {
@@ -496,10 +488,16 @@ mod tests {
         serde_json::json!({"type": role, "message": {"role": role, "content": content}}).to_string()
     }
 
-    #[test]
-    fn a_digest_pairs_each_prompt_with_its_report() {
+    /// A digest of `transcript` from byte `from`, and where it stopped.
+    fn digest_of(transcript: &str, from: u64, budget: usize) -> (String, u64) {
         let d = tempfile::tempdir().unwrap();
         let path = d.path().join("t.jsonl");
+        std::fs::write(&path, transcript).unwrap();
+        Claude.digest(&path, from, budget).unwrap()
+    }
+
+    #[test]
+    fn a_digest_pairs_each_prompt_with_its_report() {
         let lines = [
             transcript_line("user", "Fix the flaky test".into()),
             transcript_line("assistant", serde_json::json!([{"type": "text", "text": "Now the fixture:"}])),
@@ -513,9 +511,9 @@ mod tests {
                 .to_string(),
             transcript_line("user", "Now merge it".into()),
         ];
-        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
-        let (text, end) = Claude.digest(&path, 0, 8000).unwrap();
-        assert_eq!(end, std::fs::metadata(&path).unwrap().len());
+        let transcript = lines.join("\n") + "\n";
+        let (text, end) = digest_of(&transcript, 0, 8000);
+        assert_eq!(end, transcript.len() as u64);
         assert!(text.contains("Asked:\nFix the flaky test\n\nReported back:\nRoot cause: shared fixture."));
         assert!(
             !text.contains("Now the fixture:") && !text.contains("/model") && !text.contains("skill text")
@@ -524,23 +522,20 @@ mod tests {
         assert!(text.contains("Turn 2 of 2"));
 
         // From the cursor on, only what is new.
-        let (again, same_end) = Claude.digest(&path, end, 8000).unwrap();
+        let (again, same_end) = digest_of(&transcript, end, 8000);
         assert!(again.is_empty());
         assert_eq!(same_end, end);
     }
 
     #[test]
     fn a_digest_stays_within_its_budget_however_long_the_session() {
-        let d = tempfile::tempdir().unwrap();
-        let path = d.path().join("t.jsonl");
         let mut lines = String::new();
         for i in 0..300 {
             lines += &(transcript_line("user", format!("question {i} {}", "x".repeat(1500)).into()) + "\n");
             lines +=
                 &(transcript_line("assistant", format!("answer {i} {}", "y".repeat(3000)).into()) + "\n");
         }
-        std::fs::write(&path, lines).unwrap();
-        let (text, _) = Claude.digest(&path, 0, 12_000).unwrap();
+        let (text, _) = digest_of(&lines, 0, 12_000);
         assert!(text.chars().count() < 16_000, "{} chars", text.chars().count());
         // The newest turns are the ones kept.
         assert!(text.contains("question 299") && !text.contains("question 0 "));
@@ -549,8 +544,6 @@ mod tests {
 
     #[test]
     fn a_long_pasted_prompt_keeps_its_turn() {
-        let d = tempfile::tempdir().unwrap();
-        let path = d.path().join("t.jsonl");
         let log = "x".repeat(30_000);
         let lines = [
             transcript_line("user", "fix X".into()),
@@ -562,8 +555,7 @@ mod tests {
             ),
             transcript_line("assistant", serde_json::json!([{"type": "text", "text": "R2"}])),
         ];
-        std::fs::write(&path, lines.join("\n") + "\n").unwrap();
-        let (text, _) = Claude.digest(&path, 0, 8000).unwrap();
+        let (text, _) = digest_of(&(lines.join("\n") + "\n"), 0, 8000);
         assert!(text.contains("Asked:\nfix X\n\nReported back:\nR1"), "{text}");
         assert!(text.contains("Asked:\nhere is the log: xxx"), "{text}");
         assert!(text.contains("Reported back:\nR2"), "{text}");
@@ -573,20 +565,15 @@ mod tests {
 
     #[test]
     fn a_digest_stops_before_a_line_still_being_written() {
-        let d = tempfile::tempdir().unwrap();
-        let path = d.path().join("t.jsonl");
         let first = transcript_line("user", "One".into()) + "\n";
-        std::fs::write(&path, format!("{first}{{\"type\":\"assist")).unwrap();
-        let (_, end) = Claude.digest(&path, 0, 8000).unwrap();
+        let (_, end) = digest_of(&format!("{first}{{\"type\":\"assist"), 0, 8000);
         assert_eq!(end, first.len() as u64);
     }
 
     #[test]
     fn a_digest_starting_mid_turn_keeps_the_report() {
-        let d = tempfile::tempdir().unwrap();
-        let path = d.path().join("t.jsonl");
-        std::fs::write(&path, transcript_line("assistant", "Done: it was DNS.".into()) + "\n").unwrap();
-        let (text, _) = Claude.digest(&path, 0, 8000).unwrap();
+        let (text, _) =
+            digest_of(&(transcript_line("assistant", "Done: it was DNS.".into()) + "\n"), 0, 8000);
         assert!(text.contains("(continued from before)") && text.contains("it was DNS"));
     }
 

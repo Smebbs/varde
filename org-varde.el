@@ -223,15 +223,6 @@ given, is called with no arguments."
       (format "\"%s\"" (truncate-string-to-width title 40 nil nil "…"))
     (org-varde--short task)))
 
-(defun org-varde--pick (prompt choices &optional default)
-  "Ask with PROMPT for one of CHOICES, kept in the order given, offering DEFAULT."
-  (completing-read (format-prompt prompt default)
-                   (lambda (string pred action)
-                     (if (eq action 'metadata)
-                         '(metadata (display-sort-function . identity) (cycle-sort-function . identity))
-                       (complete-with-action action choices string pred)))
-                   nil t nil nil default))
-
 (defun org-varde--details (task)
   "TASK as `varde show --json --no-git' gives it."
   (org-varde--varde-json "show" task "--json" "--no-git"))
@@ -291,14 +282,17 @@ A vterm when vterm is installed, else a term."
                                    (getenv "ESHELL") shell-file-name))))
         (with-current-buffer buffer
           (term-char-mode)
-          ;; There C-c is term's escape, where C-c v is C-x v: your C-c v
-          ;; keys, as the README binds org-varde's, are kept.
-          (let ((keys (keymap-lookup global-map "C-c v")))
-            (when (keymapp keys)
-              (let ((map (make-sparse-keymap)))
-                (set-keymap-parent map (current-local-map))
-                (keymap-set map "C-c v" keys)
-                (use-local-map map)))))
+          ;; There C-c is term's escape, where C-c v is C-x v: a prefix
+          ;; under C-c that holds one of org-varde's commands, at any
+          ;; depth, is kept whole.
+          (let ((map (make-sparse-keymap)))
+            (set-keymap-parent map (current-local-map))
+            (dolist (command (apropos-internal "\\`org-varde-" #'commandp))
+              (dolist (key (where-is-internal command global-map))
+                (when (and (> (length key) 1) (eq (aref key 0) ?\C-c))
+                  (let ((prefix (vector ?\C-c (aref key 1))))
+                    (define-key map prefix (lookup-key global-map prefix))))))
+            (use-local-map map)))
         buffer))))
 
 (defun org-varde--send (command)
@@ -853,9 +847,8 @@ session kept running with --keep-running, is left open."
 
 (defun org-varde--put-away-idle (task)
   "Put TASK away, unless its terminal is still running something."
-  (let ((terminal (org-varde--terminal task)))
-    (unless (and terminal (process-running-child-p (get-buffer-process terminal)))
-      (org-varde--put-away task))))
+  (unless (org-varde--terminal-busy-p (org-varde--terminal task))
+    (org-varde--put-away task)))
 
 (defun org-varde--park (task title)
   "Park TASK, titled TITLE, in varde and put its windows away.
@@ -1076,14 +1069,18 @@ every task's row is fetched again, as a link may name it."
 
 (add-hook 'org-varde-after-refresh-hook #'org-varde--links-refreshed)
 
+(defun org-varde--fetch-all ()
+  "Fetch every task's row now, waiting for it."
+  (let ((data (org-varde--varde-json "list" "--json" "--all")))
+    (when (org-varde--readable data) (setq org-varde--all (org-varde--by-short data)))))
+
 (defun org-varde--known-rows ()
   "Every task's row as last fetched, the board's first, in its order.
 With nothing fetched yet, every task's are fetched now; else they are
 fetched again in the background, for next time."
   (if (or org-varde-board-data org-varde--all)
       (org-varde--list-all)
-    (let ((data (org-varde--varde-json "list" "--json" "--all")))
-      (when (org-varde--readable data) (setq org-varde--all (org-varde--by-short data)))))
+    (org-varde--fetch-all))
   (let ((board (org-varde--board-rows))
         rows)
     (dolist (g (plist-get org-varde-board-data :groups))
@@ -1214,8 +1211,7 @@ In the heading and its own text, not its children."
 no row fetched yet has every task's fetched now, once."
   (let ((links (org-varde--entry-links)))
     (when (and links (not (seq-every-p #'org-varde--link-row links)))
-      (let ((data (org-varde--varde-json "list" "--json" "--all")))
-        (when (org-varde--readable data) (setq org-varde--all (org-varde--by-short data)))))
+      (org-varde--fetch-all))
     (seq-filter (lambda (row) (equal (plist-get row :state) "open"))
                 (delq nil (mapcar #'org-varde--link-row links)))))
 
@@ -1807,6 +1803,26 @@ this session, late once that has gone on a day."
                                   (t " due")))
                     'face (if long 'org-varde-board-blocked 'org-varde-quiet)))))))
 
+(defun org-varde--row-parts (row face)
+  "What ROW says after its session's status, as the board and a view say
+it: what its last turn left running, where it was deferred from, and
+where its git work stands, in FACE when that is nowhere in particular."
+  (let* ((git (plist-get row :git))
+         (label (plist-get git :label))
+         (count (lambda (k what)
+                  (let ((n (or (plist-get row k) 0)))
+                    (and (> n 0) (format "%d %s%s" n what (if (= n 1) "" "s")))))))
+    (list (funcall count :agents "agent")
+          (funcall count :shells "shell")
+          (let ((origin (plist-get row :origin)))
+            (and origin (concat "← " (plist-get origin :short))))
+          (and label (not (string-empty-p label))
+               (propertize label 'face
+                           (cond ((equal (plist-get git :checks) "failing") 'org-varde-board-blocked)
+                                 ((equal (plist-get git :stage) "edited") 'org-varde-board-waiting)
+                                 ((equal (plist-get git :stage) "landed") 'org-varde-board-working)
+                                 (t face)))))))
+
 (defun org-varde--view-facts (data)
   "Where the task DATA shows stands, on one line, as the terminal's view
 has it: its row's meta on the board (a live session's status, else the
@@ -1814,34 +1830,21 @@ task's state; what it left running; where it came from; git; the
 project), then the Inbox, its worktree's branch and its link."
   (let* ((row (org-varde--row (plist-get data :id)))
          (status (plist-get row :status))
-         (git (plist-get row :git))
-         (label (plist-get git :label))
          (worktree (plist-get data :worktree))
-         (count (lambda (k what)
-                  (let ((n (or (plist-get row k) 0)))
-                    (and (> n 0) (format "%d %s%s" n what (if (= n 1) "" "s"))))))
          (parts
           (delq nil
-                (list (if (member status '("working" "delegated" "waiting" "blocked"))
-                          (propertize (org-varde--status-word status) 'face (org-varde--status-face status))
-                        (or (plist-get row :state) (plist-get data :state)))
-                      (funcall count :agents "agent")
-                      (funcall count :shells "shell")
-                      (let ((origin (plist-get row :origin)))
-                        (and origin (concat "← " (plist-get origin :short))))
-                      (and label (not (string-empty-p label))
-                           (propertize label 'face
-                                       (cond ((equal (plist-get git :checks) "failing") 'org-varde-board-blocked)
-                                             ((equal (plist-get git :stage) "edited") 'org-varde-board-waiting)
-                                             ((equal (plist-get git :stage) "landed") 'org-varde-board-working)
-                                             (t 'org-varde-quiet))))
-                      (org-varde--project-name (or (plist-get row :project) (plist-get data :project)))
-                      (org-varde--schedule-mark row (truncate (* 1000 (float-time))))
-                      (and (plist-get row :inbox) "in the Inbox")
-                      (and (equal (plist-get worktree :state) "active") (plist-get worktree :branch)
-                           (concat "worktree " (plist-get worktree :branch)))
-                      (let ((link (plist-get row :external)))
-                        (and link (concat "linked to " link)))))))
+                (append
+                 (list (if (member status '("working" "delegated" "waiting" "blocked"))
+                           (propertize (org-varde--status-word status) 'face (org-varde--status-face status))
+                         (or (plist-get row :state) (plist-get data :state))))
+                 (org-varde--row-parts row 'org-varde-quiet)
+                 (list (org-varde--project-name (or (plist-get row :project) (plist-get data :project)))
+                       (org-varde--schedule-mark row (truncate (* 1000 (float-time))))
+                       (and (plist-get row :inbox) "in the Inbox")
+                       (and (equal (plist-get worktree :state) "active") (plist-get worktree :branch)
+                            (concat "worktree " (plist-get worktree :branch)))
+                       (let ((link (plist-get row :external)))
+                         (and link (concat "linked to " link))))))))
     (mapconcat (lambda (p) (if (get-text-property 0 'face p) p (org-varde--quiet p)))
                parts (org-varde--quiet " · "))))
 
@@ -2017,16 +2020,21 @@ or where the task came from."
       (get-text-property (point) 'org-varde-from)
       (get-text-property (point) 'org-varde-run)))
 
-(defun org-varde-show-next (&optional n)
-  "Move to the Nth next heading or line of the cairn."
-  (interactive "p")
-  (let ((step (if (< (or n 1) 0) -1 1)) (left (abs (or n 1))) found)
+(defun org-varde--next-stop (stop-p n what)
+  "Move to the Nth line after this one where STOP-P holds; negative N
+moves back.  WHAT is what there is no more of, when there is none."
+  (let ((step (if (< n 0) -1 1)) (left (abs n)) found)
     (save-excursion
       (beginning-of-line)
       (while (and (> left 0) (zerop (forward-line step)) (not (eobp)))
-        (when (org-varde--view-stop-p)
+        (when (funcall stop-p)
           (setq found (point) left (1- left)))))
-    (if found (goto-char found) (user-error "No more"))))
+    (if found (goto-char found) (user-error "No more%s" what))))
+
+(defun org-varde-show-next (&optional n)
+  "Move to the Nth next heading or line of the cairn."
+  (interactive "p")
+  (org-varde--next-stop #'org-varde--view-stop-p (or n 1) ""))
 
 (defun org-varde-show-previous (&optional n)
   "Move to the Nth previous heading or line of the cairn."
@@ -2101,26 +2109,28 @@ A folded group it is in opens, as TAB opens Needs you."
   (interactive "p")
   (org-varde-show-next-task (- n)))
 
-(defun org-varde--nothing-needs-you ()
-  "What to say when nothing in the board's project needs you."
-  (let ((elsewhere (- (length (org-varde--needs-you)) (length (org-varde--needs-you-here)))))
-    (if (> elsewhere 0)
-        (format "Nothing here needs you; %d in other projects: . shows them" elsewhere)
-      "Nothing needs you")))
+(defun org-varde--step-needs-you (here n go)
+  "Call GO with the Nth task after HERE that needs you, in the project the
+board keeps to, round to the first; negative N goes back, round to the
+last.  When nothing there needs you, say where the rest are."
+  (let* ((tasks (mapcar (lambda (r) (plist-get r :task)) (org-varde--needs-you-here)))
+         (len (length tasks))
+         (i (seq-position tasks here)))
+    (if (zerop len)
+        (let ((elsewhere (length (org-varde--needs-you))))
+          (if (> elsewhere 0)
+              (message "Nothing here needs you; %d in other projects: . shows them" elsewhere)
+            (message "Nothing needs you")))
+      (let ((to (mod (cond (i (+ i n)) ((> n 0) (1- n)) (t n)) len)))
+        (funcall go (nth to tasks))
+        (when (> len 1) (message "Needs you: %d of %d" (1+ to) len))))))
 
 (defun org-varde-show-next-needs-you (&optional n)
   "Show the Nth next task that needs you, round to the first, keeping the
 view open.  Negative N goes back, round to the last."
   (interactive "p")
   (org-varde--view-task-only)
-  (let* ((tasks (mapcar (lambda (r) (plist-get r :task)) (org-varde--needs-you-here)))
-         (len (length tasks))
-         (i (seq-position tasks org-varde--task)))
-    (if (zerop len)
-        (message "%s" (org-varde--nothing-needs-you))
-      (let ((to (mod (cond (i (+ i n)) ((> n 0) (1- n)) (t n)) len)))
-        (org-varde--view-step (nth to tasks))
-        (when (> len 1) (message "Needs you: %d of %d" (1+ to) len))))))
+  (org-varde--step-needs-you org-varde--task (or n 1) #'org-varde--view-step))
 
 (defun org-varde-show-tab ()
   "On a section's heading, fold or unfold it, as TAB does in org; else
@@ -2133,7 +2143,7 @@ show the next task that needs you."
 (defun org-varde-show-previous-needs-you (&optional n)
   "Show the Nth previous task that needs you, round to the last."
   (interactive "p")
-  (org-varde-show-next-needs-you (- n)))
+  (org-varde-show-next-needs-you (- (or n 1))))
 
 (defun org-varde--item ()
   "The line of the cairn at point, as (SECTION ID TEXT), or nil."
@@ -2648,7 +2658,7 @@ are not saved."
 (defun org-varde--edit-keys (save cancel)
   "The keys of a buffer you write in, for its header line: SAVE and CANCEL
 say what they do.  Under evil, its ex commands."
-  (if (bound-and-true-p evil-local-mode)
+  (if (org-varde--evil-p)
       (format ":w %s  :q %s" save cancel)
     (format "C-c C-c %s  C-c C-k %s" save cancel)))
 
@@ -2778,11 +2788,11 @@ is in, alone, asked for when there is no task here."
     ("id" "status") ("conventions" "convention") ("gotchas" "gotcha") ("howto" "how-to")
     (_ kind)))
 
-;;;###autoload
 (defvar-local org-varde--recall-args nil
   "What the recall buffer shows: (WORDS ALL PROJECT), as
 `org-varde-recall' took them, for \\[org-varde-recall-toggle-scope].")
 
+;;;###autoload
 (defun org-varde-recall (words &optional all project)
   "Search what earlier tasks learned for WORDS: in the project here first,
 as the board's recall does, else in every project.  With a prefix ALL,
@@ -2881,13 +2891,7 @@ A closed one is reopened once you confirm."
 (defun org-varde-recall-next (&optional n)
   "Move to the Nth next hit; negative N, back."
   (interactive "p")
-  (let ((step (if (< (or n 1) 0) -1 1)) (left (abs (or n 1))) found)
-    (save-excursion
-      (beginning-of-line)
-      (while (and (> left 0) (zerop (forward-line step)) (not (eobp)))
-        (when (get-text-property (point) 'org-varde-recall-at)
-          (setq found (point) left (1- left)))))
-    (if found (goto-char found) (user-error "No more hits"))))
+  (org-varde--next-stop (lambda () (get-text-property (point) 'org-varde-recall-at)) (or n 1) " hits"))
 
 (defun org-varde-recall-previous (&optional n)
   "Move to the Nth previous hit."
@@ -3088,7 +3092,6 @@ marked done offer to close the tasks it links."
 
 ;; Heading per task, which org-varde 1.1 dropped: tasks live on the board,
 ;; and org links to them.
-(declare-function org-varde-new-here "org-varde-board" ())
 
 (defun org-varde-start ()
   "Go to the open task the heading at point links, else make one from it."

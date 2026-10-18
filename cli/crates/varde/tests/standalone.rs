@@ -126,13 +126,7 @@ fn list_keeps_to_a_project_when_asked() {
     let mut c = e.cmd(&["list", "--json", "--project"]);
     let board: Value =
         serde_json::from_slice(&c.current_dir(e.path("other")).output().unwrap().stdout).unwrap();
-    let titles: Vec<&str> = board["groups"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|g| g["rows"].as_array().unwrap())
-        .map(|r| r["title"].as_str().unwrap())
-        .collect();
+    let titles: Vec<&str> = all_rows(&board).iter().map(|r| r["title"].as_str().unwrap()).collect();
     assert_eq!(titles, ["There"]);
 }
 
@@ -183,14 +177,11 @@ fn a_new_task_can_be_written_in_the_editor() {
     prepared(&e);
     // An editor that keeps the hint and the context typed, fills in the
     // empty Title, and writes more context.
-    let editor = e.path("editor");
-    std::fs::write(
-        &editor,
+    let editor = e.script(
+        "editor",
         // Not `sed -i`, which BSD sed (macOS) takes differently.
         "#!/bin/sh\nsed 's/^Title: $/Title: Cache by locale/' \"$1\" > \"$1.new\" && mv \"$1.new\" \"$1\"\nprintf 'Start in cache.rs\\nthen the tests\\n' >> \"$1\"\n",
-    )
-    .unwrap();
-    std::fs::set_permissions(&editor, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
+    );
     t.type_in(&pane, &e.typed(&format!("VISUAL={} {}", editor.display(), env!("CARGO_BIN_EXE_varde"))));
     let shown = || t.tmux(&["capture-pane", "-p", "-t", &pane]).unwrap();
     wait("the board", || shown().contains("Try it"));

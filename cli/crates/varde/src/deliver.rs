@@ -140,20 +140,15 @@ fn start(conn: &Connection, run: &str, source: Source, now: i64, updates: bool) 
     let mut blocks = Blocks::default();
     if saw.held {
         // Held out of memory, but never of what the user wrote.
-        let held = |version: Option<i64>| Shown {
-            kind: "holdout",
-            task: Some(task.id.clone()),
-            version,
-            items: vec![],
-        };
+        let held = || Shown { kind: "holdout", task: Some(task.id.clone()), version: None, items: vec![] };
         if let Some((c, _)) = &cairn {
-            blocks.cairn = doc_block(&mut out, CAIRN, &users(c), &CAIRN_FIRST, held(None));
+            blocks.cairn = doc_block(&mut out, CAIRN, &users(c), &CAIRN_FIRST, held());
         }
         if let Some((c, _)) = &project {
-            blocks.project = doc_block(&mut out, PROJECT, &users(c), &PROJECT_FIRST, held(None));
+            blocks.project = doc_block(&mut out, PROJECT, &users(c), &PROJECT_FIRST, held());
         }
         if blocks.cairn.is_none() && blocks.project.is_none() {
-            blocks.recorded.push(held(None));
+            blocks.recorded.push(held());
         }
         return Ok(Some(blocks.finish(conn, run, out, now)?));
     }
@@ -419,11 +414,11 @@ fn origin_block(conn: &Connection, out: &mut Budget, origin: Option<&str>) -> Re
         line.push_str(&format!(" Where that stands: {}", c.status));
         shown.version = Some(version);
     }
-    Ok(out.lines("", &[(line, None)], shown))
+    Ok(out.line("", &line, shown))
 }
 
-/// matched and whether its code is gone.
-/// shown above already says is left out.
+/// `found`, as `what` in this project: a line for each hit that fits,
+/// with its task, what matched and whether its code is gone.
 fn related_block(out: &mut Budget, found: &memory::Found, what: &str) -> Vec<Block> {
     let mut header = format!(
         "{what} in this project (varde show <id> for the whole cairn, varde recall <words> for more):"
@@ -448,7 +443,7 @@ fn related_block(out: &mut Budget, found: &memory::Found, what: &str) -> Vec<Blo
             items: h.reference.iter().cloned().collect(),
         };
         // The header goes with the first line that fits.
-        if let Some(b) = out.lines(&header, &[(line, None)], shown) {
+        if let Some(b) = out.line(&header, &line, shown) {
             header.clear();
             blocks.push(b);
         }
@@ -561,28 +556,13 @@ impl Budget {
         }
     }
 
-    /// Room for `header` and as many of `lines` as fit, in order; the ids
-    /// of the bullets that made it go into `shown`. `None` when none did.
-    fn lines(&mut self, header: &str, lines: &[(String, Option<i64>)], mut shown: Shown) -> Option<Block> {
-        let mut text = header.to_string();
-        let (mut w, mut n) = (words(header), header.len() + 1);
-        let mut any = false;
-        for (line, id) in lines {
-            if !self.room(w + words(line), n + line.len() + 1) {
-                continue;
-            }
-            if !text.is_empty() {
-                text.push('\n');
-            }
-            text.push_str(line);
-            w += words(line);
-            n += line.len() + 1;
-            any = true;
-            shown.items.extend(id.map(|i| i.to_string()));
-        }
-        if !any {
+    /// Room for `line` under `header`, which may be empty. `None` when it
+    /// does not fit.
+    fn line(&mut self, header: &str, line: &str, shown: Shown) -> Option<Block> {
+        if !self.room(words(header) + words(line), header.len() + line.len() + 2) {
             return None;
         }
+        let text = if header.is_empty() { line.to_string() } else { format!("{header}\n{line}") };
         self.add(&text);
         Some(Block { text, shown })
     }

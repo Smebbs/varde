@@ -29,6 +29,32 @@ fn last_cwd(e: &Env) -> String {
     log.lines().last().unwrap().to_string()
 }
 
+/// The fake agent typed into a shell in `dir`, as a session varde did not
+/// launch.
+fn typed_in(e: &Env, dir: &Path, args: &[&str]) {
+    let out = e.env(&mut Command::new(e.path("claude"))).args(args).current_dir(dir).env("PWD", dir).output();
+    assert!(out.unwrap().status.success());
+}
+
+/// A worktree of your own, `repo-feature` on branch `feature`, beside the
+/// repository: the repository, it, and a task made in it.
+fn a_task_in_your_own_worktree(e: &Env) -> (PathBuf, PathBuf, String) {
+    let repo = e.repo().canonicalize().unwrap();
+    let mine = e.dir.path().canonicalize().unwrap().join("repo-feature");
+    git(&repo, &["worktree", "add", "-q", "-b", "feature", &mine.to_string_lossy()]);
+    let t = String::from_utf8(e.cmd(&["new", "Mine"]).current_dir(&mine).output().unwrap().stdout).unwrap();
+    (repo, mine, t.trim().to_string())
+}
+
+/// `.env` in the repository, ignored, and copied into task worktrees.
+fn an_included_env(e: &Env) {
+    std::fs::write(e.repo().join(".gitignore"), ".env\n").unwrap();
+    std::fs::write(e.repo().join(".worktreeinclude"), ".env\n").unwrap();
+    git(&e.repo(), &["add", "."]);
+    git(&e.repo(), &["commit", "-q", "-m", "setup"]);
+    std::fs::write(e.repo().join(".env"), "A=1").unwrap();
+}
+
 #[test]
 fn a_task_whose_worktree_landed_gets_a_new_one() {
     let e = env();
@@ -184,10 +210,7 @@ fn a_run_restored_below_the_worktree_root_resumes_there() {
     let src = path.join("src");
     // The conversation resumed by hand from the subdirectory.
     let native = e.show(&t)["runs"][0]["native_id"].as_str().unwrap().to_string();
-    let mut agent = Command::new(e.path("claude"));
-    agent.args(["--resume", &native]);
-    let out = e.env(&mut agent).current_dir(&src).env("PWD", &src).output().unwrap();
-    assert!(out.status.success());
+    typed_in(&e, &src, &["--resume", &native]);
     let runs = e.show(&t)["runs"].as_array().unwrap().clone();
     assert_eq!(runs.last().unwrap()["cwd"].as_str().unwrap(), src.to_string_lossy());
     e.ok(&["done", &t, "--remove", "--force"]);
@@ -293,11 +316,7 @@ fn an_empty_varde_home_is_unset() {
 #[test]
 fn a_worktree_with_changed_included_files_is_not_removed_when_its_work_lands() {
     let e = env();
-    std::fs::write(e.repo().join(".gitignore"), ".env\n").unwrap();
-    std::fs::write(e.repo().join(".worktreeinclude"), ".env\n").unwrap();
-    git(&e.repo(), &["add", "."]);
-    git(&e.repo(), &["commit", "-q", "-m", "setup"]);
-    std::fs::write(e.repo().join(".env"), "A=1").unwrap();
+    an_included_env(&e);
     let (t, path) = worktree_with_a_commit(&e, "Secrets");
     assert_eq!(std::fs::read_to_string(path.join(".env")).unwrap(), "A=1");
     std::fs::write(path.join(".env"), "A=2").unwrap();
@@ -321,11 +340,7 @@ fn a_worktree_with_changed_included_files_is_not_removed_when_its_work_lands() {
 #[test]
 fn dropping_a_worktree_with_changed_included_files_keeps_it() {
     let e = env();
-    std::fs::write(e.repo().join(".gitignore"), ".env\n").unwrap();
-    std::fs::write(e.repo().join(".worktreeinclude"), ".env\n").unwrap();
-    git(&e.repo(), &["add", "."]);
-    git(&e.repo(), &["commit", "-q", "-m", "setup"]);
-    std::fs::write(e.repo().join(".env"), "A=1").unwrap();
+    an_included_env(&e);
     let (t, path) = worktree_with_a_commit(&e, "Secrets");
     std::fs::write(path.join(".env"), "A=2").unwrap();
     // The discarded ref keeps no ignored file: the change would be lost.
@@ -383,6 +398,7 @@ fn start_asks_in_json_when_it_has_no_terminal() {
     // Without --json it is an error naming the flag.
     let u = e.new_task("Also undecided");
     let out = e.run(&["start", &u]);
+    assert!(!out.status.success());
     assert!(String::from_utf8_lossy(&out.stderr).contains("pass --worktree"));
 }
 
@@ -418,9 +434,7 @@ fn a_restored_worktree_is_set_up_at_its_root_and_only_when_remade() {
     commit(&path, "src/lib.txt", "l");
     let src = path.join("src");
     let native = e.show(&t)["runs"][0]["native_id"].as_str().unwrap().to_string();
-    let mut agent = Command::new(e.path("claude"));
-    agent.args(["--resume", &native]);
-    assert!(e.env(&mut agent).current_dir(&src).env("PWD", &src).output().unwrap().status.success());
+    typed_in(&e, &src, &["--resume", &native]);
     git(
         &e.repo(),
         &["config", "varde.setup", "echo ran >> \"$(git rev-parse --show-toplevel)/setup.log\"; pwd > where"],
@@ -460,25 +474,19 @@ fn a_bad_repository_setting_is_ignored_with_a_notice() {
 )]
 fn a_task_belongs_to_the_checkout_it_was_made_in() {
     let e = env();
-    let repo = e.repo().canonicalize().unwrap();
     // A worktree of your own is a project of its own: the agent edits it,
     // not the main checkout.
-    let mine = e.dir.path().canonicalize().unwrap().join("repo-feature");
-    git(&repo, &["worktree", "add", "-q", "-b", "feature", &mine.to_string_lossy()]);
-    let t = String::from_utf8(e.cmd(&["new", "Mine"]).current_dir(&mine).output().unwrap().stdout).unwrap();
-    assert_eq!(e.show(t.trim())["project"].as_str().unwrap(), mine.to_string_lossy());
-    e.ok(&["attach", t.trim(), "--worktree", "never"]);
+    let (repo, mine, t) = a_task_in_your_own_worktree(&e);
+    assert_eq!(e.show(&t)["project"].as_str().unwrap(), mine.to_string_lossy());
+    e.ok(&["attach", &t, "--worktree", "never"]);
     assert_eq!(last_cwd(&e), mine.to_string_lossy());
     // A session typed into a task's worktree varde made is in the repository.
     let u = e.new_task("Made by varde");
     e.ok(&["attach", &u, "--worktree", "always"]);
     let (made, _) = worktree(&e, &u);
-    let mut agent = Command::new(e.path("claude"));
-    agent.args(["--session-id", "typed-in-the-worktree"]);
-    assert!(e.env(&mut agent).current_dir(&made).env("PWD", &made).output().unwrap().status.success());
-    let board: Value = serde_json::from_str(&e.ok(&["list", "--json"])).unwrap();
-    let inbox = board["groups"].as_array().unwrap().iter().find(|g| g["key"] == "inbox").expect("an inbox");
-    let task = inbox["rows"][0]["task"].as_str().unwrap();
+    typed_in(&e, &made, &["--session-id", "typed-in-the-worktree"]);
+    let board = e.board();
+    let task = group(&board, "inbox")[0]["task"].as_str().unwrap();
     assert_eq!(e.show(task)["project"].as_str().unwrap(), repo.to_string_lossy());
     assert!(e.ok(&["accept", task]).starts_with("accepted "));
     let again = e.run(&["accept", task]);
@@ -487,12 +495,9 @@ fn a_task_belongs_to_the_checkout_it_was_made_in() {
         String::from_utf8_lossy(&again.stderr).contains(" is not in the Inbox: accept is for Inbox tasks")
     );
     // Beside one that is, it is only named.
-    let mut agent = Command::new(e.path("claude"));
-    agent.args(["--session-id", "another-of-your-own"]);
-    assert!(e.env(&mut agent).current_dir(&repo).env("PWD", &repo).output().unwrap().status.success());
-    let board: Value = serde_json::from_str(&e.ok(&["list", "--json"])).unwrap();
-    let inbox = board["groups"].as_array().unwrap().iter().find(|g| g["key"] == "inbox").expect("an inbox");
-    let other = inbox["rows"][0]["short"].as_str().unwrap();
+    typed_in(&e, &repo, &["--session-id", "another-of-your-own"]);
+    let board = e.board();
+    let other = group(&board, "inbox")[0]["short"].as_str().unwrap();
     let both = e.ok(&["accept", other, task]);
     assert_eq!(
         both,
@@ -503,12 +508,9 @@ fn a_task_belongs_to_the_checkout_it_was_made_in() {
 #[test]
 fn a_worktree_of_your_own_gives_its_tasks_its_branch() {
     let e = env();
-    let repo = e.repo().canonicalize().unwrap();
-    let mine = e.dir.path().canonicalize().unwrap().join("repo-feature");
-    git(&repo, &["worktree", "add", "-q", "-b", "feature", &mine.to_string_lossy()]);
+    let (repo, mine, t) = a_task_in_your_own_worktree(&e);
+    let t = t.as_str();
     commit(&mine, "feature.txt", "feature");
-    let t = String::from_utf8(e.cmd(&["new", "Mine"]).current_dir(&mine).output().unwrap().stdout).unwrap();
-    let t = t.trim();
     e.ok(&["attach", t, "--worktree", "always"]);
     let w = &e.show(t)["worktree"];
     let path = PathBuf::from(w["path"].as_str().unwrap());
@@ -640,11 +642,8 @@ fn a_drop_refuses_a_repository_no_ref_can_keep() {
 #[test]
 fn a_task_outlives_the_worktree_of_your_own_it_was_made_in() {
     let e = env();
-    let repo = e.repo().canonicalize().unwrap();
-    let mine = e.dir.path().canonicalize().unwrap().join("repo-feature");
-    git(&repo, &["worktree", "add", "-q", "-b", "feature", &mine.to_string_lossy()]);
-    let t = String::from_utf8(e.cmd(&["new", "Mine"]).current_dir(&mine).output().unwrap().stdout).unwrap();
-    let t = t.trim();
+    let (repo, mine, t) = a_task_in_your_own_worktree(&e);
+    let t = t.as_str();
     e.ok(&["attach", t, "--worktree", "always"]);
     let (path, _) = worktree(&e, t);
     commit(&path, "work.txt", "work");

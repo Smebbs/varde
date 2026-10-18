@@ -1,19 +1,14 @@
 # varde — design
 
-Status: **built and released** (§10; 1.0.0 shipped phase 5). 1.1 adds a
-board kept to its project, a stable board with one keymap on both
-clients, cairns seen and edited a line at a time (Q26–Q30), and org
-meeting varde through links instead of a heading per task (Q31). The CLI is in `cli/`, and the
-Emacs client is `org-varde.el` and `org-varde-board.el`. It replaces
-org-agent v2, an earlier implementation written entirely in Emacs Lisp.
-The decisions were settled one at a time; §13 lists them.
+varde is a standalone CLI that runs AI coding-agent sessions as tasks.
+Each task keeps a small, bounded memory, its cairn, for the next
+session to find. *Varde* is Norwegian for a cairn, the pile of stones
+that marks a mountain trail for whoever comes next. Emacs and org-mode
+are one client of it, and the reference integration for others.
 
-*Varde* is Norwegian for a cairn, the pile of stones that marks a
-mountain trail for whoever comes next. varde is a standalone CLI that
-runs AI coding-agent sessions as tasks. Each task keeps a small, bounded
-memory — its cairn — for the next session to find. Emacs and org-mode
-become one client of it. They are the main one for the author, and an
-example integration for everyone else.
+The CLI is in `cli/`, and the Emacs client is `org-varde.el` and
+`org-varde-board.el`. The decisions were settled one at a time; §12
+lists them.
 
 ## 0. Summary
 
@@ -26,31 +21,30 @@ example integration for everyone else.
 | **Memory** | One cairn per task, written by its updates, and one per project, written only by you (Q38): a fixed shape, hard caps, changed only by checked edits. It reaches every session through the agent's hooks, anchored bullets are checked against the code, and `varde eval` measures what it was worth. |
 | **Standalone UI** | Plain commands with `--json`, plus a TUI board (`varde` with no arguments). |
 | **Emacs** | A thin client. It renders a board varde has already grouped, and adds terminals, workspaces and the task view. Org meets varde through `varde:` links in your notes, which show where their tasks stand; nothing is synced, and org-varde writes nothing to org but the links you ask for (Q31). |
-| **Repo** | This one. The CLI lives in `cli/`. The elisp stays as the reference integration, and `docs/clients.md` is the contract for other clients. |
+| **Repo** | This one. The CLI lives in `cli/`. The elisp is the reference integration, and `docs/clients.md` is the contract for other clients. |
 
-## 1. Why, measured
+## 1. Principles
 
-v2 was built for speed, and it got fast. It did not become reliable.
-
-- **Size.** It was budgeted at ~1 480 lines of elisp and reached 4 362
-  lines.
-- **Churn.** 27 of its 35 non-merge commits since then are fixes or
-  reverts.
-
-The fixes cluster by subsystem, and each cluster has a structural cause
-behind it:
-
-| Subsystem | Fixes | Structural cause |
-|---|---|---|
-| Identity, status, resume | ~12 | Facts about one session live in four places: org properties, `state.eld`, the spool, and a buffer-local variable. No transaction spans them. The heading is identified by the agent's session id, which changes on every resume or fork. Liveness is guessed from hooks, a kill-buffer hook and expiry at startup. |
-| Org writes, follow-ups | ~5 | Org files are both the database and the UI. Writes find headings by a scan `:pos` but write through live buffers. Every write saves the user's buffer. Headings are created from hook events and then renamed in a race. |
-| Notes | 4 | Memory is an append-only log whose only controls are prompt word budgets. One drawer reached 81% of its subtree; another hit 1 986 words. |
-| Worktree / git | 4 + a data-loss bug | Merge, conflict hand-off and teardown are all mixed in with editor UI. |
-| Workspace / terminal | 3–4 | Workspace names come from title slugs. Doom calls are wrapped in `ignore-errors`. The command line is typed into a shell. |
-
-The spool also loses data by design. A drain deletes each file even
-when its handler fails. Once the spool passes 500 files it drops the
-oldest, and user notes are among them.
+- **One owner per fact.** varde owns every durable fact, and changes it
+  only inside a transaction. Org holds only `varde:` links.
+- **Status is derived** from events and process liveness, never stored.
+- **Hooks never call the editor**, and nothing in a render path spawns
+  a process.
+- **No LLM in any interactive path.** Model calls run detached.
+- **A recursion guard.** varde's own agent calls set `VARDE_INTERNAL=1`,
+  which the hooks ignore.
+- **Sessions are named before they start**: a run's id exists before its
+  agent does, so nothing is matched up afterwards.
+- **A first prompt is the signal that a session is real.**
+- **The agent view is disabled for each launch**: a window varde opened
+  holds one task's session, not a dashboard that starts sessions behind
+  varde's back.
+- **Branches are reused, never re-suffixed**, and a task's branch is
+  followed through a rename (Q32).
+- **A worktree is force-removed only when it is clean**, submodules
+  included.
+- **Word budgets, not sentence counts**, bound everything handed to a
+  session.
 
 ## 2. Goals
 
@@ -63,7 +57,7 @@ oldest, and user notes are among them.
    org.
 4. **Adaptable.** Every command a client needs speaks `--json`, context
    can be passed in, and clients get the board pre-grouped.
-5. **Emacs first-class.** It remains the author's main way of working.
+5. **Emacs first-class.** org-varde is a full client, not a viewer.
 
 Non-goals: MCP, orchestration, a daemon, LLM calls in any interactive
 path, attaching a second front end to a live session, cross-machine
@@ -239,7 +233,7 @@ plan(task, runs, worktrees, now) -> Focus(run) | Resume(run) | Fork(run) | Fresh
                                  + Reuse(path) | Restore(branch) | Create | None
 ```
 
-Its table tests cover every case from the v2 fix history. Clients only
+Its table tests cover every case. Clients only
 carry out the plan. `Focus` means "switch to where this run is". The
 TUI can do that only for the run it is suspended on, or, inside tmux,
 through the pane on the run's tty, or else the one tagged
@@ -491,8 +485,8 @@ conventions.
 
 ### 6.4 Deferred work
 
-v2 harvested follow-up TODOs from every session and buried the real
-ones. varde files deferred work only on your word: the session guidance
+Harvesting follow-up TODOs from every session buries the real ones.
+varde files deferred work only on your word: the session guidance
 (§8.1) tells the agent to run `varde new --from <run>` for work you ask
 it to leave for later, or agree to when it asks, and never for work only
 it thought of. There is no harvest, no dedup and no cap; the gate is
@@ -944,7 +938,7 @@ nothing to do:
 **Cost.** These hooks have 20 ms at p99, twice another hook's (Q20, Q35). The bench's store
 has 1 000 tasks, each with a cairn of ten bullets and two notes, and a
 project cairn: 13 000 rows of recall's index, seven times the
-evaluation store's. Measured on the author's machine under load 0.5 to
+evaluation store's. Measured on a Linux machine under load 0.5 to
 2: a turn end at p99 4.2–4.3 ms, a start with no task 4.7–5.0 ms, and
 the memory hooks at median 1.6–2.6 ms and p99 5.6–9.4 ms, the first
 prompt of an ad-hoc session the slowest. Measured again under load 2 to
@@ -968,7 +962,7 @@ one), so each job's tidy-up merges them a bounded step towards one
 whenever there are more than four.
 
 The bench's store is in the system's temporary directory, which is a
-tmpfs on the author's machine, where a sync costs nothing. On ext4 a
+tmpfs on the machine measured, where a sync costs nothing. On ext4 a
 hook syncs three times: the WAL's header on its first commit (the last
 process's close removed the WAL) and the WAL and the database at the
 checkpoint on close. A turn end measured 11 ms there and a first prompt
@@ -1086,7 +1080,7 @@ deleted on a guess.
   (`src/`, `lib/`, `cli/`, `crates/`, `test/`, `tests/`, `docs/`,
   `scripts/`, `packages/`, `apps/`, `cmd/`, `pkg/`, `internal/`,
   `include/`, `examples/`, `benches/`, `.github/`). When any `a/b`
-  counted, `before/after`, `NOK/day` and `origin/main` were checked as
+  counted, `before/after`, `EUR/day` and `origin/main` were checked as
   paths and marked stale; on the evaluation's store the rule took
   current anchored bullets from 196 to 112, slash anchors from 112 to
   19 (all real paths or backticked names), and cleared 314 false marks.
@@ -1202,8 +1196,7 @@ These Claude details live only inside the adapter:
   prompt with the report that answered it, within a budget.
 - **Unblocking.** Claude fires no event when a permission dialog is
   answered. So `unblocked` is inferred from the first `PostToolUse`
-  after a `PermissionRequest`, checked against the database instead of
-  shell mark files.
+  after a `PermissionRequest`, checked against the database.
 - **Failures.** An approved tool that fails sends `PostToolUseFailure`
   instead of `PostToolUse`, and a turn that ends on an API error sends
   `StopFailure` instead of `Stop` (2.1.280). Each counts as the event
@@ -1247,7 +1240,7 @@ These Claude details live only inside the adapter:
   (2.1.280): anything unexpected in it says nothing, and no hook reads it.
   A session varde did not launch keeps its status until its next event,
   or until its process is gone.
-- **Lineage.** Measured against Claude Code 2.1.280 in phase 1:
+- **Lineage.** Measured against Claude Code 2.1.280:
   - `--resume` keeps the native id and sends `SessionStart` with
     `source: "resume"`. varde records a new Run for the same task.
   - `--fork-session` mints a new id and sends `source: "fork"`, but
@@ -1343,23 +1336,8 @@ its last user or assistant message (`last_message`).
 | Workspaces | Optional, for Doom: named by the task's short id, with the title shown for display only. Every call is behind one check that Doom's workspaces are loaded (`org-varde-workspaces` turns them off), and opening or closing one reports a failure rather than raising it. `org-varde-next-needs-you` goes from anywhere to the session of the next task that needs you, from the board last fetched: the first unseen one that is not here, else the one after here, here being the task of the terminal or view you are in, never a board line or link at point; pressed again at once, the one after the last it went to; a task found running outside Emacs is passed over until its row moves on. `org-varde-board` comes back to the board in the workspace that holds it, drawn once in sight so its window keeps its place; from a task's terminal or view it keeps its scope, asks varde nothing, and is on that task. |
 | Seen | Looking at a task's terminal, in the selected window while Emacs has focus, runs `varde seen` if the board shows that task as unread. The board draws a waiting or blocked row filled while it is unread and hollow once seen. |
 | Memory | Never written to org. `v` (or `org-varde-show`, or a link `[[varde:SHORT]]`) opens a task's view at once, without git, from `show --json --no-git`: the cairn first, then the context, notes, sessions, and the git and worktree lines when varde has them. The keys are the terminal view's (Q30): each line carries its id, `n`/`p` or `j`/`k` pick one, `e` edits the line at point (on the Status line, the Status), `o` adds to the section at point, `a` to one picked (the Status among them), `x` removes the line without asking (on a Status you set, hands it back: `--rm status`) and `u` brings it back where it was (or makes a Status handed back yours again, `--add status`; with neither, it reopens the task `d`, `P` or `X` closed in the view, so their `u reopens` holds there), each one `varde edit --add/--set/--rm/--restore … --json`, which answers with the cairn the view then shows. `z` folds a section; `J`/`K` and `TAB`/`S-TAB` go to the next task, or the next that needs you, the view kept open; `RET`, `s`, `R`, `F`, `d`, `P`, `m` and `/` act on the task shown as on the board, and `?` then `X` drops it. The prompt counts words against `show --json`'s `limits`, and a refusal asks again with the text and varde's reason. `E` edits the whole document as text in the cairn buffer. `[` and `]` switch to the view's Project tab, the project cairn, with the same keys and sections of its own. `g` (`gr` under evil) fetches either view again, and saving a cairn does too. In `/`'s results, RET or `v` (`K` under evil) on a hit shows its task, or the project cairn it is from, in the results' window (`q` brings them back). The edits run synchronously: each is one short transaction, and the answer is needed to ask again. |
-| Size | About 2 780 lines in `org-varde.el` and 1 140 in `org-varde-board.el`, 3 390 without comments or blank lines (3 930 before Q31). The 1 000 of §10 did not survive asynchronous calls, terminals and workspaces, and the task view with its line edits; keeping headings and tasks in step, which took about 1 050 lines and 85 tests, was dropped instead (Q31). |
 
-## 10. Build order
-
-| # | Phase | Done when |
-|---|---|---|
-| 1 | Cargo workspace, schema and migrations, `varde hook`, status machine, `varde list`, the thin plugin installed **next to** v2 | A week of shadow mode, with statuses agreeing with the v2 board, apart from explained v2 bugs. Hook p99 under 5 ms. Hooks fault-injected (database locked, disk full, malformed JSON) and still exiting 0. |
-| 2 | `new/start/run/attach/done/file`, the attach decision, worktrees, the TUI | varde is developed using varde, in a terminal, for real. Table tests cover every v2 fix case. |
-| 3 | Cairns: jobs, cursors, pinned notes, `edit`, history, `recall`, injected guidance | A week of cairns on varde's own tasks. Each is under its cap and judged useful, and no runaway updates happen. |
-| 4 | Emacs client, then cutover: the v2 hook is uninstalled, and the v2 elisp is removed | A week as the daily driver. Under 1 000 lines of elisp (it ended near 1 675, and has grown since, see §9), byte-compile clean, and ERT runs against a fake `varde`. |
-| 5 | Release builds (Linux, macOS arm64), CI on both, a non-Emacs README, `done --pr` through `gh` | Someone else reaches the full loop from the README. |
-
-The start is a fresh one. Nothing is imported from v2, and the old
-`:AGENT_LOG:` drawers stay in org as a read-only archive. Memory was
-rebuilt after phase 4 (§7, Q19).
-
-Practices from day one:
+## 10. Practices
 
 - **Tests.** Property tests for the status machine and the attach
   decision. Golden fixtures for the adapter.
@@ -1372,8 +1350,8 @@ Practices from day one:
   --nocapture` builds 1 000 tasks of 2 runs and 500 events each, each
   with a cairn and notes, and a project cairn, and times `varde list
   --json` and hooks end to end, process start included, the hooks that
-  hand a session memory among them (§7.3). Measured on the author's
-  Linux machine: list about 6 ms, hook p99 about 4.5 ms; under load 2
+  hand a session memory among them (§7.3). Measured on a Linux
+  machine: list about 6 ms, hook p99 about 4.5 ms; under load 2
   to 4 (other builds running, the CPU governor at `powersave`), list
   median 7.5–9.3 ms and hook p99 4.7–5.7 ms. The store is in the temporary
   directory, a tmpfs there, so the numbers leave out the syncs a store
@@ -1383,42 +1361,22 @@ Practices from day one:
 - **CI.** Runs on Linux and macOS, because the mac is where the
   `date +%s%N` and git 2.39 bugs turned up.
 
-## 11. Carried over from v2
+## 11. Deliberately left out
 
-- Hooks never call the editor.
-- No LLM in any interactive path.
-- A recursion-guard environment variable.
-- Sessions are named before they start.
-- A first prompt is the signal that a session is real.
-- The agent view is disabled for each launch.
-- Merged branches are reused, never re-suffixed. A task's branch is
-  followed through a rename (Q32).
-- A worktree is force-removed only when it is clean, submodules
-  included.
-- Word budgets, not sentence counts.
+What looks like a missing feature is often one of these.
 
-## 12. Deliberately dropped
-
-- The spool and its mark files.
-- `state.eld`.
-- Pending tokens.
-- Parsing the greeting to trace forks.
-- Liveness heuristics.
-- Addressing headings by `:pos`.
 - Saving user buffers. The links org-varde inserts are left unsaved.
-- A heading per task, kept in step (2026-10-13, Q31): the `VARDE_TASK`
-  property, starting from a heading, keyword changes closing, parking
-  and reopening tasks and tasks setting keywords back, archiving,
-  reconciling by time, the heading index over every org file, copied
-  headings, filing (`f`), linking (`l`), going to a heading (`o`, `h`)
-  and the agenda's status column. Links replace them.
-- Auto-created `agents.org` headings, and LLM titles on the hook's
-  path, or more than once. A detached call names a task varde titled
-  once (Q28). Naming it in its first cairn update (2026-10-12) came too
-  late: a task that had not yet run, or a session not yet updated, sat
-  on the board under its cut title.
-- The append-only `:AGENT_LOG:`, checkpoints, and summary-at-DONE.
-- Auto-filed follow-up TODOs. Deferred work becomes an Inbox task only
+- A heading per task, kept in step (2026-10-13, Q31): a task property
+  on headings, keyword changes closing, parking and reopening tasks and
+  tasks setting keywords back, archiving, reconciling by time, an index
+  over every org file, filing, linking, going to a heading and an
+  agenda status column. Links replace them.
+- LLM titles on the hook's path, or more than once. A detached call
+  names a task varde titled once (Q28). Naming it in its first cairn
+  update came too late: a task that had not yet run, or a session not
+  yet updated, sat on the board under its cut title.
+- An append-only memory log, checkpoints, and a summary at done.
+- Auto-filed follow-up tasks. Deferred work becomes an Inbox task only
   when you asked for it (§6.4).
 - Hiding old Inbox tasks. You drop what you do not want.
 - Conflict hand-off by typing into a session.
@@ -1426,18 +1384,15 @@ Practices from day one:
   do their own way (review, squash, rebase, a PR), and varde notices
   work landed by any route, so it was a rarely wanted convenience, and
   the only thing that made varde write to the base branch.
-- Title-slug workspace names.
-- The git snapshot cache in Emacs.
-- The skill, and the doctor's file diffing.
-- The archive-aware preamble, ancestor prose and sibling tables. Recall
-  and a capped context file replace them.
+- Workspaces named by title slugs; they are named by the task's short
+  id.
 - Whole-document cairn rewrites, fuzzy dedupe, and memory in the first
   prompt (§7).
 - Promotion into the project's cairn (2026-10-16, Q38). A model
   judging what holds across a project, from one task, kept what that
   task found, not what most tasks need.
 
-## 13. Decisions
+## 12. Decisions
 
 | # | Question | Decision |
 |---|---|---|
@@ -1450,13 +1405,11 @@ Practices from day one:
 | Q7 | Name and repo | `varde`, in this repo, under `cli/`. |
 | Q8 | Agents | Claude first, then pi (2026-10), behind one adapter trait that leaves room for Codex and others. |
 | Q9 | Memory model | One bounded cairn per task. Notes are pinned inputs. Your own lines are protected. History is kept. (Revised 2026-10-10, see Q19: updates are edits, not rewrites.) |
-| Q10 | Git scope | Worktree lifecycle only; varde never merges or writes to the base (revised 2026-10-11: `done --merge` dropped, §12). No conflict hand-off. PRs are read, not opened: a merged PR counts as landed. |
-| Q11 | Migration | A fresh start, with no import. |
+| Q10 | Git scope | Worktree lifecycle only; varde never merges or writes to the base (revised 2026-10-11: `done --merge` dropped, §11). No conflict hand-off. PRs are read, not opened: a merged PR counts as landed. |
 | Q12 | Claude integration | A thin plugin holding only hooks. Guidance and memory are injected by the binary. No skill. |
 | Q13 | Emacs board | Native, rendering varde's pre-grouped rows. |
 | Q14 | Inbox and links (2026-10-08) | `filed` meant both "accepted" and "in org", and only org gave it any meaning. It is now two separate things: the Inbox (did you ask for this task?) and a link (where else does it live?). Nothing leaves the board by itself apart from Done: the 7-day expiry of Unfiled tasks is gone. Filing means putting a task into org, and you ask for it on the board. Since Q31 (2026-10-13), org-varde no longer links tasks to headings: the link (`external`) stays in the core for other clients. |
 | Q15 | Fewer options (2026-10-08) | Every surface shows only what is used daily. Anything else stays reachable but out of sight: hidden CLI commands and flags, the board's `?` menu, `C-u` on start. Discarding work and dropping a task are one act, `drop`, which always keeps the work under a ref. `unpark` became `reopen`, and the worktree-cleanup command went, since `done` asks nothing. |
-| Q16 | Order | Core, then standalone, then cairn, then Emacs. varde is developed using itself from phase 2. |
 | Q17 | Settings (2026-10-10) | A config file for what is the user's (the agent and its command, memory, where worktrees go), and a repository's git config for what is the repository's (`varde.worktree`, `varde.base`, `varde.setup`). Nothing is matched by path, nothing committed is ever run, and hooks read neither. A broken setting is ignored with a notice and never stops a session. |
 | Q18 | Questions only the user can answer (2026-10-10) | `start` never guesses whether a first run gets a worktree, or which project a deferred task belongs to. It returns an `ask` plan and changes nothing; the client asks and calls again with the answer. `attach` in a terminal asks itself. |
 | Q19 | Memory, rebuilt (2026-10-10) | An evaluation found the cairn reached no session and lost what it learned (§7). Bullets are items with ids, and updates answer with edits that code checks against caps and gates. Memory reaches every session through the agent's hooks, however it starts. Anchors are checked against the code. What each session was shown is recorded, and `varde eval` reports what memory was worth. |
@@ -1468,7 +1421,7 @@ Practices from day one:
 | Q25 | Sessions varde did not launch (2026-10-10) | The hook finds the agent's process by name and records it. A session ends when its process is gone, whatever its last event said, and is then resumed, never focused or forked. With no process found, none is recorded: a wrong one would end a live session. |
 | Q26 | A board kept to its project (2026-10-12) | A board opened inside a repository (the TUI, in tmux or not, and Emacs from a buffer's directory) shows only that project's rows, once it has one on the board, so a fresh project does not open on an empty board. It is a view: the sweep, tmux bells and windows, and reconciling still see every task, and the header says how many tasks are elsewhere and how many of those need you, so nothing waiting is missed. `.` shows every project; `[board] scope = "all"` and `org-varde-board-scope` open there instead. `varde list` keeps every project unless `--project` asks, since clients and scripts read it. |
 | Q27 | Nothing typed is lost to one key (2026-10-12) | Every place a user writes keeps the text when they leave it: the board's new-task form puts a draft away on Esc, C-g or a failed create, and `n` brings it back (cleared, Esc drops it); org-varde's new-task buffer does the same on `C-c C-k`, and its cairn buffer asks before dropping changes; a cairn line typed in the board's view is put away the same way, one for each line, and outlives the board; a refused or stale `varde edit` keeps the text in a file. Every prompt of the board edits text one way, readline's, and the boards share their keys wherever Emacs allows (`P` parks in both, `v` shows, `[`/`]` switch its tabs (Q29), `R`/`F` start fresh or fork); the terminal board's keys can be bound in `[keys]`. |
-| Q28 | Titles written by a model, at creation (2026-10-12, revised 2026-10-13) | Reverses "no LLM title" (§12). A title cut from a first prompt or a context is often a greeting or half a question ("hey so the page is in english"), and a board is read by its titles. First the cairn update named the task, as a `TITLE:` line in its reply; that came too late, since a task made in the board had no update until it had run, and an ad-hoc session's waited for its first update, and it loosened the update's strict reply. Now one small detached call names a task when it is made (§6.2): `varde new` and the board start it, and the git refresh starts it for tasks a hook made, so no interactive path and no hook waits on a model. The agent and model are the updates' (the task's last run's agent, else the default; `memory.model`; `config.launch`), with varde's own system prompt, `VARDE_INTERNAL=1`, and the title kept only if `title::from_model` keeps it. Only a title varde wrote (cut from a first prompt or a context, the agent's for deferred work, or cut again after an edit cleared it), on a task not linked; asked once (`named`), a failure keeps the cut title; a title you type wins, the cut words are kept (`prompt_title`), and `memory.titles = false` turns it off. |
+| Q28 | Titles written by a model, at creation (2026-10-12, revised 2026-10-13) | Reverses "no LLM title" (§11). A title cut from a first prompt or a context is often a greeting or half a question ("hey so the page is in english"), and a board is read by its titles. First the cairn update named the task, as a `TITLE:` line in its reply; that came too late, since a task made in the board had no update until it had run, and an ad-hoc session's waited for its first update, and it loosened the update's strict reply. Now one small detached call names a task when it is made (§6.2): `varde new` and the board start it, and the git refresh starts it for tasks a hook made, so no interactive path and no hook waits on a model. The agent and model are the updates' (the task's last run's agent, else the default; `memory.model`; `config.launch`), with varde's own system prompt, `VARDE_INTERNAL=1`, and the title kept only if `title::from_model` keeps it. Only a title varde wrote (cut from a first prompt or a context, the agent's for deferred work, or cut again after an edit cleared it), on a task not linked; asked once (`named`), a failure keeps the cut title; a title you type wins, the cut words are kept (`prompt_title`), and `memory.titles = false` turns it off. |
 | Q29 | A stable board, one keymap (2026-10-12) | The board never moves under you: every group is always shown in its fixed order, an empty one as a dim `Working  0`, since groups that came and went made the layout jump and the eye lose its place. Folding is the user's (`z`, any group; Parked starts folded), and a folded group is one line the selection stops on. The keys are vi's where vi has one (`j`/`k`, `gg`/`G`, `{`/`}`, C-d/C-u) and the same on the Emacs board wherever Emacs allows; Tab cycles the tasks that need you, the move made most, and RET goes to a session while `s` starts one without going, on both boards. `g` alone no longer refreshes (C-l does), and `p` no longer parks: a motion key in Emacs does nothing destructive in the terminal either. The footer is the keys most needed for the row at point, as many as fit the width. |
 | Q30 | Cairns, seen and edited a line at a time (2026-10-12) | A cairn is shown the same way in `varde show` and the board's view: what it is ("what its sessions learned, handed to the next one"), when it was last updated and by what, how many sessions were handed it, what is stale and which notes wait, then Status and every section with how full it is, your lines marked. It is edited a line at a time, in place, through `varde edit --add/--set/--rm/--restore` that every client calls, by the id `varde show` prints after each line (`#12`), with the same keys in the terminal and Emacs views: a whole document in an editor, open for minutes, was a clumsy way to fix one line and raced the updates. Removing asks nothing, since `u` (`--restore`) brings the line back; on a Status the user set, `x` (`--rm status`) hands it back to the updates. `$EDITOR` stays for bulk changes. |
 | Q31 | Org through links (2026-10-13) | Reverses "a heading per task". Keeping a heading and its task in step took about 1 050 lines and 85 tests: an index over every org file, settling keyword changes, reconciling both ways by guessing which change came last from CLOSED times and file mtimes, copied and archived headings, and still two sources of truth, each able to undo the other. Tasks are made on the board, where most were made anyway, and org is where notes are written; a note links the tasks it is about, `[[varde:SHORT][Title]]`, and the link shows where its task stands, as forge's and orgit's links point into a repository, mu4e's into mail, and org-ql's or om-dash's blocks gather a review. `org-varde-new-here` makes a task from a heading and links it there; DONE on a heading offers to close its tasks, one way; a dynamic block lists them for a review. Nothing is synced, so nothing disagrees. |

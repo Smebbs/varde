@@ -216,15 +216,7 @@ impl App<'_> {
         };
         // While a form or prompt is open, what was said about it, such as
         // why it was refused, shows over it until the next key.
-        let prompt = matches!(
-            self.mode,
-            Mode::New(_)
-                | Mode::Where(..)
-                | Mode::Move(..)
-                | Mode::Project(..)
-                | Mode::Scope(_)
-                | Mode::Recall(_)
-        );
+        let prompt = self.mode.prompt();
         let one = |l: Line<'static>| -> Vec<Line<'static>> {
             let mut rows: Vec<Line<'static>> =
                 if prompt && !self.message.is_empty() { said().collect() } else { Vec::new() };
@@ -637,7 +629,7 @@ fn row_line(
     meta.push(Span::styled(format!("  {}", r.short), style(Tone::Quiet)));
     let meta_w: usize = meta.iter().map(Span::width).sum();
     let title_w = width.saturating_sub(3 + 2 + meta_w).max(12);
-    let closed = matches!(r.state.as_str(), "done" | "parked" | "dropped");
+    let closed = super::is_closed(&r.state);
     let mut line = vec![
         Span::raw(if marked { "*" } else { " " }).bold(),
         Span::styled(glyph, style(tone)),

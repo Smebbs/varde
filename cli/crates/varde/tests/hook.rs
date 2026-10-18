@@ -161,7 +161,7 @@ fn a_session_varde_did_not_launch_ends_with_its_process() {
     assert_eq!(rows(&e.board(), "working"), Vec::<String>::new());
     assert_eq!(rows(&e.board(), "inbox"), ["Run ls once with the Bash tool…"]);
     let task = e.board()["groups"][4]["rows"][0]["task"].as_str().unwrap().to_string();
-    let show: Value = serde_json::from_slice(&e.run(&["show", &task, "--json", "--no-git"]).stdout).unwrap();
+    let show = e.show(&task);
     assert_eq!(show["runs"][0]["status"], "exited");
     assert_eq!(show["runs"][0]["launch"], "adopted");
     assert_eq!(show["runs"][0]["why"]["alive"], false);
@@ -385,7 +385,7 @@ fn doctor_names_what_failed_and_how_to_fix_it() {
 fn doctor_lets_a_cairn_update_given_up_on_long_ago_rest() {
     let e = Env::new();
     hook(&e, "UserPromptSubmit", &fixture("user-prompt-submit.json"));
-    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64;
+    let now = now_ms();
     let memory = || doctor(&e, "memory");
     e.sql(&format!(
         "INSERT INTO job (id, run, upto, state, error, created, finished, attempts)

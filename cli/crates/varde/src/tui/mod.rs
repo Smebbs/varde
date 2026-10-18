@@ -91,6 +91,21 @@ enum Mode {
     Scope(Pick),
 }
 
+impl Mode {
+    /// A form or prompt being typed in.
+    fn prompt(&self) -> bool {
+        matches!(
+            self,
+            Mode::New(_)
+                | Mode::Where(..)
+                | Mode::Move(..)
+                | Mode::Project(..)
+                | Mode::Scope(_)
+                | Mode::Recall(_)
+        )
+    }
+}
+
 /// The task a question about starting was asked of, and its state then.
 /// The answer is for that task, not whatever is selected by then.
 struct Asked {
@@ -721,15 +736,7 @@ impl<'a> App<'a> {
     fn key(&mut self, key: KeyEvent) -> Option<Away> {
         let ctrl = key.modifiers.contains(KeyModifiers::CONTROL);
         // What was said over a form or prompt lasts until the next key.
-        if matches!(
-            self.mode,
-            Mode::New(_)
-                | Mode::Where(..)
-                | Mode::Move(..)
-                | Mode::Project(..)
-                | Mode::Scope(_)
-                | Mode::Recall(_)
-        ) {
+        if self.mode.prompt() {
             self.message.clear();
         }
         match std::mem::replace(&mut self.mode, Mode::Normal) {
@@ -911,7 +918,7 @@ impl<'a> App<'a> {
                 return match (start, self.current()) {
                     // Starting a closed task reopens it: one key too easily
                     // pressed for that.
-                    (Some(start), Some(r)) if matches!(r.state.as_str(), "done" | "parked" | "dropped") => {
+                    (Some(start), Some(r)) if is_closed(&r.state) => {
                         self.mode = Mode::Reopen(start, r.task.clone());
                         None
                     }
@@ -1049,11 +1056,9 @@ impl<'a> App<'a> {
             self.message = "a project cairn has no session to start: RET views it".into();
             return None;
         }
-        let state: String = self.paths.open(BUSY).ok().and_then(|s| {
-            s.conn.query_row("SELECT state FROM task WHERE id = ?1", [&task], |r| r.get(0)).ok()
-        })?;
+        let state = self.paths.open(BUSY).ok().and_then(|s| session::state_of(&s, &task))?;
         let start = Start { want: Want::Continue, go: true, ..Start::default() };
-        if matches!(state.as_str(), "done" | "parked" | "dropped") {
+        if is_closed(&state) {
             self.mode = Mode::Reopen(start, task);
             return None;
         }
@@ -1080,10 +1085,9 @@ impl<'a> App<'a> {
 
     /// Select `task` on the board, opening Parked for it if need be.
     fn go_to(&mut self, task: &str, short: &str) {
-        let state: Option<String> = self.paths.open(BUSY).ok().and_then(|s| {
-            s.conn.query_row("SELECT state FROM task WHERE id = ?1", [task], |r| r.get(0)).ok()
-        });
-        let Some(state) = state else { return };
+        let Some(state) = self.paths.open(BUSY).ok().and_then(|s| session::state_of(&s, task)) else {
+            return;
+        };
         let (found, scoped, folds) = (self.found.take(), self.scoped, self.folds.clone());
         if state == "parked" {
             self.folds.insert("parked", false);
@@ -1329,15 +1333,10 @@ impl<'a> App<'a> {
             Ok(Draft::of(&id, &title, &project, &body.unwrap_or_default(), &when.unwrap_or_default()))
         })();
         match result {
-            Ok(draft) => {
-                self.mode = Mode::New(draft);
-                None
-            }
-            Err(e) => {
-                self.report(Err(e));
-                None
-            }
+            Ok(draft) => self.mode = Mode::New(draft),
+            Err(e) => self.report(Err(e)),
         }
+        None
     }
 
     /// The file the drafts wait in while no board runs: every board's,
@@ -1845,6 +1844,11 @@ fn saved(what: &str, changed: bool) -> String {
     }
 }
 
+/// A closed task's state: done, parked or dropped.
+fn is_closed(state: &str) -> bool {
+    matches!(state, "done" | "parked" | "dropped")
+}
+
 /// Mid-turn: stopping it now loses what it is doing.
 fn busy(status: &str) -> bool {
     matches!(status, "working" | "delegated" | "blocked")
@@ -1914,6 +1918,54 @@ mod tests {
         let away = app.key(KeyEvent::new(code, KeyModifiers::NONE));
         app.refresh().unwrap();
         away
+    }
+
+    /// Ctrl and `c`, without reading the board again.
+    fn ctrl(app: &mut App, c: char) -> Option<Away> {
+        app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL))
+    }
+
+    /// `text` as the cairn of `id`.
+    pub(super) fn put_cairn(store: &Store, id: &str, text: &str) {
+        let cairn = varde_core::cairn::Cairn::from_edit(text, &Default::default());
+        varde_core::memory::put_cairn(&store.conn, id, &cairn, 0, "user", None, now_ms()).unwrap();
+    }
+
+    /// `id` repeats every day at 06:00, its next start an hour away.
+    fn repeat_daily(store: &Store, id: &str) {
+        store
+            .conn
+            .execute(
+                "INSERT INTO schedule (task, rule, next_due, worktree, created) VALUES (?1, 'every day 06:00', ?2, 0, 1)",
+                rusqlite::params![id, now_ms() + 3_600_000],
+            )
+            .unwrap();
+    }
+
+    /// git in `repo`, with no config of the user's; what it printed.
+    fn git(repo: &Path, args: &[&str]) -> String {
+        let out = std::process::Command::new("git")
+            .env("GIT_CONFIG_GLOBAL", "/dev/null")
+            .env("GIT_CONFIG_NOSYSTEM", "1")
+            .arg("-C")
+            .arg(repo)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        String::from_utf8_lossy(&out.stdout).to_string()
+    }
+
+    /// A repository at `dir/repo` with `a` committed, and a store at
+    /// `dir/state`.
+    fn repo(dir: &Path) -> (PathBuf, Paths) {
+        let repo = dir.join("repo");
+        std::fs::create_dir(&repo).unwrap();
+        git(&repo, &["init", "-q"]);
+        std::fs::write(repo.join("a"), "1").unwrap();
+        git(&repo, &["add", "a"]);
+        git(&repo, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "a"]);
+        (repo, Paths { home: dir.join("state") })
     }
 
     /// Paths to a store of its own, gone with the directory.
@@ -1996,18 +2048,24 @@ mod tests {
     }
 
     #[test]
-    fn esc_bound_to_quit_unmarks_and_closes_the_view_first() {
-        let (_dir, paths) = temp_paths();
-        let mut app = board(&paths, &["One"]);
-        app.keys = Keys::of(&[("quit".to_string(), "esc".to_string())].into());
-        key(&mut app, KeyCode::Char(' '));
-        key(&mut app, KeyCode::Esc);
-        assert!(app.marked.is_empty() && !app.quit, "unmarked first");
-        key(&mut app, KeyCode::Char('v'));
-        key(&mut app, KeyCode::Esc);
-        assert!(!app.detail && !app.quit, "the view closed first");
-        key(&mut app, KeyCode::Esc);
-        assert!(app.quit);
+    fn esc_bound_to_quit_or_in_a_popup_unmarks_and_closes_the_view_first() {
+        for popup in [false, true] {
+            let (_dir, paths) = temp_paths();
+            let mut app = board(&paths, &["One"]);
+            if popup {
+                app.popup = true;
+            } else {
+                app.keys = Keys::of(&[("quit".to_string(), "esc".to_string())].into());
+            }
+            key(&mut app, KeyCode::Char(' '));
+            key(&mut app, KeyCode::Esc);
+            assert!(app.marked.is_empty() && !app.quit, "unmarked first");
+            key(&mut app, KeyCode::Char('v'));
+            key(&mut app, KeyCode::Esc);
+            assert!(!app.detail && !app.quit, "the view closed first");
+            key(&mut app, KeyCode::Esc);
+            assert!(app.quit);
+        }
     }
 
     #[test]
@@ -2041,9 +2099,8 @@ mod tests {
         store.conn.execute("UPDATE task SET project = ?1", [paths.home.to_string_lossy()]).unwrap();
     }
 
-    fn state(paths: &Paths, id: &str) -> String {
-        let store = paths.open(BUSY).unwrap();
-        store.conn.query_row("SELECT state FROM task WHERE id = ?1", [id], |r| r.get(0)).unwrap()
+    pub(super) fn state(paths: &Paths, id: &str) -> String {
+        session::state_of(&paths.open(BUSY).unwrap(), id).unwrap()
     }
 
     #[test]
@@ -2090,9 +2147,7 @@ mod tests {
         let mut app = board(&paths, &["Cache"]);
         let id = app.current_id().unwrap();
         let text = "Status: s\nFindings:\n- The locale matters.\n- The locale is cached.\n- The locale is read twice.\n";
-        let cairn = varde_core::cairn::Cairn::from_edit(text, &Default::default());
-        let store = paths.open(BUSY).unwrap();
-        varde_core::memory::put_cairn(&store.conn, &id, &cairn, 0, "user", None, now_ms()).unwrap();
+        put_cairn(&paths.open(BUSY).unwrap(), &id, text);
         app.recall("locale", true);
         assert!(
             screen(&mut app, 100, 24).contains("(+2 more in this task)"),
@@ -2187,14 +2242,7 @@ mod tests {
         in_a_project(&paths);
         let id = app.current_id().unwrap();
         let store = paths.open(BUSY).unwrap();
-        store
-            .conn
-            .execute(
-                "INSERT INTO schedule (task, rule, next_due, worktree, created)
-                 VALUES (?1, 'every day 06:00', ?2, 0, 1)",
-                rusqlite::params![id, now_ms() + 3_600_000],
-            )
-            .unwrap();
+        repeat_daily(&store, &id);
         for (run, started) in [("RUN1", 10), ("RUN2", 20), ("RUN3", 30), ("RUN4", 40)] {
             let transcript = paths.home.join(format!("{run}.jsonl"));
             std::fs::write(&transcript, "").unwrap();
@@ -2292,22 +2340,9 @@ mod tests {
     fn recall_hits_are_picked_and_taken_to_on_the_board() {
         let (_dir, paths) = temp_paths();
         let mut app = board(&paths, &["Cache by locale", "Something else", "Locale fallback"]);
-        {
-            let store = paths.open(BUSY).unwrap();
-            let ids: Vec<String> = store
-                .conn
-                .prepare("SELECT id FROM task")
-                .unwrap()
-                .query_map([], |r| r.get(0))
-                .unwrap()
-                .map(|r| r.unwrap())
-                .collect();
-            for id in ids {
-                let text =
-                    "Status: Looked at the locale.\nFindings:\n- The locale matters.\nDecisions:\nOpen:\n";
-                let cairn = varde_core::cairn::Cairn::from_edit(text, &Default::default());
-                varde_core::memory::put_cairn(&store.conn, &id, &cairn, 0, "user", None, now_ms()).unwrap();
-            }
+        let store = paths.open(BUSY).unwrap();
+        for r in app.rows() {
+            put_cairn(&store, &r.task, "Status: Looked at the locale.\nFindings:\n- The locale matters.\n");
         }
         let before = app.current_id();
         app.recall("locale", true);
@@ -2337,11 +2372,7 @@ mod tests {
             store.conn.query_row("SELECT id FROM task WHERE title = ?1", [title], |r| r.get(0)).unwrap()
         };
         let (hit, other) = (id("Cache by locale"), id("Something else"));
-        let cairn = varde_core::cairn::Cairn::from_edit(
-            "Status: s\nFindings:\n- The locale matters.\n",
-            &Default::default(),
-        );
-        varde_core::memory::put_cairn(&store.conn, &hit, &cairn, 0, "user", None, now_ms()).unwrap();
+        put_cairn(&store, &hit, "Status: s\nFindings:\n- The locale matters.\n");
         let gotcha = varde_core::memory::Change::Add(
             varde_core::cairn::Section::Gotchas,
             "The locale cache is per host.",
@@ -2383,30 +2414,12 @@ mod tests {
     }
 
     #[test]
-    fn esc_quits_a_popup_once_nothing_is_open() {
-        let (_dir, paths) = temp_paths();
-        let mut app = board(&paths, &["One"]);
-        app.popup = true;
-        key(&mut app, KeyCode::Char(' '));
-        key(&mut app, KeyCode::Char('v'));
-        key(&mut app, KeyCode::Esc);
-        key(&mut app, KeyCode::Esc);
-        assert!(app.marked.is_empty() && !app.detail && !app.quit, "unmarked and closed first");
-        key(&mut app, KeyCode::Esc);
-        assert!(app.quit);
-    }
-
-    #[test]
     fn a_recall_hit_in_another_project_is_shown_on_the_board() {
         let (_dir, paths) = temp_paths();
         let store = paths.open(BUSY).unwrap();
         task::create(&store, "Here", None, Some("/src/app"), None, 1).unwrap();
         let there = task::create(&store, "Locale over there", None, Some("/src/lib"), None, 2).unwrap();
-        let cairn = varde_core::cairn::Cairn::from_edit(
-            "Status: s\nFindings:\n- The locale matters.\n",
-            &Default::default(),
-        );
-        varde_core::memory::put_cairn(&store.conn, &there, &cairn, 0, "user", None, now_ms()).unwrap();
+        put_cairn(&store, &there, "Status: s\nFindings:\n- The locale matters.\n");
         let mut app = App::new(&paths, None);
         app.here = Some("/src/app".into());
         app.refresh().unwrap();
@@ -2451,13 +2464,9 @@ mod tests {
         let mut app = board(&paths, &["Cache by locale", "Something else"]);
         in_a_project(&paths);
         let ids: Vec<String> = app.rows().map(|r| r.task.clone()).collect();
-        {
-            let store = paths.open(BUSY).unwrap();
-            for id in &ids {
-                let text = "Status: Looked.\nFindings:\n- The locale matters.\nDecisions:\nOpen:\n";
-                let cairn = varde_core::cairn::Cairn::from_edit(text, &Default::default());
-                varde_core::memory::put_cairn(&store.conn, id, &cairn, 0, "user", None, now_ms()).unwrap();
-            }
+        let store = paths.open(BUSY).unwrap();
+        for id in &ids {
+            put_cairn(&store, id, "Status: Looked.\nFindings:\n- The locale matters.\n");
         }
         let old = ids
             .iter()
@@ -2465,12 +2474,7 @@ mod tests {
             .unwrap()
             .clone();
         // Done long ago: off the board.
-        paths
-            .open(BUSY)
-            .unwrap()
-            .conn
-            .execute("UPDATE task SET state = 'done', closed = 1 WHERE id = ?1", [&old])
-            .unwrap();
+        store.conn.execute("UPDATE task SET state = 'done', closed = 1 WHERE id = ?1", [&old]).unwrap();
         app.refresh().unwrap();
         assert!(app.row_of(&old).is_none());
 
@@ -2532,12 +2536,12 @@ mod tests {
         assert_eq!((d.project.text(), d.at, d.body.text()), (beta.as_str(), Part::Project, "T"));
         // Emptied, it is asked on create, the selected task's project picked.
         key(&mut app, KeyCode::Backspace);
-        app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        ctrl(&mut app, 's');
         assert!(screen(&mut app, 120, 24).contains("╭ Project for this task "));
         key(&mut app, KeyCode::Esc);
         assert!(matches!(&app.mode, Mode::New(d) if d.body.text() == "T"), "Esc goes back to the form");
         let at = app.current().and_then(|r| r.project.clone()).unwrap();
-        app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        ctrl(&mut app, 's');
         key(&mut app, KeyCode::Enter);
         assert!(app.message.starts_with("created "), "{}", app.message);
         let made: String =
@@ -2688,7 +2692,6 @@ mod tests {
         let titles: Vec<String> = (0..30).map(|i| format!("Task {i}")).collect();
         let mut app = board(&paths, &titles.iter().map(String::as_str).collect::<Vec<_>>());
         screen(&mut app, 80, 24);
-        let ctrl = |app: &mut App, c| app.key(KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL));
         ctrl(&mut app, 'd');
         assert_eq!(app.current().unwrap().title, "Task 18", "11 rows down");
         ctrl(&mut app, 'u');
@@ -2727,24 +2730,7 @@ mod tests {
     #[test]
     fn a_diff_with_nothing_in_it_says_so() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths { home: dir.path().join("state") };
-        let repo = dir.path().join("repo");
-        std::fs::create_dir(&repo).unwrap();
-        let git = |args: &[&str]| {
-            let ok = std::process::Command::new("git")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .arg("-C")
-                .arg(&repo)
-                .args(args)
-                .status()
-                .unwrap();
-            assert!(ok.success());
-        };
-        git(&["init", "-q"]);
-        std::fs::write(repo.join("a"), "1").unwrap();
-        git(&["add", "a"]);
-        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "a"]);
+        let (repo, paths) = repo(dir.path());
         let mut app = board(&paths, &["Shared"]);
         {
             let store = paths.open(BUSY).unwrap();
@@ -2775,26 +2761,11 @@ mod tests {
     #[test]
     fn a_diff_shows_untracked_files_and_leaves_the_index_alone() {
         let dir = tempfile::tempdir().unwrap();
-        let paths = Paths { home: dir.path().join("state") };
-        let repo = dir.path().join("repo");
-        std::fs::create_dir(&repo).unwrap();
-        let git = |args: &[&str]| {
-            let out = std::process::Command::new("git")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .arg("-C")
-                .arg(&repo)
-                .args(args)
-                .output()
-                .unwrap();
-            assert!(out.status.success());
-            String::from_utf8_lossy(&out.stdout).to_string()
-        };
-        git(&["init", "-q"]);
-        std::fs::write(repo.join("a"), "1").unwrap();
+        let (repo, paths) = repo(dir.path());
+        let git = |args: &[&str]| git(&repo, args);
         std::fs::write(repo.join(".gitignore"), "ignored\n").unwrap();
-        git(&["add", "a", ".gitignore"]);
-        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "a"]);
+        git(&["add", ".gitignore"]);
+        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "ignore"]);
         let base = git(&["rev-parse", "HEAD"]).trim().to_string();
         let mut app = board(&paths, &["Shared"]);
         {
@@ -3082,8 +3053,7 @@ mod tests {
             let id = app.current_id().unwrap();
             let text =
                 "Status: Cause found.\nFindings:\n- The cache key omits the locale.\nDecisions:\nOpen:\n";
-            let cairn = varde_core::cairn::Cairn::from_edit(text, &Default::default());
-            varde_core::memory::put_cairn(&store.conn, &id, &cairn, 0, "user", None, now_ms()).unwrap();
+            put_cairn(&store, &id, text);
             store
                 .conn
                 .execute(
@@ -3204,7 +3174,6 @@ mod tests {
         let rule = || -> Option<String> {
             store.conn.query_row("SELECT rule FROM schedule", [], |r| r.get(0)).optional().unwrap()
         };
-        let ctrl = |c| KeyEvent::new(KeyCode::Char(c), KeyModifiers::CONTROL);
 
         key(&mut app, KeyCode::Char('n'));
         assert!(screen(&mut app, 100, 24).contains("When:    not scheduled: at mon 09:00"));
@@ -3218,7 +3187,7 @@ mod tests {
         // A rule it cannot read goes back to the form, saying why.
         assert!(matches!(&app.mode, Mode::New(d) if d.at == Part::When), "{}", app.message);
         assert!(app.message.contains("`every` takes"), "{}", app.message);
-        app.key(ctrl('u'));
+        ctrl(&mut app, 'u');
         app.paste("every day 06:00");
         key(&mut app, KeyCode::Enter);
         key(&mut app, KeyCode::Enter);
@@ -3231,14 +3200,14 @@ mod tests {
         assert!(matches!(&app.mode, Mode::New(d) if d.when.text() == "every day 06:00"));
         key(&mut app, KeyCode::Down);
         key(&mut app, KeyCode::Down);
-        app.key(ctrl('u'));
+        ctrl(&mut app, 'u');
         app.paste("every weekday 09:00");
         key(&mut app, KeyCode::Enter);
         assert_eq!(rule().as_deref(), Some("every weekday 09:00"), "{}", app.message);
         key(&mut app, KeyCode::Char('e'));
         key(&mut app, KeyCode::Down);
         key(&mut app, KeyCode::Down);
-        app.key(ctrl('u'));
+        ctrl(&mut app, 'u');
         key(&mut app, KeyCode::Enter);
         assert!(app.message.ends_with("no longer scheduled"), "{}", app.message);
         assert_eq!(rule(), None);
@@ -3250,16 +3219,8 @@ mod tests {
         let mut app = board(&paths, &["Scan"]);
         let id = app.current_id().unwrap();
         let store = paths.open(BUSY).unwrap();
-        store
-            .conn
-            .execute(
-                "INSERT INTO schedule (task, rule, next_due, worktree, created) VALUES (?1, 'every day 06:00', ?2, 0, 1)",
-                rusqlite::params![id, now_ms() + 3_600_000],
-            )
-            .unwrap();
+        repeat_daily(&store, &id);
         app.refresh().unwrap();
-        let state =
-            || -> String { store.conn.query_row("SELECT state FROM task", [], |r| r.get(0)).unwrap() };
 
         key(&mut app, KeyCode::Char('d'));
         let s = screen(&mut app, 100, 24);
@@ -3269,10 +3230,10 @@ mod tests {
             app.message
         );
         key(&mut app, KeyCode::Char('n'));
-        assert_eq!(state(), "open");
+        assert_eq!(state(&paths, &id), "open");
         key(&mut app, KeyCode::Char('d'));
         key(&mut app, KeyCode::Char('y'));
-        assert_eq!(state(), "done", "{}", app.message);
+        assert_eq!(state(&paths, &id), "done", "{}", app.message);
         assert!(app.message.ends_with("is done; it no longer repeats"), "{}", app.message);
         let left: bool =
             store.conn.query_row("SELECT EXISTS (SELECT 1 FROM schedule)", [], |r| r.get(0)).unwrap();
@@ -3286,13 +3247,7 @@ mod tests {
         let store = paths.open(BUSY).unwrap();
         let scan: String =
             store.conn.query_row("SELECT id FROM task WHERE title = 'Scan'", [], |r| r.get(0)).unwrap();
-        store
-            .conn
-            .execute(
-                "INSERT INTO schedule (task, rule, next_due, worktree, created) VALUES (?1, 'every day 06:00', ?2, 0, 1)",
-                rusqlite::params![scan, now_ms() + 3_600_000],
-            )
-            .unwrap();
+        repeat_daily(&store, &scan);
         app.refresh().unwrap();
         key(&mut app, KeyCode::Char(' '));
         key(&mut app, KeyCode::Char('j'));
@@ -3315,13 +3270,7 @@ mod tests {
             store.conn.query_row("SELECT id FROM task WHERE title = ?1", [t], |r| r.get(0)).unwrap()
         };
         let scan = id("Scan");
-        store
-            .conn
-            .execute(
-                "INSERT INTO schedule (task, rule, next_due, worktree, created) VALUES (?1, 'every day 06:00', ?2, 0, 1)",
-                rusqlite::params![scan, now_ms() + 3_600_000],
-            )
-            .unwrap();
+        repeat_daily(&store, &scan);
         for (run, at) in [("R1", 10), ("R2", 20), ("R3", 30)] {
             store
                 .conn
@@ -3390,7 +3339,7 @@ mod tests {
         key(&mut app, KeyCode::BackTab);
         key(&mut app, KeyCode::Enter);
         app.paste("New line.");
-        app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        ctrl(&mut app, 's');
         assert!(app.message.starts_with("saved "), "{}", app.message);
         assert_eq!(text("title").as_deref(), Some("One more"));
         assert_eq!(text("body").as_deref(), Some("Old context.\nNew line."));
@@ -3399,18 +3348,18 @@ mod tests {
         // A cleared title is cut from the context, as a new task's is; with
         // no context either, the refusal shows over the form, which stays.
         key(&mut app, KeyCode::Char('e'));
-        app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
-        app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        ctrl(&mut app, 'u');
+        ctrl(&mut app, 's');
         assert!(app.message.starts_with("saved "), "{}", app.message);
         assert_eq!(text("title").as_deref(), Some("Old context"));
         assert_eq!(text("prompt_title").as_deref(), Some("Old context"), "the model may name it");
         key(&mut app, KeyCode::Char('e'));
-        app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        ctrl(&mut app, 'u');
         key(&mut app, KeyCode::BackTab);
         for _ in 0..3 {
-            app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+            ctrl(&mut app, 'u');
         }
-        app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        ctrl(&mut app, 's');
         assert!(matches!(app.mode, Mode::New(_)), "the form stays");
         assert!(screen(&mut app, 100, 24).contains("a task needs a title or a context"));
         key(&mut app, KeyCode::Char('x'));
@@ -3440,9 +3389,7 @@ mod tests {
         key(&mut app, KeyCode::Esc);
 
         // A cairn changes nothing: `e` is the form, `E` the whole cairn in $EDITOR.
-        let cairn =
-            varde_core::cairn::Cairn::from_edit("Status: Looked.\nFindings:\n- A.\n", &Default::default());
-        varde_core::memory::put_cairn(&store.conn, &id, &cairn, 0, "user", None, now_ms()).unwrap();
+        put_cairn(&store, &id, "Status: Looked.\nFindings:\n- A.\n");
         assert!(key(&mut app, KeyCode::Char('e')).is_none() && matches!(app.mode, Mode::New(_)));
         key(&mut app, KeyCode::Esc);
         assert!(matches!(key(&mut app, KeyCode::Char('E')), Some(Away::Edit(t)) if t == id));
@@ -3470,7 +3417,7 @@ mod tests {
 
         // A blank title is refused before the project is asked.
         key(&mut app, KeyCode::Char('n'));
-        app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        ctrl(&mut app, 's');
         let refused = "a task needs a title or a context";
         assert!(matches!(app.mode, Mode::New(_)) && app.message == refused, "{}", app.message);
         key(&mut app, KeyCode::Esc);
@@ -3480,7 +3427,7 @@ mod tests {
         // The form opens in it.
         key(&mut app, KeyCode::Char('n'));
         app.paste("why does the cache key ignore the region in the locale cache");
-        app.key(KeyEvent::new(KeyCode::Char('s'), KeyModifiers::CONTROL));
+        ctrl(&mut app, 's');
         key(&mut app, KeyCode::Enter);
         let titled: (String, String) = store
             .conn
@@ -3506,7 +3453,7 @@ mod tests {
         key(&mut app, KeyCode::Esc);
         assert!(matches!(&app.mode, Mode::New(d) if d.title.text() == "Two"));
         key(&mut app, KeyCode::Enter);
-        app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        ctrl(&mut app, 'u');
         app.paste(&new.to_string_lossy());
         key(&mut app, KeyCode::Enter);
         assert_eq!(project("Two"), new.to_string_lossy());
@@ -3517,7 +3464,7 @@ mod tests {
         key(&mut app, KeyCode::Tab);
         app.paste("Three");
         key(&mut app, KeyCode::Enter);
-        app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        ctrl(&mut app, 'u');
         app.paste(&dir.join("gone").to_string_lossy());
         key(&mut app, KeyCode::Enter);
         assert!(app.message.contains("no directory"), "{}", app.message);
@@ -3534,7 +3481,7 @@ mod tests {
         key(&mut app, KeyCode::Esc);
         key(&mut app, KeyCode::Char('n'));
         assert!(matches!(&app.mode, Mode::New(d) if d.title.text() == "Three"));
-        app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        ctrl(&mut app, 'u');
         key(&mut app, KeyCode::Esc);
         assert_eq!(app.message, "draft dropped");
         key(&mut app, KeyCode::Char('n'));
@@ -3592,7 +3539,7 @@ mod tests {
         key(&mut app, KeyCode::Tab);
         app.paste("Over there");
         key(&mut app, KeyCode::Enter);
-        app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        ctrl(&mut app, 'u');
         app.paste(&there.to_string_lossy());
         app.scoped = true;
         key(&mut app, KeyCode::Enter);
@@ -3624,7 +3571,11 @@ mod tests {
                 && s.contains(&format!("{}  · its project now", draw::tilde(&old.to_string_lossy()))),
             "{s}"
         );
-        app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        // A terminal too small for it draws what fits, and does not panic.
+        for h in 0..4 {
+            screen(&mut app, 80, h);
+        }
+        ctrl(&mut app, 'u');
         app.paste(&new.to_string_lossy());
         key(&mut app, KeyCode::Enter);
         assert_eq!(project(), new.to_string_lossy());
@@ -3640,7 +3591,7 @@ mod tests {
             )
             .unwrap();
         key(&mut app, KeyCode::Char('m'));
-        app.key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        ctrl(&mut app, 'u');
         app.paste(&old.to_string_lossy());
         key(&mut app, KeyCode::Enter);
         assert_eq!(project(), new.to_string_lossy());
@@ -3711,24 +3662,8 @@ mod tests {
 
     #[test]
     fn a_first_start_in_this_terminal_asks_on_the_board_before_leaving_it() {
-        let (dir, paths) = temp_paths();
-        let repo = dir.path().join("repo");
-        std::fs::create_dir(&repo).unwrap();
-        let git = |args: &[&str]| {
-            let ok = std::process::Command::new("git")
-                .env("GIT_CONFIG_GLOBAL", "/dev/null")
-                .env("GIT_CONFIG_NOSYSTEM", "1")
-                .arg("-C")
-                .arg(&repo)
-                .args(args)
-                .status()
-                .unwrap();
-            assert!(ok.success());
-        };
-        git(&["init", "-q"]);
-        std::fs::write(repo.join("a"), "1").unwrap();
-        git(&["add", "a"]);
-        git(&["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-q", "-m", "a"]);
+        let dir = tempfile::tempdir().unwrap();
+        let (repo, paths) = repo(dir.path());
         let mut app = board(&paths, &["Start me"]);
         let store = paths.open(BUSY).unwrap();
         store.conn.execute("UPDATE task SET project = ?1", [repo.to_string_lossy()]).unwrap();

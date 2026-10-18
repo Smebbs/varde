@@ -236,7 +236,7 @@ impl Pick {
         if self.line.text().is_empty() {
             line.push("type to narrow, or a directory: ~/…".dark_gray().italic());
         }
-        f.render_widget(Paragraph::new(Line::from(line)), Rect { height: 1, ..inner });
+        f.render_widget(Paragraph::new(Line::from(line)), Rect { height: inner.height.min(1), ..inner });
 
         let from = (self.at + 1).saturating_sub(shown);
         let names = rows.iter().filter(|r| *r != OTHER).map(|r| project_name(Some(r)).width()).max();

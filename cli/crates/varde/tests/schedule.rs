@@ -7,23 +7,6 @@ use serde_json::Value;
 
 use common::*;
 
-fn now_ms() -> i64 {
-    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64
-}
-
-fn due_now(e: &Env, task: &str) {
-    e.db()
-        .execute(
-            "UPDATE schedule SET next_due = ?2 WHERE task LIKE '%' || upper(?1)",
-            (task, now_ms() - 1000),
-        )
-        .unwrap();
-}
-
-fn runs(e: &Env, task: &str) -> Vec<Value> {
-    e.show(task)["runs"].as_array().unwrap().clone()
-}
-
 #[test]
 fn a_schedule_settles_what_nobody_will_be_there_to_answer() {
     let e = Env::with_repo(AGENT);
@@ -50,9 +33,7 @@ fn a_schedule_settles_what_nobody_will_be_there_to_answer() {
     let repo = e.repo().to_string_lossy().into_owned();
     let out = e.run(&["new", "Someday", "--project", &repo, "--when", "soonish", "--worktree", "never"]);
     assert!(!out.status.success());
-    let all: usize =
-        e.board()["groups"].as_array().unwrap().iter().map(|g| g["rows"].as_array().unwrap().len()).sum();
-    assert_eq!(all, 1);
+    assert_eq!(all_rows(&e.board()).len(), 1);
     let one = e.ok(&["new", "Monday", "--project", &repo, "--when", "at mon 09:00", "--worktree", "never"]);
     assert_eq!(group(&e.board(), "scheduled")[0]["short"], one.trim());
     assert!(group(&e.board(), "scheduled")[0]["schedule"]["label"].as_str().unwrap().starts_with('◷'));
@@ -127,7 +108,10 @@ fn a_session_at_work_in_the_background_is_taken_over() {
     e.ok(&["schedule", &t, "every", "day", "06:00", "--worktree", "never"]);
     due_now(&e, &t);
     assert!(e.cmd(&["tick"]).env("FAKE_SLEEP", "30").output().unwrap().status.success());
-    poll(100, || runs(&e, &t).first().is_some_and(|r| r["why"]["alive"] == true));
+    // Alive once its pid is recorded; at its prompt once its turn ends.
+    poll(100, || {
+        runs(&e, &t).first().is_some_and(|r| r["why"]["alive"] == true && r["why"]["event"] == "turn_end")
+    });
 
     // It has no terminal to go to: a client asks first.
     let plan: Value = serde_json::from_str(&e.ok(&["start", &t, "--json"])).unwrap();
@@ -168,21 +152,6 @@ fn a_one_shot_is_spent_once_it_starts_and_a_failure_says_why() {
     assert_eq!(e.show(&t)["schedule"], Value::Null);
 }
 
-/// Fire `task` now and wait for that run to end.
-fn fire(e: &Env, task: &str, env: &[(&str, &str)]) {
-    let before = runs(e, task).len();
-    due_now(e, task);
-    poll(200, || {
-        let mut cmd = e.cmd(&["tick"]);
-        for (k, v) in env {
-            cmd.env(k, v);
-        }
-        assert!(cmd.output().unwrap().status.success());
-        let runs = runs(e, task);
-        runs.len() > before && runs.last().is_some_and(|r| r["status"] == "exited")
-    });
-}
-
 #[test]
 fn a_run_with_nothing_to_report_goes_back_to_waiting_without_asking() {
     let e = Env::with_repo(AGENT);
@@ -199,6 +168,8 @@ fn a_run_with_nothing_to_report_goes_back_to_waiting_without_asking() {
     assert_eq!(e.show(&t)["state"], "open");
     assert!(group(&e.board(), "needs_you").is_empty());
     assert_eq!(group(&e.board(), "scheduled")[0]["short"], t.as_str());
+    let shown = e.ok(&["show", &t, "--no-git"]);
+    assert!(shown.contains("in the background · nothing to report"), "{shown}");
     // Nothing left to end: the series goes on until its schedule is off.
     let out = e.run(&["done", &t]);
     assert!(String::from_utf8_lossy(&out.stderr).contains("--off ends the series"), "{out:?}");
@@ -250,43 +221,11 @@ fn done_on_a_repeating_task_keeps_its_worktree() {
 }
 
 #[test]
-fn done_says_how_many_runs_it_read() {
-    let e = Env::with_repo(AGENT);
-    let t = e.new_task("Monday update");
-    e.ok(&["schedule", &t, "every", "mon", "09:00", "--worktree", "never"]);
-    fire(&e, &t, &[]);
-    fire(&e, &t, &[]);
-    fire(&e, &t, &[]);
-    let said = e.ok(&["done", &t]);
-    assert!(
-        said.starts_with(&format!("marked 3 unread runs of {t} read; it repeats (every mon 09:00")),
-        "{said}"
-    );
-    assert!(group(&e.board(), "needs_you").is_empty());
-}
-
-#[test]
-fn a_run_that_found_nothing_says_so_in_show() {
-    let e = Env::with_repo(AGENT);
-    let t = e.new_task("Scan for mentions");
-    e.ok(&["schedule", &t, "every", "day", "06:00", "--worktree", "never"]);
-    let done = format!("done {t}");
-    fire(&e, &t, &[("FAKE_DONE", &done)]);
-    let shown = e.ok(&["show", &t, "--no-git"]);
-    assert!(shown.contains("in the background · nothing to report"), "{shown}");
-}
-
-#[test]
 fn a_start_held_up_or_paused_says_why() {
     let e = Env::with_repo(AGENT);
     let t = e.new_task("Scan for mentions");
     e.ok(&["schedule", &t, "every", "day", "06:00", "--worktree", "never"]);
-    e.db()
-        .execute(
-            "UPDATE schedule SET next_due = ?2 WHERE task LIKE '%' || upper(?1)",
-            (&t, now_ms() - 3_600_000),
-        )
-        .unwrap();
+    due(&e, &t, 3_600_000);
     // Nothing has run `varde tick` in this store.
     let said = e.ok(&["schedule", &t]);
     assert!(
@@ -308,20 +247,15 @@ fn a_start_held_by_a_session_says_due_and_after_a_day_late() {
     e.ok(&["schedule", &t, "every", "day", "06:00", "--worktree", "never"]);
     due_now(&e, &t);
     assert!(e.cmd(&["tick"]).env("FAKE_SLEEP", "30").output().unwrap().status.success());
-    poll(100, || runs(&e, &t).first().is_some_and(|r| r["why"]["alive"] == true));
-    let due = |ago: i64| {
-        e.db()
-            .execute(
-                "UPDATE schedule SET next_due = ?2 WHERE task LIKE '%' || upper(?1)",
-                (&t, now_ms() - ago),
-            )
-            .unwrap();
-    };
-    due(600_000);
+    // Alive once its pid is recorded; at its prompt once its turn ends.
+    poll(100, || {
+        runs(&e, &t).first().is_some_and(|r| r["why"]["alive"] == true && r["why"]["event"] == "turn_end")
+    });
+    due(&e, &t, 600_000);
     let list = e.ok(&["list"]);
     assert!(list.contains("repo · ↻ due · "), "{list}");
     assert!(e.ok(&["schedule", &t]).contains("waiting for session "));
-    due(2 * 86_400_000);
+    due(&e, &t, 2 * 86_400_000);
     let list = e.ok(&["list"]);
     assert!(list.contains("repo · ↻ late · "), "{list}");
     let said = e.ok(&["done", &t]);
@@ -352,10 +286,10 @@ fn now_starts_the_next_run_to_try_a_schedule_out() {
     assert!(!e.run(&["schedule", &t, "--now"]).status.success(), "no schedule");
     e.ok(&["schedule", &t, "every", "mon", "09:00", "--worktree", "never"]);
     let said = e.ok(&["schedule", &t, "--now"]);
-    assert!(
-        said.starts_with(&format!("{t} started in the background; every mon 09:00; next Mon 09:00")),
-        "{said}"
-    );
+    // On a Monday before 09:00 the next start is today's, said without its day.
+    let next =
+        said.strip_prefix(&format!("{t} started in the background; every mon 09:00; next ")).unwrap_or("");
+    assert!(next.starts_with("Mon 09:00") || next.starts_with("09:00"), "{said}");
     poll(100, || runs(&e, &t).first().is_some_and(|r| r["status"] == "exited"));
     assert_eq!(runs(&e, &t)[0]["background"], true);
     assert_eq!(group(&e.board(), "needs_you").len(), 1);

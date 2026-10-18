@@ -148,19 +148,7 @@ mod tests {
     }
 
     fn kind() -> impl Strategy<Value = &'static str> {
-        prop::sample::select(vec![
-            "started",
-            "prompt",
-            "unblocked",
-            "turn_end",
-            "delegated",
-            "interrupted",
-            "answered",
-            "blocked",
-            "ended",
-            "idle",
-            "compacting",
-        ])
+        prop::sample::select([STATUS_KINDS, &["compacting"]].concat())
     }
 
     proptest! {

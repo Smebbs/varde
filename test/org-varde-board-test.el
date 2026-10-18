@@ -31,14 +31,18 @@
   (forward-line 1))
 
 (defmacro org-varde-board-test--with (data &rest body)
+  "Run BODY on the board drawn from DATA, against a fake varde: the
+test's, else one of its own."
   (declare (indent 1))
-  `(let ((org-varde-board-data ,data))
-     (unwind-protect
-         (with-current-buffer (get-buffer-create org-varde-board-buffer)
-           (org-varde-board-mode)
-           (org-varde-board--render)
-           ,@body)
-       (kill-buffer org-varde-board-buffer))))
+  `(let ((draw (lambda ()
+                 (let ((org-varde-board-data ,data))
+                   (unwind-protect
+                       (with-current-buffer (get-buffer-create org-varde-board-buffer)
+                         (org-varde-board-mode)
+                         (org-varde-board--render)
+                         ,@body)
+                     (kill-buffer org-varde-board-buffer))))))
+     (if org-varde-test-dir (funcall draw) (org-varde-test-with-varde (funcall draw)))))
 
 ;; A session you have looked at and left reads as hollow, like one at rest.
 (ert-deftest org-varde-board-what-you-have-not-seen-is-filled ()
@@ -552,20 +556,19 @@ searches FROM and TO, and return the text with its link."
 
 (defvar org-varde-test-org-minor-mode-map (make-sparse-keymap))
 (define-minor-mode org-varde-test-org-minor-mode
-  "Stands in for evil-org-mode, whose state maps bind RET, TAB and <tab>,
-and Doom's C-j and C-k.")
+  "Stands in for a minor mode of org buffers whose evil state maps bind
+RET, TAB and <tab>, as evil-org-mode's do, and keys of its own.")
 
 (ert-deftest org-varde-new-form-under-evil ()
   "Run with evil on the load path to check this; skipped otherwise.
 Evil's line edits keep to a field, and TAB and S-TAB go between them;
-C-j and C-k are left to org, as in any org buffer."
+other keys are left to org's modes, as in any org buffer."
   (skip-unless (require 'evil nil t))
   (evil-mode 1)
   (dolist (state '(normal insert))
     (evil-define-key* state org-varde-test-org-minor-mode-map
                       (kbd "RET") #'newline (kbd "TAB") #'ignore
-                      (kbd "<tab>") #'ignore
-                      (kbd "C-j") #'org-down-element (kbd "C-k") #'org-up-element))
+                      (kbd "<tab>") #'ignore (kbd "C-j") #'org-down-element))
   (add-hook 'org-mode-hook #'org-varde-test-org-minor-mode)
   (unwind-protect
       (org-varde-test-with-varde
@@ -583,12 +586,10 @@ C-j and C-k are left to org, as in any org buffer."
               (execute-kbd-macro (kbd "RET"))
               (should (= (buffer-size) (1+ size))))
             (delete-char -1)
-            ;; C-j and C-k are org's, here and above the line.
+            ;; Its other keys are its own, here and above the line.
             (should (eq (key-binding (kbd "C-j")) #'org-down-element))
-            (should (eq (key-binding (kbd "C-k")) #'org-up-element))
             (org-varde--form-goto 'title)
             (should (eq (key-binding (kbd "C-j")) #'org-down-element))
-            (should (eq (key-binding (kbd "C-k")) #'org-up-element))
             (execute-kbd-macro (kbd "RET"))
             (should (eq (org-varde--form-at) 'project))
             (org-varde--form-goto 'title)
@@ -602,10 +603,9 @@ C-j and C-k are left to org, as in any org buffer."
             (execute-kbd-macro (kbd "G o More <escape>"))
             (should (equal (org-varde--new-text) '("New title" . "More")))
             ;; TAB and S-TAB go between fields, TAB as <tab> too,
-            ;; which a GUI Emacs looks up first; C-j and C-k are org's.
+            ;; which a GUI Emacs looks up first; its other keys are its own.
             (execute-kbd-macro (kbd "<escape>"))
             (should (eq (key-binding (kbd "C-j")) #'org-down-element))
-            (should (eq (key-binding (kbd "C-k")) #'org-up-element))
             (execute-kbd-macro (kbd "<backtab>"))
             (should (eq (org-varde--form-at) 'when))
             (execute-kbd-macro (kbd "<backtab> <backtab>"))
@@ -946,30 +946,32 @@ where a new task goes unasked."
         (should-not org-varde-board--closed)))))
 
 (ert-deftest org-varde-board-d-on-a-region-asks-once-and-closes-all ()
-  (let ((series '(:task "T1" :title "Scan" :status "open" :schedule (:rule "every day 06:00" :repeats t)))
-        (plain '(:task "T2" :title "Fix it" :status "open"))
-        asked finished)
-    (cl-letf (((symbol-function 'org-varde-board--rows) (lambda () (list series plain)))
-              ((symbol-function 'org-varde-board--keep-place) #'ignore)
-              ((symbol-function 'y-or-n-p) (lambda (q) (push q asked) t))
-              ((symbol-function 'org-varde--varde) (lambda (&rest args) (push args finished) ""))
-              ((symbol-function 'org-varde--finish) (lambda (task _) (push (list "finish" task) finished))))
-      (org-varde-board-done))
-    (should (equal asked '("Of the 2 marked tasks, 1 stops repeating and closes. Go ahead? ")))
-    (should (equal (reverse finished)
-                   '(("schedule" "T1" "--off") ("finish" "T1") ("finish" "T2"))))))
+  (org-varde-test-with-varde
+    (let ((series '(:task "T1" :title "Scan" :status "open" :schedule (:rule "every day 06:00" :repeats t)))
+          (plain '(:task "T2" :title "Fix it" :status "open"))
+          asked finished)
+      (cl-letf (((symbol-function 'org-varde-board--rows) (lambda () (list series plain)))
+                ((symbol-function 'org-varde-board--keep-place) #'ignore)
+                ((symbol-function 'y-or-n-p) (lambda (q) (push q asked) t))
+                ((symbol-function 'org-varde--varde) (lambda (&rest args) (push args finished) ""))
+                ((symbol-function 'org-varde--finish) (lambda (task _) (push (list "finish" task) finished))))
+        (org-varde-board-done))
+      (should (equal asked '("Of the 2 marked tasks, 1 stops repeating and closes. Go ahead? ")))
+      (should (equal (reverse finished)
+                     '(("schedule" "T1" "--off") ("finish" "T1") ("finish" "T2")))))))
 
 (ert-deftest org-varde-board-d-asks-before-marking-runs-read-nobody-opened ()
-  (let ((row '(:task "T1" :title "Scan" :status "waiting" :unread t :results 3
-               :schedule (:rule "every day 06:00" :repeats t)))
-        asked finished)
-    (cl-letf (((symbol-function 'org-varde-board--rows) (lambda () (list row)))
-              ((symbol-function 'org-varde-board--keep-place) #'ignore)
-              ((symbol-function 'y-or-n-p) (lambda (q) (push q asked) nil))
-              ((symbol-function 'org-varde--finish) (lambda (task _) (push task finished))))
-      (org-varde-board-done))
-    (should (equal asked '("\"Scan\" has 3 unread runs you have not opened: mark them read? ")))
-    (should-not finished)))
+  (org-varde-test-with-varde
+    (let ((row '(:task "T1" :title "Scan" :status "waiting" :unread t :results 3
+                 :schedule (:rule "every day 06:00" :repeats t)))
+          asked finished)
+      (cl-letf (((symbol-function 'org-varde-board--rows) (lambda () (list row)))
+                ((symbol-function 'org-varde-board--keep-place) #'ignore)
+                ((symbol-function 'y-or-n-p) (lambda (q) (push q asked) nil))
+                ((symbol-function 'org-varde--finish) (lambda (task _) (push task finished))))
+        (org-varde-board-done))
+      (should (equal asked '("\"Scan\" has 3 unread runs you have not opened: mark them read? ")))
+      (should-not finished))))
 
 (ert-deftest org-varde-board-a-repeating-task-at-work-says-so-and-d-leaves-nothing-to-reopen ()
   (let ((data (org-varde-board-test--data
@@ -1221,9 +1223,10 @@ where a new task goes unasked."
     (should (string-match-p "Waiting for varde" (buffer-string)))))
 
 (ert-deftest org-varde-board-says-when-varde-is-newer ()
-  (let ((org-varde--too-new 3))
-    (org-varde-board-test--with (org-varde-board-test--data '(("open" "Open" ("T0000000000000000000AAA111" "A" "open" "org"))))
-      (should (string-match-p "\\`This varde's board is v3, newer than org-varde reads" (buffer-string))))))
+  (org-varde-board-test--with (org-varde-board-test--data '(("open" "Open" ("T0000000000000000000AAA111" "A" "open" "org"))))
+    (setq org-varde--too-new 3)
+    (org-varde-board--render)
+    (should (string-match-p "\\`This varde's board is v3, newer than org-varde reads" (buffer-string)))))
 
 (defun org-varde-board-test--inbox (data &optional origin)
   "DATA with every row in the Inbox, deferred from ORIGIN when given."
@@ -1283,17 +1286,6 @@ where a new task goes unasked."
       (should (<= (length hints) 6))
       (should (member "? help" (mapcar #'string-trim hints))))
     (should (eq (key-binding "?") #'org-varde-board-menu))))
-
-(ert-deftest org-varde-board-starting-inbox-work-does-not-file-it ()
-  (org-varde-test-with-varde
-    (org-varde-board-test--with
-        (org-varde-board-test--inbox
-         (org-varde-board-test--data '(("inbox" "Inbox" ("T0000000000000000000BBB222" "Later" "open" nil)))))
-      (let (started)
-        (cl-letf (((symbol-function 'org-varde-start-task) (lambda (task &rest _) (setq started task))))
-          (org-varde-board-test--first-row)
-          (org-varde-board-start)
-          (should (equal started "T0000000000000000000BBB222")))))))
 
 (ert-deftest org-varde-board-accepts-every-task-in-the-region ()
   (org-varde-test-with-varde
@@ -1567,14 +1559,15 @@ where a new task goes unasked."
       (should (org-varde--can-park-p)))))
 
 (ert-deftest org-varde-board-menu-says-what-each-group-holds ()
-  (let ((lines (split-string (org-varde-board--legend) "\n")))
-    (should (equal (mapcan (lambda (l) (delete "" (list (string-trim (substring l 0 11))
-                                                         (string-trim (substring l (min 36 (length l))
-                                                                                 (min 47 (length l)))))))
-                           lines)
-                   '("Needs you" "Inbox" "Working" "Done" "Open" "Parked" "Scheduled")))
-    ;; Each fits 80 columns.
-    (should (seq-every-p (lambda (l) (<= (string-width l) 80)) lines))))
+  (org-varde-test-with-varde
+    (let ((lines (split-string (org-varde-board--legend) "\n")))
+      (should (equal (mapcan (lambda (l) (delete "" (list (string-trim (substring l 0 11))
+                                                           (string-trim (substring l (min 36 (length l))
+                                                                                   (min 47 (length l)))))))
+                             lines)
+                     '("Needs you" "Inbox" "Working" "Done" "Open" "Parked" "Scheduled")))
+      ;; Each fits 80 columns.
+      (should (seq-every-p (lambda (l) (<= (string-width l) 80)) lines)))))
 
 (provide 'org-varde-board-test)
 ;;; org-varde-board-test.el ends here

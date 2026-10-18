@@ -93,14 +93,7 @@ impl Agent for Pi {
             ("session_shutdown", _) => Kind::Ended,
             _ => return None,
         };
-        let native_id = s("session_id").filter(|id| !id.is_empty())?.to_string();
-        Some(Norm {
-            native_id,
-            kind,
-            cwd: s("cwd").map(Into::into),
-            transcript: s("session_file").map(Into::into),
-            prompt: s("prompt").map(Into::into),
-        })
+        crate::norm(p, kind, "session_file")
     }
 
     fn new_native_id(&self) -> Option<String> {

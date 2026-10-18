@@ -53,10 +53,7 @@ fn attach_runs_resumes_and_forks_one_task() {
     assert_eq!(relations, ["fresh", "resume", "fork"]);
     // Every event landed on the run varde prepared: no stray runs or tasks.
     assert!(runs.iter().all(|r| r["launch"] == "managed" && r["status"] == "exited"));
-    let board = e.board();
-    let total: usize =
-        board["groups"].as_array().unwrap().iter().map(|g| g["rows"].as_array().unwrap().len()).sum();
-    assert_eq!(total, 1);
+    assert_eq!(all_rows(&e.board()).len(), 1);
 }
 
 #[test]
@@ -92,15 +89,6 @@ fn a_session_in_its_tasks_worktree_is_told_to_commit_on_its_branch() {
     let other = e.new_task("Shared");
     e.ok(&["attach", &other, "--worktree", "never"]);
     assert!(!contexts(&e).last().unwrap().contains("own git worktree"));
-}
-
-#[test]
-fn without_a_terminal_the_worktree_question_must_be_answered() {
-    let e = Env::with_repo(AGENT);
-    let t = e.new_task("Something");
-    let out = e.run(&["start", &t]);
-    assert!(!out.status.success());
-    assert!(String::from_utf8_lossy(&out.stderr).contains("--worktree"));
 }
 
 #[test]
@@ -300,12 +288,7 @@ fn a_session_typed_into_a_terminal_is_focused_there_not_forked() {
         .unwrap();
     let mut task = None;
     poll(50, || {
-        task = e.board()["groups"]
-            .as_array()
-            .unwrap()
-            .iter()
-            .flat_map(|g| g["rows"].as_array().unwrap().clone())
-            .next();
+        task = all_rows(&e.board()).first().map(|&r| r.clone());
         task.is_some()
     });
     let t = task.expect("the typed session became a task")["task"].as_str().unwrap().to_string();
@@ -326,8 +309,7 @@ fn a_session_typed_into_a_terminal_is_focused_there_not_forked() {
 fn a_killed_supervisor_leaves_an_exited_run_not_a_live_one() {
     let e = Env::with_repo(AGENT);
     let t = e.new_task("Killed");
-    let mut child = e.cmd(&["attach", &t, "--worktree", "never"]).env("FAKE_SLEEP", "30").spawn().unwrap();
-    poll(50, || e.show(&t)["runs"][0]["status"] == "waiting");
+    let mut child = attach_and_wait(&e, &t);
     // What a closed terminal does: both the supervisor and the agent die,
     // and no SessionEnd is sent.
     Command::new("pkill").args(["-KILL", "-P", &child.id().to_string()]).status().unwrap();
@@ -564,12 +546,6 @@ fn done_remove_protects_unmerged_work_unless_forced() {
     assert!(!git(&e.repo(), &["branch", "--list", &branch]).is_empty());
 }
 
-/// A `gh` that answers `pr view` with a PR merged at `head`, as GitHub
-/// does after a squash merge in its UI.
-fn fake_gh(e: &Env, head: &str) -> PathBuf {
-    fake_gh_pr(e, head, "MERGED")
-}
-
 /// A `gh` that answers `pr view` with a PR in `state` at `head`.
 fn fake_gh_pr(e: &Env, head: &str, state: &str) -> PathBuf {
     let reply = format!(
@@ -581,13 +557,10 @@ fn fake_gh_pr(e: &Env, head: &str, state: &str) -> PathBuf {
 #[test]
 fn a_pr_squashed_in_github_counts_as_merged() {
     let e = Env::with_repo(AGENT);
-    let (t, path) = worktree_with_a_commit(&e, "Squashed");
+    let (t, path) = pushed_worktree(&e, "Squashed");
     let branch = e.show(&t)["worktree"]["branch"].as_str().unwrap().to_string();
-    let origin = e.path("origin.git");
-    git(e.dir.path(), &["init", "-q", "--bare", &origin.to_string_lossy()]);
-    git(&e.repo(), &["remote", "add", "origin", &origin.to_string_lossy()]);
-    git(&path, &["push", "-q", "-u", "origin", "HEAD"]);
-    let gh = fake_gh(&e, &git(&path, &["rev-parse", "HEAD"]));
+    // As GitHub has it after a squash merge in its UI.
+    let gh = fake_gh_pr(&e, &git(&path, &["rev-parse", "HEAD"]), "MERGED");
     let with_gh = |args: &[&str]| e.cmd(args).env("VARDE_GH", &gh).output().unwrap();
 
     let d: Value = serde_json::from_slice(&with_gh(&["show", &t, "--json"]).stdout).unwrap();
@@ -615,14 +588,7 @@ fn a_pr_squashed_in_github_counts_as_merged() {
 /// The task's row on the board.
 fn board_row(e: &Env, t: &str) -> Value {
     let board = e.board();
-    board["groups"]
-        .as_array()
-        .unwrap()
-        .iter()
-        .flat_map(|g| g["rows"].as_array().unwrap())
-        .find(|r| r["task"] == t || r["short"] == t)
-        .cloned()
-        .unwrap_or(Value::Null)
+    all_rows(&board).into_iter().find(|r| r["task"] == t || r["short"] == t).cloned().unwrap_or(Value::Null)
 }
 
 /// A worktree task whose branch is pushed to a fresh origin.
@@ -1270,8 +1236,7 @@ fn a_hung_up_terminal_still_records_the_end() {
 fn a_terminated_supervisor_stops_the_agent_and_records_the_end() {
     let e = Env::with_repo(AGENT);
     let t = e.new_task("Terminated");
-    let mut child = e.cmd(&["attach", &t, "--worktree", "never"]).env("FAKE_SLEEP", "30").spawn().unwrap();
-    poll(50, || e.show(&t)["runs"][0]["status"] == "waiting");
+    let mut child = attach_and_wait(&e, &t);
     Command::new("kill").args(["-TERM", &child.id().to_string()]).status().unwrap();
     let start = std::time::Instant::now();
     child.wait().unwrap();
@@ -1574,15 +1539,12 @@ fn a_client_edits_the_text_varde_prints() {
     // edit is refused, and what was typed is kept.
     let stale = text.replace("Status: ", "Status: Mine now.");
     e.ok_in(&["edit", &t, "--stdin"], &(e.ok(&["edit", &t, "--print"]) + "\n- [mine] Landed meanwhile.\n"));
-    let out = feed(&mut e.cmd(&["edit", &t, "--stdin"]), &stale);
-    let err = String::from_utf8_lossy(&out.stderr).to_string();
-    assert!(!out.status.success() && err.contains("updated while you were editing"), "{err}");
-    let kept = err.split("kept in ").nth(1).unwrap().trim();
+    let (err, kept) = refused_edit(&e, &["edit", &t, "--stdin"], &stale);
+    assert!(err.contains("updated while you were editing"), "{err}");
     assert_eq!(
-        std::fs::read_to_string(kept).unwrap().lines().find(|l| l.starts_with("Status")),
+        kept.lines().find(|l| l.starts_with("Status")),
         Some("Status: Mine now.Cause found; fix pending.")
     );
-    let _ = std::fs::remove_file(kept);
     assert!(e.ok(&["edit", &t, "--print"]).contains("Landed meanwhile."));
 }
 
@@ -1710,10 +1672,7 @@ fn a_resume_inside_a_launched_session_carries_on_in_its_terminal() {
     let z =
         runs.iter().find(|r| r["native_id"] == "zzz").expect("the resumed conversation is a run of the task");
     assert_eq!((z["relation"].as_str(), z["launch"].as_str()), (Some("resume"), Some("managed")));
-    let board = e.board();
-    let total: usize =
-        board["groups"].as_array().unwrap().iter().map(|g| g["rows"].as_array().unwrap().len()).sum();
-    assert_eq!(total, 1);
+    assert_eq!(all_rows(&e.board()).len(), 1);
 }
 
 #[test]

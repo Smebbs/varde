@@ -123,6 +123,23 @@ fi
 exit "${FAKE_EXIT:-0}"
 "#;
 
+/// What the shell or agent session a test is run from may set, which
+/// would change what varde does: unset for every command a test runs.
+const UNSET: &[&str] = &[
+    "TMUX",
+    "TMUX_PANE",
+    "VARDE_RUN",
+    "VARDE_INTERNAL",
+    "VARDE_AGENT",
+    "VARDE_BACKGROUND",
+    "CLAUDE_CODE_ENTRYPOINT",
+    "CLAUDECODE",
+    // What a git hook running the tests sets.
+    "GIT_DIR",
+    "GIT_INDEX_FILE",
+    "GIT_WORK_TREE",
+];
+
 pub struct Env {
     pub dir: tempfile::TempDir,
     /// Where commands run.
@@ -206,14 +223,11 @@ impl Env {
         c.current_dir(&self.cwd)
             .envs(self.vars())
             .env("VARDE_TMUX", self.path("no-tmux"))
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .env_remove("VARDE_RUN")
-            .env_remove("VARDE_INTERNAL")
-            .env_remove("VARDE_AGENT")
-            .env_remove("CLAUDE_CODE_ENTRYPOINT")
-            .env_remove("CLAUDECODE")
-            .stdin(Stdio::null())
+            .stdin(Stdio::null());
+        for k in UNSET {
+            c.env_remove(k);
+        }
+        c
     }
 
     pub fn cmd(&self, args: &[&str]) -> Command {
@@ -298,6 +312,9 @@ pub fn git(dir: &Path, args: &[&str]) -> String {
         .arg(dir)
         .env("GIT_CONFIG_GLOBAL", GITCONFIG)
         .env("GIT_CONFIG_NOSYSTEM", "1")
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_INDEX_FILE")
+        .env_remove("GIT_WORK_TREE")
         .args(args)
         .output()
         .unwrap();
@@ -330,6 +347,56 @@ pub fn group<'a>(board: &'a Value, key: &str) -> &'a Vec<Value> {
     board["groups"].as_array().unwrap().iter().find(|g| g["key"] == key).unwrap()["rows"].as_array().unwrap()
 }
 
+/// Every row on `board`, in every group.
+pub fn all_rows(board: &Value) -> Vec<&Value> {
+    board["groups"].as_array().unwrap().iter().flat_map(|g| g["rows"].as_array().unwrap()).collect()
+}
+
+/// `varde <args>` reading `text`, refused: what it said, and what it kept
+/// of `text` in a file of its own, which is then removed.
+pub fn refused_edit(e: &Env, args: &[&str], text: &str) -> (String, String) {
+    let out = feed(&mut e.cmd(args), text);
+    let err = String::from_utf8_lossy(&out.stderr).to_string();
+    assert!(!out.status.success(), "{args:?}: {err}");
+    let kept = err.split("kept in ").nth(1).unwrap_or_else(|| panic!("nothing kept: {err}")).trim();
+    let typed = std::fs::read_to_string(kept).unwrap();
+    let _ = std::fs::remove_file(kept);
+    (err, typed)
+}
+
+pub fn now_ms() -> i64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as i64
+}
+
+/// Make `task`'s schedule due `ago` ms ago.
+pub fn due(e: &Env, task: &str, ago: i64) {
+    e.db()
+        .execute("UPDATE schedule SET next_due = ?2 WHERE task LIKE '%' || upper(?1)", (task, now_ms() - ago))
+        .unwrap();
+}
+
+pub fn due_now(e: &Env, task: &str) {
+    due(e, task, 1000);
+}
+
+pub fn runs(e: &Env, task: &str) -> Vec<Value> {
+    e.show(task)["runs"].as_array().unwrap().clone()
+}
+
+/// Fire `task`'s schedule now, with `env` for the tick, and wait for that
+/// run to end. Its id.
+pub fn fire(e: &Env, task: &str, env: &[(&str, &str)]) -> String {
+    let before = runs(e, task).len();
+    due_now(e, task);
+    poll(200, || {
+        let out = e.cmd(&["tick"]).envs(env.iter().copied()).output().unwrap();
+        assert!(out.status.success(), "{}", String::from_utf8_lossy(&out.stderr));
+        let runs = runs(e, task);
+        runs.len() > before && runs.last().is_some_and(|r| r["status"] == "exited")
+    });
+    runs(e, task).last().unwrap()["id"].as_str().unwrap().to_string()
+}
+
 /// A tmux server of the test's own, with one window `t` running `sh`, or
 /// `None` where tmux is missing. Killed when dropped.
 pub struct Tmux {
@@ -346,16 +413,11 @@ impl Tmux {
     }
 
     pub fn tmux(&self, args: &[&str]) -> Option<String> {
-        let out = Command::new("tmux")
-            .arg("-S")
-            .arg(&self.sock)
-            .args(args)
-            .env_remove("TMUX")
-            .env_remove("TMUX_PANE")
-            .env_remove("VARDE_RUN")
-            .env_remove("VARDE_INTERNAL")
-            .output()
-            .ok()?;
+        let mut c = Command::new("tmux");
+        for k in UNSET {
+            c.env_remove(k);
+        }
+        let out = c.arg("-S").arg(&self.sock).args(args).output().ok()?;
         out.status.success().then(|| String::from_utf8_lossy(&out.stdout).trim().to_string())
     }
 

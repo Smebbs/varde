@@ -500,6 +500,27 @@ mod tests {
         s.ingest("claude", &n, "{}", now, None).unwrap();
     }
 
+    /// The board with every process alive.
+    fn board(s: &Store, now: i64, day_start: i64, all: bool) -> Board {
+        build(s, now, day_start, all, &|_, _| true).unwrap()
+    }
+
+    fn task_id(s: &Store, title: &str) -> String {
+        s.conn.query_row("SELECT id FROM task WHERE title = ?1", [title], |r| r.get(0)).unwrap()
+    }
+
+    /// A newer run of the task titled `title`, as `start` forks it: run
+    /// `F`, native id `f`, started at 12.
+    fn fork(s: &Store, title: &str) {
+        s.conn
+            .execute(
+                "INSERT INTO run (id, task, agent, native_id, relation, started, launch)
+                 VALUES ('F', ?1, 'claude', 'f', 'fork', 12, 'managed')",
+                [task_id(s, title)],
+            )
+            .unwrap();
+    }
+
     fn keys(b: &Board) -> Vec<(&str, Vec<&str>)> {
         b.groups.iter().map(|g| (g.key, g.rows.iter().map(|r| r.title.as_str()).collect())).collect()
     }
@@ -507,7 +528,7 @@ mod tests {
     #[test]
     fn every_group_is_present_even_when_empty() {
         let (_d, s) = store();
-        let b = build(&s, 0, 0, false, &|_, _| true).unwrap();
+        let b = board(&s, 0, 0, false);
         assert_eq!(
             b.groups.iter().map(|g| g.key).collect::<Vec<_>>(),
             ["needs_you", "working", "open", "scheduled", "inbox", "done", "parked"]
@@ -520,20 +541,19 @@ mod tests {
         let (_d, mut s) = store();
         ingest(&mut s, "a", Kind::Prompt, Some("thrown away"), 10);
         ingest(&mut s, "b", Kind::Prompt, Some("kept"), 11);
-        let id = |title: &str| -> String {
-            s.conn.query_row("SELECT id FROM task WHERE title = ?1", [title], |r| r.get(0)).unwrap()
-        };
         let row = |b: &Board, title: &str| -> (String, String, i64) {
             let r = b.groups.iter().flat_map(|g| &g.rows).find(|r| r.title == title).unwrap();
             (r.state.clone(), r.status.to_string(), r.changed)
         };
-        let created = row(&build(&s, 20, 0, false, &|_, _| true).unwrap(), "kept").2;
+        let created = row(&board(&s, 20, 0, false), "kept").2;
         assert_eq!(created, 11);
-        s.conn.execute("UPDATE task SET state = 'dropped' WHERE id = ?1", [id("thrown away")]).unwrap();
-        let b = build(&s, 20, 0, false, &|_, _| true).unwrap();
+        s.conn
+            .execute("UPDATE task SET state = 'dropped' WHERE id = ?1", [task_id(&s, "thrown away")])
+            .unwrap();
+        let b = board(&s, 20, 0, false);
         assert!(b.groups.iter().flat_map(|g| &g.rows).all(|r| r.title != "thrown away"));
         assert_eq!(b.groups.len(), 7);
-        let b = build(&s, 20, 0, true, &|_, _| true).unwrap();
+        let b = board(&s, 20, 0, true);
         assert_eq!(keys(&b)[7], ("dropped", vec!["thrown away"]));
         assert!(b.groups[7].collapsed);
         let (state, status, changed) = row(&b, "thrown away");
@@ -541,11 +561,15 @@ mod tests {
         // The real clock: the change happened just now.
         assert!(changed > 1_700_000_000_000);
         // Reopening moves it too, though it clears `closed`.
-        s.conn.execute("UPDATE task SET state = 'done', closed = 30 WHERE id = ?1", [id("kept")]).unwrap();
-        let done = row(&build(&s, 40, 0, true, &|_, _| true).unwrap(), "kept").2;
+        s.conn
+            .execute("UPDATE task SET state = 'done', closed = 30 WHERE id = ?1", [task_id(&s, "kept")])
+            .unwrap();
+        let done = row(&board(&s, 40, 0, true), "kept").2;
         std::thread::sleep(std::time::Duration::from_millis(5));
-        s.conn.execute("UPDATE task SET state = 'open', closed = NULL WHERE id = ?1", [id("kept")]).unwrap();
-        assert!(row(&build(&s, 40, 0, true, &|_, _| true).unwrap(), "kept").2 > done);
+        s.conn
+            .execute("UPDATE task SET state = 'open', closed = NULL WHERE id = ?1", [task_id(&s, "kept")])
+            .unwrap();
+        assert!(row(&board(&s, 40, 0, true), "kept").2 > done);
     }
 
     #[test]
@@ -557,7 +581,7 @@ mod tests {
         ingest(&mut s, "c", Kind::Prompt, Some("gamma"), 13);
         ingest(&mut s, "c", Kind::Ended, None, 14);
         ingest(&mut s, "d", Kind::Started(Source::Startup), None, 15);
-        let b = build(&s, 20, 0, false, &|_, _| true).unwrap();
+        let b = board(&s, 20, 0, false);
         assert_eq!(
             keys(&b),
             [
@@ -579,7 +603,7 @@ mod tests {
         ingest(&mut s, "a", Kind::TurnEnd { agents: 2, shells: 1 }, None, 11);
         ingest(&mut s, "b", Kind::Prompt, Some("beta"), 12);
         ingest(&mut s, "b", Kind::TurnEnd { agents: 0, shells: 1 }, None, 13);
-        let b = build(&s, 20, 0, false, &|_, _| true).unwrap();
+        let b = board(&s, 20, 0, false);
         let rows = |key| {
             b.groups
                 .iter()
@@ -616,7 +640,7 @@ mod tests {
                 .unwrap();
         };
         let needs = |now: i64| -> Vec<(String, bool)> {
-            let b = build(&s, now, 0, false, &|_, _| true).unwrap();
+            let b = board(&s, now, 0, false);
             b.groups[0].rows.iter().map(|r| (r.run.as_ref().unwrap().id.clone(), r.unread)).collect()
         };
         run("R1", 20);
@@ -651,11 +675,8 @@ mod tests {
         ingest(&mut s, "b", Kind::Prompt, Some("beta"), 12);
         ingest(&mut s, "b", Kind::Blocked, None, 13);
         ingest(&mut s, "c", Kind::Started(Source::Startup), None, 14);
-        let id = |title: &str| -> String {
-            s.conn.query_row("SELECT id FROM task WHERE title = ?1", [title], |r| r.get(0)).unwrap()
-        };
         let needs_you = |s: &Store| -> Vec<(String, bool, i64)> {
-            build(s, 30, 0, false, &|_, _| true).unwrap().groups[0]
+            board(s, 30, 0, false).groups[0]
                 .rows
                 .iter()
                 .map(|r| (r.title.clone(), r.unread, r.last))
@@ -664,8 +685,8 @@ mod tests {
         assert_eq!(needs_you(&s), [("beta".into(), true, 13), ("alpha".into(), true, 11)]);
 
         // Looking does not make a task newer.
-        assert_eq!(store::mark_seen(&s.conn, &id("beta"), 20).unwrap(), 1);
-        assert_eq!(store::mark_seen(&s.conn, &id("beta"), 21).unwrap(), 0);
+        assert_eq!(store::mark_seen(&s.conn, &task_id(&s, "beta"), 20).unwrap(), 1);
+        assert_eq!(store::mark_seen(&s.conn, &task_id(&s, "beta"), 21).unwrap(), 0);
         assert_eq!(needs_you(&s), [("alpha".into(), true, 11), ("beta".into(), false, 13)]);
 
         // The next thing it asks is new again.
@@ -681,7 +702,7 @@ mod tests {
         ingest(&mut s, "a", Kind::TurnEnd { agents: 0, shells: 0 }, None, 11);
         ingest(&mut s, "a", Kind::Started(Source::Resume), None, 12);
         let row = |s: &Store| {
-            let b = build(s, 30, 0, false, &|_, _| true).unwrap();
+            let b = board(s, 30, 0, false);
             (b.groups[0].rows[0].status, b.groups[0].rows[0].unread)
         };
         assert_eq!(row(&s), ("waiting", false));
@@ -699,7 +720,7 @@ mod tests {
         s.conn.execute("UPDATE task SET state='parked', closed=12, inbox=0", []).unwrap();
         // Old as it is, it is not aged off the board the way done tasks are.
         let now = 12 + RECENT_MS + 1;
-        let b = build(&s, now, now - 1000, false, &|_, _| true).unwrap();
+        let b = board(&s, now, now - 1000, false);
         let parked = b.groups.iter().find(|g| g.key == "parked").unwrap();
         assert_eq!(
             parked.rows.iter().map(|r| (r.title.as_str(), r.status)).collect::<Vec<_>>(),
@@ -721,18 +742,10 @@ mod tests {
         ingest(&mut s, "e", Kind::TurnEnd { agents: 0, shells: 1 }, None, 11);
         ingest(&mut s, "d", Kind::Prompt, Some("two sessions"), 10);
         // A newer run of it waits; the older one is still at work.
-        let task: String =
-            s.conn.query_row("SELECT id FROM task WHERE title = 'two sessions'", [], |r| r.get(0)).unwrap();
-        s.conn
-            .execute(
-                "INSERT INTO run (id, task, agent, native_id, relation, started, launch)
-                 VALUES ('F', ?1, 'claude', 'f', 'fork', 12, 'managed')",
-                [&task],
-            )
-            .unwrap();
+        fork(&s, "two sessions");
         ingest(&mut s, "f", Kind::Prompt, None, 13);
         ingest(&mut s, "f", Kind::TurnEnd { agents: 0, shells: 0 }, None, 14);
-        let b = build(&s, 20, 0, false, &|_, _| true).unwrap();
+        let b = board(&s, 20, 0, false);
         let mut busy: Vec<(&str, &str, bool)> =
             b.groups.iter().flat_map(|g| &g.rows).map(|r| (r.title.as_str(), r.status, r.busy)).collect();
         busy.sort();
@@ -754,15 +767,8 @@ mod tests {
         ingest(&mut s, "a", Kind::Prompt, Some("alpha"), 10);
         ingest(&mut s, "a", Kind::Blocked, None, 11);
         // `start` forks it: a newer run of the same task that never got going.
-        let task: String = s.conn.query_row("SELECT id FROM task", [], |r| r.get(0)).unwrap();
-        s.conn
-            .execute(
-                "INSERT INTO run (id, task, agent, native_id, relation, started, launch)
-                 VALUES ('F', ?1, 'claude', 'f', 'fork', 12, 'managed')",
-                [&task],
-            )
-            .unwrap();
-        let b = build(&s, 20, 0, false, &|_, _| true).unwrap();
+        fork(&s, "alpha");
+        let b = board(&s, 20, 0, false);
         assert_eq!(keys(&b)[0], ("needs_you", vec!["alpha"]));
         assert_eq!(b.groups[0].rows[0].status, "blocked");
     }
@@ -773,10 +779,7 @@ mod tests {
         ingest(&mut s, "a", Kind::Prompt, Some("landing"), 1);
         ingest(&mut s, "b", Kind::Prompt, Some("landed"), 2);
         s.conn.execute("UPDATE task SET state='done', closed=3, inbox=0", []).unwrap();
-        let id = |title: &str| -> String {
-            s.conn.query_row("SELECT id FROM task WHERE title = ?1", [title], |r| r.get(0)).unwrap()
-        };
-        let (landing, landed) = (id("landing"), id("landed"));
+        let (landing, landed) = (task_id(&s, "landing"), task_id(&s, "landed"));
         s.conn
             .execute(
                 "INSERT INTO worktree (path, task, repo, branch, base, state, created)
@@ -793,7 +796,7 @@ mod tests {
             )
             .unwrap();
         let now = 3 + RECENT_MS;
-        let b = build(&s, now, now - 1000, false, &|_, _| true).unwrap();
+        let b = board(&s, now, now - 1000, false);
         let done = b.groups.iter().find(|g| g.key == "done").unwrap();
         assert_eq!(done.rows.len(), 1);
         let row = &done.rows[0];
@@ -807,9 +810,9 @@ mod tests {
                 [&landing],
             )
             .unwrap();
-        let b = build(&s, now, now - 1000, false, &|_, _| true).unwrap();
+        let b = board(&s, now, now - 1000, false);
         assert_eq!(b.groups.iter().find(|g| g.key == "done").unwrap().rows[0].cairn_status, None);
-        let b = build(&s, now, now - 1000, true, &|_, _| true).unwrap();
+        let b = board(&s, now, now - 1000, true);
         // Both closed at 3: with --all, "landed" is there too, in either order.
         let done = b.groups.iter().find(|g| g.key == "done").unwrap();
         let row = done.rows.iter().find(|r| r.title == "landing").unwrap();
@@ -829,10 +832,10 @@ mod tests {
         ingest(&mut s, "b", Kind::Prompt, Some("finished"), 3);
         s.conn.execute("UPDATE task SET state='done', closed=4 WHERE title='finished'", []).unwrap();
         let now = 2 + 365 * 24 * 3600 * 1000;
-        let b = build(&s, now, now - 1000, false, &|_, _| true).unwrap();
+        let b = board(&s, now, now - 1000, false);
         assert_eq!(keys(&b)[4], ("inbox", vec!["old"]));
         assert_eq!(b.groups.iter().map(|g| g.rows.len()).sum::<usize>(), 1);
-        let b = build(&s, now, now - 1000, true, &|_, _| true).unwrap();
+        let b = board(&s, now, now - 1000, true);
         assert_eq!(b.groups.iter().map(|g| g.rows.len()).sum::<usize>(), 2);
     }
 
@@ -843,7 +846,7 @@ mod tests {
         ingest(&mut s, "a", Kind::Ended, None, 2);
         let id: String = s.conn.query_row("SELECT id FROM task", [], |r| r.get(0)).unwrap();
         crate::task::accept(&s, &id).unwrap();
-        let b = build(&s, 10, 0, false, &|_, _| true).unwrap();
+        let b = board(&s, 10, 0, false);
         assert_eq!(keys(&b)[2], ("open", vec!["keeper"]));
         assert!(!b.groups[2].rows[0].inbox);
     }
@@ -855,7 +858,7 @@ mod tests {
         let run: String = s.conn.query_row("SELECT id FROM run", [], |r| r.get(0)).unwrap();
         let origin: String = s.conn.query_row("SELECT id FROM task", [], |r| r.get(0)).unwrap();
         crate::task::defer(&s, "later bit", None, &run, None, 2).unwrap();
-        let b = build(&s, 3, 0, false, &|_, _| true).unwrap();
+        let b = board(&s, 3, 0, false);
         let row = &b.groups[4].rows.iter().find(|r| r.title == "later bit").unwrap();
         let o = row.origin.as_ref().unwrap();
         assert_eq!((o.task.as_str(), o.title.as_str()), (origin.as_str(), "big job"));
@@ -877,7 +880,7 @@ mod tests {
                 [],
             )
             .unwrap();
-        let b = build(&s, 3, 0, false, &|_, _| true).unwrap();
+        let b = board(&s, 3, 0, false);
         let row = |title: &str| b.groups.iter().flat_map(|g| &g.rows).find(|r| r.title == title).unwrap();
         assert!(row("started").tracked);
         assert!(row("started").git.is_some());
@@ -892,7 +895,7 @@ mod tests {
         crate::task::create(&s, "nowhere", None, None, None, 2).unwrap();
         ingest(&mut s, "b", Kind::Prompt, Some("waiting"), 3);
         ingest(&mut s, "b", Kind::TurnEnd { agents: 0, shells: 0 }, None, 4);
-        let mut b = build(&s, 5, 0, false, &|_, _| true).unwrap();
+        let mut b = board(&s, 5, 0, false);
         assert!(b.has("/a") && b.has("/tmp/p") && !b.has("/c"));
         assert_eq!(b.only("/a"), Elsewhere { tasks: 2, need_you: 1 });
         assert_eq!(keys(&b)[2], ("open", vec!["here"]));

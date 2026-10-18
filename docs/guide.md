@@ -354,7 +354,7 @@ scope = "project"                 # or "all"
 ```
 
 The actions are `start`, `background`, `fresh`, `fork`, `next-needs`,
-`prev-needs`, `new`, `edit`, `done`, `park`, `drop`, `accept`, `move`,
+`prev-needs`, `new`, `edit`, `done`, `park`, `drop`, `reopen`, `accept`, `move`,
 `mark`, `view`, `cairn`, `editor`, `diff`, `recall`, `down`, `up`,
 `first`, `last`, `next-group`, `prev-group`, `half-down`, `half-up`,
 `fold`, `scope`, `refresh`, `quit` and `help`.

@@ -69,8 +69,7 @@ project, it asks for one."
 KEPT is whether it keeps to its project, leaving out HIDDEN tasks, of
 which NEED-YOU need you.  Said shorter where it must be; else nothing."
   (let* ((project org-varde-board--project)
-         (name (and project (propertize (file-name-nondirectory (directory-file-name project))
-                                        'face 'bold)))
+         (name (and project (propertize (org-varde--project-name project) 'face 'bold)))
          (key (propertize "." 'face 'help-key-binding))
          (needs (and (> need-you 0)
                      (propertize (format "%d need%s you" need-you (if (= need-you 1) "s" ""))
@@ -95,38 +94,25 @@ which NEED-YOU need you.  Said shorter where it must be; else nothing."
 a live session's status, what it left running, where deferred work came
 from, git, the project unless KEPT to one, how long ago, and its short
 id.  In Needs you, GROUP says it is your turn: the row does not again."
-  (let* ((git (plist-get row :git))
-         (label (plist-get git :label))
-         (project (plist-get row :project))
-         (count (lambda (k what)
-                  (let ((n (or (plist-get row k) 0)))
-                    (and (> n 0) (format "%d %s%s" n what (if (= n 1) "" "s"))))))
+  (let* ((project (plist-get row :project))
          (parts
           (delq nil
-                (list (pcase (plist-get row :status)
-                        ((or "working" "delegated") (propertize "working" 'face 'org-varde-board-working))
-                        ("waiting" (unless (equal group "needs_you")
-                                     (propertize "your turn" 'face 'org-varde-board-waiting)))
-                        ("blocked" (propertize "needs input" 'face 'org-varde-board-blocked)))
-                      (funcall count :agents "agent")
-                      (funcall count :shells "shell")
-                      (let ((origin (plist-get row :origin)))
-                        (and origin (concat "← " (plist-get origin :short))))
-                      (and label (not (string-empty-p label))
-                           (propertize label 'face
-                                       (cond ((equal (plist-get git :checks) "failing") 'org-varde-board-blocked)
-                                             ((equal (plist-get git :stage) "edited") 'org-varde-board-waiting)
-                                             ((equal (plist-get git :stage) "landed") 'org-varde-board-working)
-                                             (t 'org-varde-board-git))))
-                      (and project (not kept) (file-name-nondirectory (directory-file-name project)))
-                      ;; Waiting for its schedule, it shows when it starts,
-                      ;; not its age.
-                      (let ((mark (org-varde--schedule-mark row now)))
-                        (if (and mark (not (member (plist-get row :status)
-                                                   '("working" "delegated" "waiting" "blocked"))))
-                            mark
-                          (concat (if mark (concat mark (propertize " · " 'face 'org-varde-board-empty)) "")
-                                  (org-varde--age (- now (plist-get row :last))))))))))
+                (append
+                 (list (pcase (plist-get row :status)
+                         ((or "working" "delegated") (propertize "working" 'face 'org-varde-board-working))
+                         ("waiting" (unless (equal group "needs_you")
+                                      (propertize "your turn" 'face 'org-varde-board-waiting)))
+                         ("blocked" (propertize "needs input" 'face 'org-varde-board-blocked))))
+                 (org-varde--row-parts row 'org-varde-board-git)
+                 (list (and (not kept) (org-varde--project-name project))
+                       ;; Waiting for its schedule, it shows when it starts,
+                       ;; not its age.
+                       (let ((mark (org-varde--schedule-mark row now)))
+                         (if (and mark (not (member (plist-get row :status)
+                                                    '("working" "delegated" "waiting" "blocked"))))
+                             mark
+                           (concat (if mark (concat mark (propertize " · " 'face 'org-varde-board-empty)) "")
+                                   (org-varde--age (- now (plist-get row :last)))))))))))
     (concat (mapconcat (lambda (p) (if (get-text-property 0 'face p) p (propertize p 'face 'org-varde-board-empty)))
                        parts (propertize " · " 'face 'org-varde-board-empty))
             (propertize (concat "  " (plist-get row :short)) 'face 'org-varde-board-empty))))
@@ -391,15 +377,8 @@ standing in for its tasks, for `org-varde-task'; else a group heading."
 (defun org-varde-board--next (prop n)
   "Move to the Nth line after this one that `org-varde-board--stop-p' PROP.
 Negative N moves back."
-  (let ((step (if (< n 0) -1 1))
-        (left (abs n))
-        found)
-    (save-excursion
-      (beginning-of-line)
-      (while (and (> left 0) (zerop (forward-line step)) (not (eobp)))
-        (when (org-varde-board--stop-p prop)
-          (setq found (point) left (1- left)))))
-    (if found (goto-char found) (user-error "No more %s" (if (eq prop 'org-varde-task) "tasks" "groups")))))
+  (org-varde--next-stop (lambda () (org-varde-board--stop-p prop)) n
+                        (if (eq prop 'org-varde-task) " tasks" " groups")))
 
 (defun org-varde-board-next-task (&optional n)
   "Move to the Nth next task."
@@ -433,31 +412,29 @@ Negative N moves back."
   (goto-char (point-max))
   (org-varde-board-previous-task))
 
+(defun org-varde-board--toggle (key)
+  "Open the group KEY if it is closed, else close it, and draw the board."
+  (setq org-varde-board--toggled (if (member key org-varde-board--toggled)
+                                     (delete key org-varde-board--toggled)
+                                   (cons key org-varde-board--toggled)))
+  (org-varde-board--render))
+
 (defun org-varde-board--unfold (key)
   "Open the group KEY, if it is folded, and draw the board."
   (let ((group (seq-find (lambda (g) (equal (plist-get g :key) key))
                          (plist-get org-varde-board-data :groups))))
     (when (and group (org-varde-board--folded-p group))
-      (setq org-varde-board--toggled (if (member key org-varde-board--toggled)
-                                         (delete key org-varde-board--toggled)
-                                       (cons key org-varde-board--toggled)))
-      (org-varde-board--render))))
+      (org-varde-board--toggle key))))
 
 (defun org-varde-board-next-needs-you (&optional n)
   "Move to the Nth next task that needs you, round to the first.
 Negative N moves back, round to the last.  Its group opens if it was
 folded."
   (interactive "p")
-  (let* ((n (or n 1))
-         (tasks (mapcar (lambda (r) (plist-get r :task)) (org-varde--needs-you-here)))
-         (len (length tasks))
-         (i (seq-position tasks (get-text-property (point) 'org-varde-task))))
-    (if (zerop len)
-        (message "%s" (org-varde--nothing-needs-you))
-      (let ((to (mod (cond (i (+ i n)) ((> n 0) (1- n)) (t n)) len)))
-        (org-varde-board--unfold "needs_you")
-        (org-varde--board-select (nth to tasks))
-        (when (> len 1) (message "Needs you: %d of %d" (1+ to) len))))))
+  (org-varde--step-needs-you (get-text-property (point) 'org-varde-task) (or n 1)
+                             (lambda (task)
+                               (org-varde-board--unfold "needs_you")
+                               (org-varde--board-select task))))
 
 (defun org-varde-board-previous-needs-you (&optional n)
   "Move to the Nth previous task that needs you, round to the last."
@@ -688,11 +665,7 @@ starts closed.  An empty group has nothing to fold."
   (let ((key (or (get-text-property (point) 'org-varde-group)
                  (get-text-property (point) 'org-varde-in)
                  (user-error "Not on a group with tasks"))))
-    (setq org-varde-board--toggled
-          (if (member key org-varde-board--toggled)
-              (delete key org-varde-board--toggled)
-            (cons key org-varde-board--toggled)))
-    (org-varde-board--render)
+    (org-varde-board--toggle key)
     (goto-char (or (text-property-any (point-min) (point-max) 'org-varde-group key) (point)))
     (org-varde--highlight)))
 
@@ -1240,7 +1213,7 @@ the answer."
     (org-varde-board--reveal project)
     (message "Created %s in %s%s; %s"
              (if (string-empty-p title) (format "task %s" (plist-get new :short)) (format "\"%s\"" title))
-             (file-name-nondirectory (directory-file-name project))
+             (org-varde--project-name project)
              (if then (funcall then (plist-get new :short) title) "")
              (if (string-empty-p rule) "RET on the board starts it" (concat "varde starts it: " rule))))
   (org-varde-refresh))

@@ -26,6 +26,8 @@ fn varde_out(home: &Path, args: &[&str], stdin: &str, claim: Option<&str>) -> (D
     let mut cmd = Command::new(env!("CARGO_BIN_EXE_varde"));
     cmd.args(args)
         .env("VARDE_HOME", home)
+        // The defaults, not the settings of whoever runs it.
+        .env("VARDE_CONFIG", home.join("config.toml"))
         .env("CLAUDE_CODE_ENTRYPOINT", "cli")
         .env_remove("VARDE_INTERNAL")
         .env_remove("VARDE_RUN")

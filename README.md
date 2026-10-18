@@ -7,7 +7,9 @@ Task management and memory for AI coding agents.
 varde runs Claude Code and pi sessions as tasks. A board shows which
 one needs you, each task can have its own git worktree, and what a
 task's sessions learn is kept in a short *cairn* that is handed to the
-next session. It is one binary and one SQLite file, with no daemon.
+next session. A task can also be scheduled: varde starts it in the
+background, once or on a repeat, and it waits for you only when it
+found something. It is one binary and one SQLite file, with no daemon.
 
 https://github.com/user-attachments/assets/21b07ef7-3300-487a-ac3e-e649508b43d6
 
