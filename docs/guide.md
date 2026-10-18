@@ -33,8 +33,8 @@ why varde is built this way.
 
 ## Install
 
-varde needs git, and Claude Code or pi. tmux 3.0 or later is
-recommended: inside it, each session gets a window of its own.
+varde needs git, and Claude Code or pi. tmux is optional (see
+[With tmux](#with-tmux)).
 
 ```sh
 brew install smebbs/tap/varde
@@ -251,7 +251,11 @@ board, for the task in view.
 A line you are typing is never lost: Esc puts it away, and the same key
 on the same line brings it back.
 
-### Inside tmux
+### With tmux
+
+The board works on its own: RET hands a session the terminal, and the
+board comes back when the agent exits. With tmux (3.0 or later),
+sessions run side by side instead.
 
 Keep the board a key away in a popup (tmux 3.3 or later; on 3.2, leave
 out `-B`), and bind `varde next`:
@@ -269,9 +273,6 @@ bell when it needs you; prefix `l` goes back to the board. The board
 closes a closed task's windows once their shell is idle. `run-shell`
 uses tmux's environment, so `varde` must be on the PATH tmux started
 with.
-
-Outside tmux, the board runs one session at a time: RET hands it the
-terminal, and the board comes back when the agent exits.
 
 ## Cairns
 
