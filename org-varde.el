@@ -44,6 +44,12 @@
 (declare-function vterm-send-return "vterm" ())
 (declare-function vterm-reset-cursor-point "vterm" ())
 (defvar vterm-copy-mode)
+(declare-function ghostel "ghostel" (&optional arg))
+(declare-function ghostel-send-string "ghostel" (string))
+(declare-function ghostel-cursor-point "ghostel" ())
+(defvar ghostel-buffer-name)
+(defvar ghostel-use-native-pty)
+(defvar ghostel--input-mode)
 (declare-function term-char-mode "term" ())
 (declare-function +workspace-list-names "ext:workspaces" ())
 (declare-function +workspace-current-name "ext:workspaces" ())
@@ -81,7 +87,8 @@ settings say."
 
 (defcustom org-varde-terminal-function #'org-varde--open-shell
   "Function of (DIRECTORY NAME) that opens a terminal and returns its buffer.
-The default opens a vterm when vterm is installed, and a term otherwise."
+The default opens a vterm when vterm is installed, else a ghostel when
+ghostel is, and a term otherwise."
   :type 'function)
 
 (defcustom org-varde-send-function #'org-varde--send
@@ -273,10 +280,19 @@ Drawers are left out; they are org's bookkeeping, not the task."
 
 (defun org-varde--open-shell (directory name)
   "Open a terminal named NAME in DIRECTORY running your shell; return it.
-A vterm when vterm is installed, else a term."
+A vterm when vterm is installed, else a ghostel when ghostel is,
+else a term."
   (let ((default-directory (file-name-as-directory directory)))
-    (if (require 'vterm nil t)
-        (save-window-excursion (vterm name))
+    (cond
+     ((require 'vterm nil t)
+      (save-window-excursion (vterm name)))
+     ;; Through Emacs's own PTY: ghostel's native one gives the buffer a
+     ;; pipe, which has no tty name and no foreground process to read.
+     ((require 'ghostel nil t)
+      (dlet ((ghostel-buffer-name name)
+             (ghostel-use-native-pty nil))
+        (save-window-excursion (ghostel t))))
+     (t
       (let ((buffer (make-term (string-trim name "\\*" "\\*")
                                (or (bound-and-true-p explicit-shell-file-name)
                                    (getenv "ESHELL") shell-file-name))))
@@ -293,13 +309,15 @@ A vterm when vterm is installed, else a term."
                   (let ((prefix (vector ?\C-c (aref key 1))))
                     (define-key map prefix (lookup-key global-map prefix))))))
             (use-local-map map)))
-        buffer))))
+        buffer)))))
 
 (defun org-varde--send (command)
   "Type COMMAND into the current terminal and run it."
-  (if (derived-mode-p 'vterm-mode)
-      (progn (vterm-send-string command) (vterm-send-return))
-    (process-send-string nil (concat command "\n"))))
+  (cond ((derived-mode-p 'vterm-mode)
+         (vterm-send-string command) (vterm-send-return))
+        ((derived-mode-p 'ghostel-mode)
+         (ghostel-send-string (concat command "\r")))
+        (t (process-send-string nil (concat command "\n")))))
 
 (defun org-varde--terminal (task)
   "TASK's terminal buffer, if it is still open."
@@ -333,8 +351,13 @@ that does.  Makes no workspace."
   ;; A workspace laid out with the terminal before it printed anything
   ;; keeps its window at the top; its latest output is at the cursor.
   (with-current-buffer buffer
-    (when (and (derived-mode-p 'vterm-mode) (not (bound-and-true-p vterm-copy-mode)))
-      (vterm-reset-cursor-point))))
+    (cond ((derived-mode-p 'vterm-mode)
+           (unless (bound-and-true-p vterm-copy-mode)
+             (vterm-reset-cursor-point)))
+          ((derived-mode-p 'ghostel-mode)
+           (let ((cursor (ghostel-cursor-point)))
+             (when (and cursor (not (eq (bound-and-true-p ghostel--input-mode) 'copy)))
+               (goto-char cursor)))))))
 
 (defun org-varde--workspace (task)
   "The name of TASK's open workspace, if it has one.
@@ -2943,7 +2966,8 @@ is gone.
                 (cond ((not (eq org-varde-terminal-function #'org-varde--open-shell))
                        "ok  terminal your own `org-varde-terminal-function'\n")
                       ((locate-library "vterm") "ok  terminal vterm\n")
-                      (t "ok  terminal term; install vterm for a faster one\n"))))
+                      ((locate-library "ghostel") "ok  terminal ghostel\n")
+                      (t "ok  terminal term; install vterm or ghostel for a faster one\n"))))
       (special-mode)
       (pop-to-buffer (current-buffer)))))
 

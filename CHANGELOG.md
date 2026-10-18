@@ -6,6 +6,13 @@ follow [Semantic Versioning](https://semver.org).
 
 ## Unreleased
 
+### Added
+
+- org-varde opens sessions in ghostel when vterm is not installed,
+  before falling back to `term`, which can't answer fish 4's startup
+  queries. It runs through Emacs's PTY, not ghostel's native one, so
+  org-varde can still read the terminal's tty and whether it is busy.
+
 ## 1.4.1 - 2026-10-18
 
 ### Fixed

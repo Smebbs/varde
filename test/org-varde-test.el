@@ -106,8 +106,60 @@
             (should (equal reset (list buffer))))
         (kill-buffer buffer)))))
 
-(ert-deftest org-varde-without-vterm-a-term-is-opened ()
+(defvar ghostel-use-native-pty)
+(defvar ghostel-buffer-name)
+(defvar ghostel--input-mode)
+
+(ert-deftest org-varde-going-to-a-ghostel-shows-its-cursor ()
+  (org-varde-test-with-varde
+    (let ((buffer (generate-new-buffer "*varde xyz123*")))
+      (unwind-protect
+          (cl-letf (((symbol-function 'ghostel-cursor-point) (lambda () 4)))
+            (with-current-buffer buffer
+              (insert "$ hello")
+              (goto-char (point-min))
+              (setq major-mode 'ghostel-mode))
+            (save-window-excursion (org-varde--go-to-buffer buffer))
+            (should (= (with-current-buffer buffer (point)) 4))
+            ;; Not while you are reading back in copy mode.
+            (with-current-buffer buffer
+              (goto-char (point-min))
+              (setq-local ghostel--input-mode 'copy))
+            (save-window-excursion (org-varde--go-to-buffer buffer))
+            (should (= (with-current-buffer buffer (point)) 1)))
+        (kill-buffer buffer)))))
+
+;; Through Emacs's PTY, so the buffer's process has a tty and a
+;; foreground process to read; ghostel's native one is a pipe.
+(ert-deftest org-varde-without-vterm-a-ghostel-is-opened ()
   (skip-unless (not (locate-library "vterm")))
+  (org-varde-test-with-varde
+    (let* ((dir (make-temp-file "ghostel" t))
+           (load-path (cons dir load-path))
+           (ghostel-use-native-pty t)
+           (ghostel-buffer-name "*ghostel*")
+           made)
+      (with-temp-file (expand-file-name "ghostel.el" dir) (insert "(provide 'ghostel)\n"))
+      (unwind-protect
+          (cl-letf (((symbol-function 'ghostel)
+                     (lambda (arg) (setq made (list arg ghostel-buffer-name ghostel-use-native-pty default-directory))
+                       (get-buffer-create ghostel-buffer-name))))
+            (should (equal (buffer-name (org-varde--open-shell "/tmp" "*varde xyz123*")) "*varde xyz123*")))
+        (setq features (delq 'ghostel features))
+        (delete-directory dir t))
+      (should (equal made '(t "*varde xyz123*" nil "/tmp/"))))))
+
+(ert-deftest org-varde-a-command-is-typed-into-a-ghostel ()
+  (org-varde-test-with-varde
+    (with-temp-buffer
+      (setq major-mode 'ghostel-mode)
+      (let (sent)
+        (cl-letf (((symbol-function 'ghostel-send-string) (lambda (s) (push s sent))))
+          (org-varde--send "varde run abc"))
+        (should (equal sent '("varde run abc\r")))))))
+
+(ert-deftest org-varde-without-vterm-a-term-is-opened ()
+  (skip-unless (not (or (locate-library "vterm") (locate-library "ghostel"))))
   (org-varde-test-with-varde
     (let (made)
       (cl-letf (((symbol-function 'make-term)
@@ -1710,7 +1762,7 @@ whether to take it over, and starts it again with that answer."
   "In term's char mode, C-c is its escape, where C-c v is C-x v: the keys
 under C-c you bound org-varde's commands to are kept, at any depth and
 with a label, and a prefix that holds one is kept whole."
-  (skip-unless (not (locate-library "vterm")))
+  (skip-unless (not (or (locate-library "vterm") (locate-library "ghostel"))))
   (require 'term)
   (org-varde-test-with-varde
     (let* ((keys '("C-c a" "C-c b" "C-c d" "C-c o"))

@@ -10,7 +10,8 @@ to org only the links you ask for.
 It needs varde and its hooks ([the guide](guide.md#install)), and
 Emacs 29.1 or later. Sessions open in
 [vterm](https://github.com/akermu/emacs-libvterm) when it is
-installed, else in `term`. With Doom's workspaces each task gets one.
+installed, else in [ghostel](https://github.com/dakra/ghostel) when it
+is, else in `term`. With Doom's workspaces each task gets one.
 
 On Emacs 30 or later:
 
