@@ -131,10 +131,10 @@
 
 ;; Through Emacs's PTY, so the buffer's process has a tty and a
 ;; foreground process to read; ghostel's native one is a pipe.
-(ert-deftest org-varde-without-vterm-a-ghostel-is-opened ()
-  (skip-unless (not (locate-library "vterm")))
+(ert-deftest org-varde-a-ghostel-is-opened-through-emacs-s-pty ()
   (org-varde-test-with-varde
-    (let* ((dir (make-temp-file "ghostel" t))
+    (let* ((org-varde-terminals '(ghostel))
+           (dir (make-temp-file "ghostel" t))
            (load-path (cons dir load-path))
            (ghostel-use-native-pty t)
            (ghostel-buffer-name "*ghostel*")
@@ -158,10 +158,20 @@
           (org-varde--send "varde run abc"))
         (should (equal sent '("varde run abc\r")))))))
 
-(ert-deftest org-varde-without-vterm-a-term-is-opened ()
-  (skip-unless (not (or (locate-library "vterm") (locate-library "ghostel"))))
+;; The first terminal you prefer that is installed; term when none is.
+(ert-deftest org-varde-the-terminal-is-the-first-preferred-one-installed ()
+  (cl-letf (((symbol-function 'locate-library) (lambda (name) (equal name "vterm"))))
+    (let ((org-varde-terminals '(ghostel vterm)))
+      (should (eq (org-varde--terminal-kind) 'vterm)))
+    (let ((org-varde-terminals '(term vterm)))
+      (should (eq (org-varde--terminal-kind) 'term)))
+    (let ((org-varde-terminals '(ghostel)))
+      (should (eq (org-varde--terminal-kind) 'term)))))
+
+(ert-deftest org-varde-with-no-terminal-installed-a-term-is-opened ()
   (org-varde-test-with-varde
-    (let (made)
+    (let ((org-varde-terminals nil)
+          made)
       (cl-letf (((symbol-function 'make-term)
                  (lambda (name program) (setq made (list name program default-directory))
                    (get-buffer-create (concat "*" name "*"))))
@@ -1762,10 +1772,10 @@ whether to take it over, and starts it again with that answer."
   "In term's char mode, C-c is its escape, where C-c v is C-x v: the keys
 under C-c you bound org-varde's commands to are kept, at any depth and
 with a label, and a prefix that holds one is kept whole."
-  (skip-unless (not (or (locate-library "vterm") (locate-library "ghostel"))))
   (require 'term)
   (org-varde-test-with-varde
-    (let* ((keys '("C-c a" "C-c b" "C-c d" "C-c o"))
+    (let* ((org-varde-terminals '(term))
+           (keys '("C-c a" "C-c b" "C-c d" "C-c o"))
            (was (mapcar (lambda (k) (keymap-lookup global-map k)) keys)))
       (keymap-set global-map "C-c a" (define-keymap "n" #'org-varde-next-needs-you "m" #'ignore))
       (keymap-set global-map "C-c b" #'org-varde-board)

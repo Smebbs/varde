@@ -85,10 +85,14 @@ settings say."
   "Open a Doom workspace per task, when Doom's workspaces are loaded."
   :type 'boolean)
 
+(defcustom org-varde-terminals '(ghostel vterm)
+  "The terminals sessions open in, in the order you prefer them.
+The first one installed is used, and `term' when none is."
+  :type '(repeat (choice (const ghostel) (const vterm) (const term))))
+
 (defcustom org-varde-terminal-function #'org-varde--open-shell
   "Function of (DIRECTORY NAME) that opens a terminal and returns its buffer.
-The default opens a vterm when vterm is installed, else a ghostel when
-ghostel is, and a term otherwise."
+The default opens the first of `org-varde-terminals' installed."
   :type 'function)
 
 (defcustom org-varde-send-function #'org-varde--send
@@ -278,21 +282,28 @@ Drawers are left out; they are org's bookkeeping, not the task."
 (defvar-local org-varde--task nil
   "The varde task this terminal buffer belongs to.")
 
+(defun org-varde--terminal-kind ()
+  "The first of `org-varde-terminals' installed, else `term'."
+  (or (seq-find (lambda (kind) (or (eq kind 'term) (locate-library (symbol-name kind))))
+                org-varde-terminals)
+      'term))
+
 (defun org-varde--open-shell (directory name)
   "Open a terminal named NAME in DIRECTORY running your shell; return it.
-A vterm when vterm is installed, else a ghostel when ghostel is,
-else a term."
+The first of `org-varde-terminals' installed, else a term."
   (let ((default-directory (file-name-as-directory directory)))
-    (cond
-     ((require 'vterm nil t)
+    (pcase (org-varde--terminal-kind)
+     ('vterm
+      (require 'vterm)
       (save-window-excursion (vterm name)))
      ;; Through Emacs's own PTY: ghostel's native one gives the buffer a
      ;; pipe, which has no tty name and no foreground process to read.
-     ((require 'ghostel nil t)
+     ('ghostel
+      (require 'ghostel)
       (dlet ((ghostel-buffer-name name)
              (ghostel-use-native-pty nil))
         (save-window-excursion (ghostel t))))
-     (t
+     (_
       (let ((buffer (make-term (string-trim name "\\*" "\\*")
                                (or (bound-and-true-p explicit-shell-file-name)
                                    (getenv "ESHELL") shell-file-name))))
@@ -2965,9 +2976,9 @@ is gone.
                         (org-varde--home))
                 (cond ((not (eq org-varde-terminal-function #'org-varde--open-shell))
                        "ok  terminal your own `org-varde-terminal-function'\n")
-                      ((locate-library "vterm") "ok  terminal vterm\n")
-                      ((locate-library "ghostel") "ok  terminal ghostel\n")
-                      (t "ok  terminal term; install vterm or ghostel for a faster one\n"))))
+                      ((eq (org-varde--terminal-kind) 'term)
+                       "ok  terminal term; install ghostel or vterm for a faster one\n")
+                      (t (format "ok  terminal %s\n" (org-varde--terminal-kind))))))
       (special-mode)
       (pop-to-buffer (current-buffer)))))
 
