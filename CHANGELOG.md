@@ -6,8 +6,17 @@ follow [Semantic Versioning](https://semver.org).
 
 ## Unreleased
 
+## 1.4.1 - 2026-10-18
+
 ### Fixed
 
+- A background run is let off the user's look only if it changed
+  nothing: it is told that anything it edited or committed, however
+  routine, is for the user to see. A run had judged its own commit not
+  worth a look.
+- org-varde: going to a vterm shows its latest output, at the cursor; a
+  task started in the background had opened at the top its workspace
+  was laid out with.
 - org-varde: TAB in a task's view, off a section heading, goes to the
   next task that needs you; it had failed with a `wrong-type-argument`.
 - org-varde: `org-varde-recall` is autoloaded, as its cookie meant.
