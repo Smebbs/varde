@@ -94,6 +94,24 @@
         (should (member "xyz123 t" spaces))
         (should (equal shown '(("xyz123 t" . "*varde xyz123*"))))))))
 
+;; A workspace laid out with the terminal before the session printed
+;; anything kept its window at the top: going there shows the cursor.
+(ert-deftest org-varde-going-to-a-vterm-shows-its-cursor ()
+  (org-varde-test-with-varde
+    (let ((buffer (generate-new-buffer "*varde xyz123*"))
+          reset)
+      (unwind-protect
+          (cl-letf (((symbol-function 'vterm-reset-cursor-point)
+                     (lambda () (push (current-buffer) reset))))
+            (with-current-buffer buffer (setq major-mode 'vterm-mode))
+            (save-window-excursion (org-varde--go-to-buffer buffer))
+            (should (equal reset (list buffer)))
+            ;; Not while you are reading back in copy mode.
+            (with-current-buffer buffer (setq-local vterm-copy-mode t))
+            (save-window-excursion (org-varde--go-to-buffer buffer))
+            (should (equal reset (list buffer))))
+        (kill-buffer buffer)))))
+
 (ert-deftest org-varde-without-vterm-a-term-is-opened ()
   (skip-unless (not (locate-library "vterm")))
   (org-varde-test-with-varde

@@ -42,6 +42,8 @@
 (declare-function vterm "vterm" (&optional arg))
 (declare-function vterm-send-string "vterm" (string &optional paste-p))
 (declare-function vterm-send-return "vterm" ())
+(declare-function vterm-reset-cursor-point "vterm" ())
+(defvar vterm-copy-mode)
 (declare-function term-char-mode "term" ())
 (declare-function +workspace-list-names "ext:workspaces" ())
 (declare-function +workspace-current-name "ext:workspaces" ())
@@ -333,7 +335,12 @@ that does.  Makes no workspace."
                           (+workspace-list-names))))
       (when name (+workspace-switch name))))
   (let ((window (get-buffer-window buffer)))
-    (if window (select-window window) (pop-to-buffer-same-window buffer))))
+    (if window (select-window window) (pop-to-buffer-same-window buffer)))
+  ;; A workspace laid out with the terminal before it printed anything
+  ;; keeps its window at the top; its latest output is at the cursor.
+  (with-current-buffer buffer
+    (when (and (derived-mode-p 'vterm-mode) (not (bound-and-true-p vterm-copy-mode)))
+      (vterm-reset-cursor-point))))
 
 (defun org-varde--workspace (task)
   "The name of TASK's open workspace, if it has one.
