@@ -4,18 +4,19 @@
 
 Task management and memory for AI coding agents.
 
-varde runs Claude Code and pi sessions as tasks. A board shows which
-one needs you, each task can have its own git worktree, and what a
-task's sessions learn is kept in a short *cairn* that is handed to the
-next session. A task can also be scheduled: varde starts it in the
-background, once or on a repeat, and it waits for you only when it
-found something. It is one binary and one SQLite file, with no daemon.
+varde runs your coding agents as tasks. A board shows which one needs
+you, each task can have its own git worktree, and what its sessions
+learn is kept in a short *cairn* for the next one. Tasks can also be
+scheduled: varde starts them in the background, once or on a repeat,
+and they wait for you only when there is something to see. It is one
+binary and one SQLite file, with no daemon.
 
-https://github.com/user-attachments/assets/0a3847ee-5791-4d6b-a31d-30f30ef913e6
+https://github.com/user-attachments/assets/db6de5d4-adc9-4ffa-a14a-04334c62c4bc
 
 ## Install
 
-You need git, and Claude Code or pi. tmux is recommended.
+You need git and a supported agent: Claude Code or pi. tmux is
+recommended.
 
 ```sh
 brew install smebbs/tap/varde
@@ -51,7 +52,7 @@ marks it done. `?` lists every key.
 [org-varde](docs/emacs.md) is the Emacs client: the same board, and
 tasks linked from your org notes.
 
-https://github.com/user-attachments/assets/e4a1904f-d9f7-4dc7-952b-5dd8f70533da
+https://github.com/user-attachments/assets/1d66f737-63ad-49cb-9a39-8b9580a7a86d
 
 ## Documentation
 
