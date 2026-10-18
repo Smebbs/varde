@@ -11,7 +11,7 @@ next session. A task can also be scheduled: varde starts it in the
 background, once or on a repeat, and it waits for you only when it
 found something. It is one binary and one SQLite file, with no daemon.
 
-https://github.com/user-attachments/assets/21b07ef7-3300-487a-ac3e-e649508b43d6
+https://github.com/user-attachments/assets/0a3847ee-5791-4d6b-a31d-30f30ef913e6
 
 ## Install
 
@@ -51,7 +51,7 @@ marks it done. `?` lists every key.
 [org-varde](docs/emacs.md) is the Emacs client: the same board, and
 tasks linked from your org notes.
 
-https://github.com/user-attachments/assets/aab35936-847b-4a71-8864-8259d96e34e5
+https://github.com/user-attachments/assets/e4a1904f-d9f7-4dc7-952b-5dd8f70533da
 
 ## Documentation
 
