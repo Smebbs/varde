@@ -345,9 +345,10 @@ follows git.
 - The project checkout is never cleaned up. It is yours.
 
 **Making a worktree.** It is cut from the local base. Submodules are
-checked out, and ignored files a committed `.worktreeinclude` names
-(gitignore syntax, as Claude Code reads it) are copied from the main
-checkout; a failure in either is reported, not fatal. An existing
+not checked out: fetching every one again held a start up for minutes,
+so the session fetches the ones it needs. Ignored files a committed
+`.worktreeinclude` names (gitignore syntax, as Claude Code reads it)
+are copied from the main checkout; a failure is reported, not fatal. An existing
 worktree is reused, so a half-failed start can be run again. `git config
 varde.setup` runs in the terminal before the agent, when the worktree
 is made or brought back; a failure is reported and the session starts

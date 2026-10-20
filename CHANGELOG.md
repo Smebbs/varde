@@ -4,6 +4,12 @@ Notable changes to varde and org-varde.
 
 ## Unreleased
 
+### Changed
+
+- `varde start` no longer checks out a new worktree's submodules. Each
+  new worktree fetched every submodule again, which held a start up
+  for minutes; the session now fetches the ones it needs.
+
 ## 1.5.0 - 2026-10-18
 
 ### Added

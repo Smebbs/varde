@@ -242,16 +242,12 @@ fn registered(repo: &Path, path: &Path) -> Result<bool> {
     Ok(list.lines().filter_map(|l| l.strip_prefix("worktree ")).any(|p| Path::new(p) == want))
 }
 
-/// Make a new worktree ready to work in: its submodules checked out, and
-/// the ignored files `.worktreeinclude` names copied from the main
-/// checkout. A failure is reported, not fatal.
+/// Make a new worktree ready to work in: the ignored files
+/// `.worktreeinclude` names copied from the main checkout. Submodules are
+/// left for the session to fetch: fetching them all held a start up for
+/// minutes. A failure is reported, not fatal.
 fn setup(repo: &Path, path: &Path) -> Vec<String> {
     let mut notices = vec![];
-    if path.join(".gitmodules").is_file() {
-        if let Err(e) = git(path, &["submodule", "update", "--init", "--recursive"]) {
-            notices.push(format!("submodules not checked out: {e:#}"));
-        }
-    }
     let copy = || -> Result<()> {
         let root = path.canonicalize()?;
         for rel in included(repo, repo, path)? {
@@ -740,7 +736,7 @@ pub mod tests {
     }
 
     #[test]
-    fn a_new_worktree_gets_its_submodules_and_included_files() {
+    fn a_new_worktree_gets_its_included_files_but_not_its_submodules() {
         let r = repo();
         let sub = repo();
         git(
@@ -766,14 +762,8 @@ pub mod tests {
         std::fs::write(r.path().join("notes.txt"), "mine").unwrap();
 
         let made = create(r.path(), "w-abc123", &layout(r.path()), None).unwrap();
-        // Git clones a submodule from a local path only when the user's own
-        // config allows it, which a test cannot set without touching it: the
-        // update is tried, and a failure reported rather than fatal.
-        match &made.notices[..] {
-            [] => assert!(made.path.join("sub/.git").exists()),
-            [n] => assert!(n.starts_with("submodules not checked out: git submodule update"), "{n}"),
-            n => panic!("{n:?}"),
-        }
+        assert!(made.notices.is_empty(), "{:?}", made.notices);
+        assert!(!made.path.join("sub/.git").exists());
         assert_eq!(std::fs::read_to_string(made.path.join(".env")).unwrap(), "SECRET=1");
         assert!(!made.path.join("debug.log").exists() && !made.path.join("notes.txt").exists());
 

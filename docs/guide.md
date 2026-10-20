@@ -97,9 +97,9 @@ live session and no unlanded worktree.
 **Worktrees.** On a task's first run in a repo, varde asks whether it
 gets a worktree (or `--worktree always|never` and the settings below
 decide). It's `.worktrees/<slug>` on branch `varde/<slug>`, cut from
-your base branch and tracking it. Submodules are checked out, ignored
-files listed in `.worktreeinclude` are copied, and `git config
-varde.setup` runs. Rename the branch if you like: varde follows what
+your base branch and tracking it. Submodules are left for the session
+to fetch, ignored files listed in `.worktreeinclude` are copied, and
+`git config varde.setup` runs. Rename the branch if you like: varde follows what
 the worktree has checked out, and never deletes a branch that existed
 before the task. After `done`, the worktree and branch go once nothing
 can be lost (clean, every commit in the base or a merged PR, no
