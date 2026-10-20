@@ -4,6 +4,8 @@ Notable changes to varde and org-varde.
 
 ## Unreleased
 
+## 1.5.1 - 2026-10-20
+
 ### Changed
 
 - `varde start` no longer checks out a new worktree's submodules. Each
