@@ -4,6 +4,15 @@ Notable changes to varde and org-varde.
 
 ## Unreleased
 
+## 1.5.2 - 2026-10-22
+
+### Fixed
+
+- A done task whose work was cherry-picked, rebased or squashed into
+  its base by hand, not through a PR, now counts as landed. Its
+  worktree and branch are removed and it leaves Done. Before, such
+  tasks stayed in Done for good.
+
 ## 1.5.1 - 2026-10-20
 
 ### Changed
