@@ -177,8 +177,8 @@ pub fn active_worktree(store: &Store, task: &str) -> Result<Option<(String, Stri
 }
 
 /// Remove a done task's worktree and branch if nothing in them can be
-/// lost: no changes, and every commit in the base, or in a PR merged at
-/// the branch's tip. Ignored files go with it, as `git worktree remove`
+/// lost: no changes, and every commit in the base, copied there (picked,
+/// rebased or squashed), or in a PR merged at the branch's tip. Ignored files go with it, as `git worktree remove`
 /// treats them, except those `.worktreeinclude` names that differ from
 /// the main checkout's. Returns the worktree's new state, `merged` for
 /// work that landed and `removed` for a branch that never had any.

@@ -302,8 +302,10 @@ upstream. `git::facts` works out, in two or three `git` calls:
 - `landed`: the branch's own commits are all in the base. A branch that
   has moved since it was cut (its reflog's first entry) and is 0 ahead
   has landed, and so has one whose PR merged at exactly its tip, which
-  covers squash and rebase merges. A commit after the merge is not
-  landed.
+  covers squash and rebase merges. So has one whose commits all reached
+  the base as copies (`git cherry`), or whose whole diff is one commit
+  there: work picked, rebased or squashed by hand. A commit after the
+  merge is not landed.
 - `pr` (number, state, draft, checks, link) through `gh pr view`, only
   for a pushed branch that is not the default. Any failure (10 s
   timeout) is just no PR.
@@ -328,8 +330,8 @@ follows git.
 
 - `done` removes a worktree whose work has landed at once. The
   refresher removes any other done task's worktree and branch once
-  nothing can be lost: no changes, every commit in the base or a PR
-  merged at the tip, no session running. Until then the task stays in
+  nothing can be lost: no changes, the work landed, no session
+  running. Until then the task stays in
   Done with its stage shown, as the reminder. A worktree whose repo is
   gone is marked removed.
 - A closed PR is not discarded, since it may be reopened: the task

@@ -148,6 +148,7 @@ pub fn facts(checkout: &Path, base: Option<&str>, with_pr: bool) -> Result<Facts
             true
         } else {
             ahead == 0 && has_own_commits(checkout, &branch, &tip)
+                || ahead > 0 && behind > 0 && copied(checkout, base.unwrap_or_default())
         };
     Ok(Facts {
         branch,
@@ -174,6 +175,39 @@ fn has_own_commits(dir: &Path, branch: &str, tip: &str) -> bool {
     let log =
         git(dir, &["reflog", "show", "--format=%H", &format!("refs/heads/{branch}")]).unwrap_or_default();
     log.lines().last().is_some_and(|created| created != tip)
+}
+
+/// Whether HEAD's own commits reached `base` as copies: each picked or
+/// rebased onto it, or all squashed into one commit there. git calls such
+/// a branch unmerged, though nothing on it would be lost.
+fn copied(dir: &Path, base: &str) -> bool {
+    let cherry = git(dir, &["cherry", base, "HEAD"]).unwrap_or_default();
+    if !cherry.is_empty() && cherry.lines().all(|l| l.starts_with('-')) {
+        return true;
+    }
+    let Ok(mb) = git(dir, &["merge-base", base, "HEAD"]) else { return false };
+    let Some(squashed) = patch_ids(dir, &["diff", &mb, "HEAD"]).pop() else { return false };
+    patch_ids(dir, &["log", "-p", "--no-merges", "--format=commit %H", &format!("{mb}..{base}")])
+        .contains(&squashed)
+}
+
+/// The patch ids of what `git args` prints, one per diff.
+fn patch_ids(dir: &Path, args: &[&str]) -> Vec<String> {
+    let Ok(patch) = super::command(dir, args).output() else { return vec![] };
+    let Ok(mut child) = super::command(dir, &["patch-id", "--stable"])
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::null())
+        .spawn()
+    else {
+        return vec![];
+    };
+    let mut stdin = child.stdin.take().unwrap();
+    // Written from a thread, so a large diff cannot fill both pipes at once.
+    let writer = std::thread::spawn(move || std::io::Write::write_all(&mut stdin, &patch.stdout));
+    let out = child.wait_with_output().map(|o| o.stdout).unwrap_or_default();
+    let _ = writer.join();
+    String::from_utf8_lossy(&out).lines().filter_map(|l| l.split(' ').next()).map(str::to_string).collect()
 }
 
 /// `branch`'s PR, if it has an upstream and `gh` can say. Any failure (no
@@ -287,6 +321,30 @@ mod tests {
         assert_eq!((f.stage(), f.ahead), ("landed", 0));
         // Reading the status leaves the index as it was.
         assert_eq!(git(&new.path, &["status", "--porcelain"]).unwrap(), "");
+    }
+
+    #[test]
+    fn work_squashed_or_picked_into_the_base_has_landed() {
+        let r = repo();
+        let new = create(r.path(), "f-abc123", &layout(r.path()), None).unwrap();
+        let landed = || facts(&new.path, Some("main"), false).unwrap().landed;
+        commit(&new.path, "a.txt", "a");
+        commit(&new.path, "b.txt", "b");
+        commit(r.path(), "m.txt", "m");
+        // Picked one at a time: the copy of `a` alone is not all of it.
+        git(r.path(), &["cherry-pick", &format!("{}~1", new.branch)]).unwrap();
+        assert!(!landed());
+        git(r.path(), &["cherry-pick", &new.branch]).unwrap();
+        assert!(landed());
+        git(r.path(), &["reset", "-q", "--hard", "HEAD~2"]).unwrap();
+        // Squashed into one commit, after the base moved on.
+        git(r.path(), &["merge", "-q", "--squash", &new.branch]).unwrap();
+        git(r.path(), &["commit", "-q", "-m", "squashed"]).unwrap();
+        commit(r.path(), "n.txt", "n");
+        assert!(landed());
+        // A commit after the squash is not landed.
+        commit(&new.path, "c.txt", "c");
+        assert!(!landed());
     }
 
     #[test]
