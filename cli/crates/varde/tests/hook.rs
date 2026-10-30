@@ -127,17 +127,18 @@ fn a_scripted_session_is_not_tracked() {
 }
 
 /// Run `varde hook <event>` the way an agent varde did not launch does,
-/// from a process of its own: `timeout`, under the name `claude`, stands
-/// in for the agent. It runs the hook through a shell, behind `wrap`;
-/// `then` is what it does after the hook returns.
+/// from a process of its own: a script named `claude` stands in for the
+/// agent, and runs `timeout` without `exec`, so its process keeps the
+/// name. (A link to `timeout` named `claude` broke where `timeout` is one
+/// multi-call binary, as uutils is, which goes by the name it is run as.)
+/// It runs the hook through a shell, behind `wrap`; `then` is what it does
+/// after the hook returns.
 fn hook_from(e: &Env, event: &str, payload: &str, wrap: &str, then: &str) -> std::process::Child {
     let file = e.path(&format!("{event}.json"));
     std::fs::write(&file, payload).unwrap();
     let agent = e.path("claude");
     if !agent.exists() {
-        let timeout = Command::new("sh").args(["-c", "command -v timeout"]).output().unwrap();
-        let timeout = String::from_utf8_lossy(&timeout.stdout).trim().to_string();
-        std::os::unix::fs::symlink(timeout, &agent).unwrap();
+        e.script("claude", "#!/bin/sh\ntimeout \"$@\"\nexit $?\n");
     }
     e.env(&mut Command::new(agent))
         .args(["30", "sh", "-c"])
@@ -149,7 +150,10 @@ fn hook_from(e: &Env, event: &str, payload: &str, wrap: &str, then: &str) -> std
 }
 
 #[test]
-#[cfg_attr(not(target_os = "linux"), ignore = "names GNU timeout claude, which macOS names by its file")]
+#[cfg_attr(
+    not(target_os = "linux"),
+    ignore = "takes a script's process to go by its file's name, as Linux names it"
+)]
 fn a_session_varde_did_not_launch_ends_with_its_process() {
     let e = Env::new();
     for (event, file) in
