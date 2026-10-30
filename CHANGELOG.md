@@ -4,6 +4,20 @@ Notable changes to varde and org-varde.
 
 ## Unreleased
 
+## 1.5.3 - 2026-10-30
+
+### Changed
+
+- Done holds only tasks closed today. A done task leaves the board the
+  next day whether or not its work landed, so notes and experiments no
+  longer wait there until you drop them. `varde list --all` still
+  shows them.
+- A day after `done`, a worktree whose work has not landed is put away
+  as `drop` does it: kept under `refs/varde/discarded/`, with the
+  worktree and branch removed. Starting the task brings the work back.
+  A worktree holding what no ref can keep (a changed `.worktreeinclude`
+  file, commits on a detached HEAD) stays.
+
 ## 1.5.2 - 2026-10-22
 
 ### Fixed
