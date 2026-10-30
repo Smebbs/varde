@@ -166,7 +166,7 @@ Usage is in `docs/guide.md`; what a client relies on is in
 
 | Command | Does |
 |---|---|
-| `varde` | The TUI board. Groups: Needs you, Working, Open, Scheduled, Inbox, Done and Parked (folded); every group is always shown, in that order (Q29). Done holds tasks closed today, and older ones whose work has not landed. Rows show their git stage (§6.3), `●` for unread, and `← <short>` of a deferred task's origin. RET suspends the board and attaches; inside tmux it opens the session in a window of its own (Q6). `--popup` quits once a key has gone to a session, so a tmux popup closes. Opened in a repository, it keeps to that project's rows and counts the rest (Q26). Background failures go to its message line, never close it. After a newer varde migrates the store, it re-execs as that varde. |
+| `varde` | The TUI board. Groups: Needs you, Working, Open, Scheduled, Inbox, Done and Parked (folded); every group is always shown, in that order (Q29). Done holds tasks closed today, landed or not (Q40). Rows show their git stage (§6.3), `●` for unread, and `← <short>` of a deferred task's origin. RET suspends the board and attaches; inside tmux it opens the session in a window of its own (Q6). `--popup` quits once a key has gone to a session, so a tmux popup closes. Opened in a repository, it keeps to that project's rows and counts the rest (Q26). Background failures go to its message line, never close it. After a newer varde migrates the store, it re-execs as that varde. |
 | `varde list [--all] [--project [DIR]] [--json]` | The board as data: rows already grouped, ordered and labelled. Every group is present (Q29). `--all` adds old done tasks, and dropped ones in a group of their own. A row's `busy` says a live session is mid-turn, so a client asks before closing it. |
 | `varde new [<title>] [--project DIR] [--context -] [--external REF] [--when RULE]` | Creates a task in the checkout it runs in, a linked worktree of your own included (Q24). `--context` is the body. With no title, one is cut from the context and a model names the task, detached (§6.2, Q28). |
 | `varde new <title> --from <run>` | Used by the agent: work deferred from the run's task, into the Inbox (§6.4). |
@@ -331,11 +331,12 @@ follows git.
 - `done` removes a worktree whose work has landed at once. The
   refresher removes any other done task's worktree and branch once
   nothing can be lost: no changes, the work landed, no session
-  running. Until then the task stays in
-  Done with its stage shown, as the reminder. A worktree whose repo is
-  gone is marked removed.
-- A closed PR is not discarded, since it may be reopened: the task
-  waits, showing `PR #12 closed`, until you drop it.
+  running. A day after the task closed, with no session running, it
+  puts away one whose work has not landed as `drop` does (Q40): kept
+  under the discarded ref, the task still done, and starting it brings
+  the work back. One holding what no ref can keep stays. A worktree
+  whose repo is gone is marked removed. The refresher looks at every
+  done task's worktree, on the board or not.
 - `drop` keeps everything under `refs/varde/discarded/<slug>`: one
   commit with the branch as first parent, the worktree's files
   (uncommitted and untracked included) as its tree, and any earlier
@@ -986,3 +987,4 @@ What looks like a missing feature is often one of these.
 | Q37 | Repeating tasks in daily use | Derived, never stored: the unread count on the row, `↻ due` and what holds a start up, how many runs `done` ended, a paused schedule on a parked task, every run in the view, and on a board `d` between runs asks to end the series. Left out: run numbers. |
 | Q38 | The project cairn is yours | Nothing promotes into it: an audit found every promoted bullet was one task's facts, acted on 11% of the times shown. A fact true of most tasks is rarely what a task finds, so you write it. |
 | Q39 | Repeating tasks reviewed by whole flows | `tests/schedule_flows.rs` walks weeks of a series and checks after every step that the right runs are unread and every surface agrees. A session's own `done` ends only its run; an agent never stops a session of yours; a run at work keeps its row in Working. Open: a notification for a finding, pruning `cairn_history` for frequent series, refreshing a series' worktree once its work lands, and letting background runs call `varde done`/`note` unprompted. |
+| Q40 | Done leaves the board | A done task leaves the board the day after it closed, landed or not, and a day after closing an unlanded worktree is put away under its discarded ref. Done held every task whose work had not landed as a reminder, but most such work was notes and experiments never meant to land, and work squashed by hand after an edit cannot be told from it: Done filled with tasks you had to drop by hand. Saying done is saying you are finished, and the ref loses nothing. Rejected: matching edited squashes loosely, since whether work can be lost is a question git answers exactly; keeping an open PR on the board. |

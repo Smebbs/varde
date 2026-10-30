@@ -18,7 +18,7 @@ The CLI and the terminal board. Emacs is in [`emacs.md`](emacs.md).
   | Open | tasks with no session running |
   | Scheduled | tasks varde starts itself, soonest first |
   | Inbox | sessions you started yourself, and work an agent left for later |
-  | Done | done today, or not landed yet |
+  | Done | done today |
   | Parked | put aside (folded) |
 
   `●` live (green working, yellow your turn, red needs input), `○` idle
@@ -68,7 +68,7 @@ varde new --context "$(cat issue.md)"  # no title: a model names it
 varde attach k3m9qz          # start it, resume it, or go to where it runs
 varde attach k3m9qz --fork   # branch off its conversation (--fresh: a new one)
 varde next                   # in tmux: the window of the next task that needs you
-varde done k3m9qz            # close it; its worktree goes once its work has landed
+varde done k3m9qz            # close it; its worktree goes once its work has landed, or a day later
 varde park k3m9qz            # put it aside, worktree kept
 varde drop k3m9qz            # drop it; its work is kept under refs/varde/discarded/
 varde reopen k3m9qz          # back to Open, without starting it
@@ -103,7 +103,10 @@ to fetch, ignored files listed in `.worktreeinclude` are copied, and
 the worktree has checked out, and never deletes a branch that existed
 before the task. After `done`, the worktree and branch go once nothing
 can be lost (clean, every commit in the base or a merged PR, no
-session running). Until then the task sits in Done.
+session running). A worktree whose work has not landed a day after
+`done` is put away as `drop` does it, under `refs/varde/discarded/`,
+and starting the task brings it back. The task leaves Done the day
+after it closed either way; `varde list --all` still shows it.
 
 **Sessions you start yourself.** A plain `claude` or `pi` session shows
 up in the Inbox after its first prompt, and stays there until you

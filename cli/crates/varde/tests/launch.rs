@@ -657,7 +657,7 @@ fn a_pr_merged_in_github_cleans_up_a_done_task() {
     e.ok(&["done", &t]);
     refresh("OPEN");
     assert!(path.exists());
-    // A closed PR may be reopened: the work stays until it is discarded.
+    // A closed PR has not landed: its worktree waits out the day, as any does.
     refresh("CLOSED");
     assert!(path.exists());
     assert_eq!(board_row(&e, &t)["git"]["label"], "PR #7 closed");

@@ -338,6 +338,45 @@ fn a_worktree_with_changed_included_files_is_not_removed_when_its_work_lands() {
 }
 
 #[test]
+fn a_done_tasks_unlanded_worktree_is_put_away_a_day_later_and_comes_back() {
+    let e = env();
+    an_included_env(&e);
+    let (t, path) = worktree_with_a_commit(&e, "Just notes");
+    let (_, branch) = worktree(&e, &t);
+    std::fs::write(path.join("work.txt"), "edited").unwrap();
+    std::fs::write(path.join("new.txt"), "untracked").unwrap();
+    let (u, kept) = worktree_with_a_commit(&e, "Secrets");
+    std::fs::write(kept.join(".env"), "A=2").unwrap();
+    let said = e.ok(&["done", &t]);
+    assert!(said.contains("put away under refs/varde/discarded/ a day from now"), "{said}");
+    e.ok(&["done", &u]);
+    // The day it closed it waits in Done, as anything closed that day does.
+    e.ok(&["git-refresh"]);
+    assert!(path.exists());
+    assert_eq!(group(&e.board(), "done").len(), 2);
+
+    let day = 24 * 3600 * 1000 + 1000;
+    e.sql(&format!("UPDATE task SET closed = closed - {day}"));
+    assert!(group(&e.board(), "done").is_empty());
+    e.ok(&["git-refresh"]);
+    assert!(!path.exists());
+    assert_eq!(e.show(&t)["worktree"]["state"], "removed");
+    assert_eq!(e.show(&t)["state"], "done");
+    assert!(git(&e.repo(), &["branch", "--list", &branch]).is_empty());
+    // No ref keeps a changed .env, so that one stays.
+    assert_eq!(std::fs::read_to_string(kept.join(".env")).unwrap(), "A=2");
+    assert_eq!(e.show(&u)["worktree"]["state"], "active");
+
+    let out = e.run(&["attach", &t, "--fresh", "--worktree", "always"]);
+    let said = String::from_utf8_lossy(&out.stderr);
+    assert!(out.status.success() && said.contains("brought back"), "{said}");
+    assert_eq!(git(&path, &["log", "-1", "--format=%s"]), "work.txt");
+    assert_eq!(std::fs::read_to_string(path.join("work.txt")).unwrap(), "edited");
+    assert_eq!(std::fs::read_to_string(path.join("new.txt")).unwrap(), "untracked");
+    assert_eq!(e.show(&t)["state"], "open");
+}
+
+#[test]
 fn dropping_a_worktree_with_changed_included_files_keeps_it() {
     let e = env();
     an_included_env(&e);

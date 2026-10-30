@@ -144,10 +144,9 @@ const GROUPS: [(&str, &str); 8] = [
 
 /// `now` and `day_start` are unix ms; `day_start` is local midnight.
 /// `all` keeps every task, including old done ones and, in a group of
-/// their own, dropped ones; a done task whose worktree is still there
-/// stays until its work lands. Nothing else ever leaves the board by
-/// itself. `alive` says whether an agent process
-/// varde knows is still running.
+/// their own, dropped ones; a done task leaves the day after it closed,
+/// landed or not. Nothing else ever leaves the board by itself. `alive`
+/// says whether an agent process varde knows is still running.
 pub fn build(
     store: &Store,
     now: i64,
@@ -171,8 +170,7 @@ pub fn build(
          LEFT JOIN run r ON r.id = (SELECT id FROM run WHERE task = t.id
                                     ORDER BY started DESC, rowid DESC LIMIT 1)
          WHERE (?1 OR t.state != 'dropped')
-           AND (?1 OR t.state != 'done' OR coalesce(t.closed, 0) >= ?2
-                OR EXISTS (SELECT 1 FROM worktree w WHERE w.task = t.id AND w.state = 'active'))";
+           AND (?1 OR t.state != 'done' OR coalesce(t.closed, 0) >= ?2)";
     // A task can have more than one live run: a session varde did not
     // start keeps running beside the fork `start` made of it. The row
     // shows whichever run is most urgent, not just the newest.
@@ -774,7 +772,7 @@ mod tests {
     }
 
     #[test]
-    fn a_done_task_stays_while_its_worktree_does() {
+    fn a_done_task_leaves_the_next_day_with_its_worktree_still_there() {
         let (_d, mut s) = store();
         ingest(&mut s, "a", Kind::Prompt, Some("landing"), 1);
         ingest(&mut s, "b", Kind::Prompt, Some("landed"), 2);
@@ -795,25 +793,26 @@ mod tests {
                 [&landing, &landed],
             )
             .unwrap();
-        let now = 3 + RECENT_MS;
-        let b = board(&s, now, now - 1000, false);
+        // The day it closed, both are there, the unlanded one tracked.
+        let b = board(&s, 10, 0, false);
         let done = b.groups.iter().find(|g| g.key == "done").unwrap();
-        assert_eq!(done.rows.len(), 1);
-        let row = &done.rows[0];
-        assert_eq!(row.title, "landing");
+        assert_eq!(done.rows.len(), 2);
+        let row = done.rows.iter().find(|r| r.title == "landing").unwrap();
         assert!(row.tracked);
         // When it closed, and its cairn's Status, for a review.
         assert_eq!((row.closed, row.cairn_status.as_deref()), (Some(3), None));
+        // The next day, an open PR does not keep it.
+        let now = 3 + RECENT_MS;
+        let b = board(&s, now, now - 1000, false);
+        assert!(b.groups.iter().find(|g| g.key == "done").unwrap().rows.is_empty());
         s.conn
             .execute(
                 "INSERT INTO cairn (task, version, updated, status) VALUES (?1, 1, 3, 'PR open, waiting on review.')",
                 [&landing],
             )
             .unwrap();
-        let b = board(&s, now, now - 1000, false);
-        assert_eq!(b.groups.iter().find(|g| g.key == "done").unwrap().rows[0].cairn_status, None);
         let b = board(&s, now, now - 1000, true);
-        // Both closed at 3: with --all, "landed" is there too, in either order.
+        // Both closed at 3: with --all, both are there, in either order.
         let done = b.groups.iter().find(|g| g.key == "done").unwrap();
         let row = done.rows.iter().find(|r| r.title == "landing").unwrap();
         assert_eq!(row.cairn_status.as_deref(), Some("PR open, waiting on review."));

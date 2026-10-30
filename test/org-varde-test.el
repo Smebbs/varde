@@ -1732,7 +1732,7 @@ whether to take it over, and starts it again with that answer."
     (org-varde-test-reply "show" "{\"v\":1,\"state\":\"open\"}")
     (org-varde-test-reply "done" "{\"v\":1,\"worktree\":{\"action\":\"kept\",\"branch\":\"varde/x\"}}")
     (cl-letf (((symbol-function 'org-varde-refresh) #'ignore))
-      (should (member "Done \"Finish it\"; varde/x is kept until its work lands"
+      (should (member "Done \"Finish it\"; varde/x is kept until its work lands, else put away a day from now"
                       (org-varde-test--saying (org-varde--finish "AAA111" "Finish it") (org-varde-test-wait))))
       ;; From the board, where u reopens it.
       (org-varde-test-reply "done" "{\"v\":1,\"worktree\":null}")

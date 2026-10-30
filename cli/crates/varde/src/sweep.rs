@@ -2,7 +2,8 @@
 //! only reads the `git_state` cache; when it is due, `kick` starts one
 //! detached `varde git-refresh`. That checks every task the board tracks,
 //! writes what it found, and removes a done task's worktree once nothing
-//! in it can be lost. The store watch redraws the board. It also starts
+//! in it can be lost, or a day after the task closed puts it away under a
+//! ref, as `drop` does. The store watch redraws the board. It also starts
 //! again any cairn update whose process died, and names the tasks that
 //! wait to be (`naming.rs`).
 
@@ -24,6 +25,10 @@ use crate::{done, job, now_ms, process, Paths};
 /// Checked again after this long even when nothing varde saw happened: an
 /// edit made by hand, or a PR merged in GitHub.
 const MAX_AGE_MS: i64 = 60_000;
+
+/// How long a done task's worktree waits for its work to land before it
+/// is put away under its discarded ref.
+const PUT_AWAY_AFTER_MS: i64 = 24 * 3600 * 1000;
 
 /// Whether a tracked row was last checked before its task last changed, or
 /// too long ago.
@@ -63,19 +68,32 @@ struct Checked {
     checked: i64,
 }
 
-/// `varde git-refresh`: check every task the board tracks.
+/// `varde git-refresh`: check every task the board tracks, and every done
+/// task's worktree, on the board or not.
 pub fn run(paths: &Paths) -> Result<()> {
     let _lock = lock(paths, true)?;
     let store = paths.open(Duration::from_secs(5))?;
     let board = board::build(&store, now_ms(), crate::list::local_midnight_ms(), false, &process::alive)?;
-    let tasks: Vec<&str> =
-        board.groups.iter().flat_map(|g| &g.rows).filter(|r| r.tracked).map(|r| r.task.as_str()).collect();
+    let mut tasks: Vec<String> =
+        board.groups.iter().flat_map(|g| &g.rows).filter(|r| r.tracked).map(|r| r.task.clone()).collect();
+    let mut stmt = store.conn.prepare(
+        "SELECT DISTINCT w.task FROM worktree w JOIN task t ON t.id = w.task
+         WHERE w.state = 'active' AND t.state = 'done'",
+    )?;
+    for task in stmt.query_map([], |r| r.get::<_, String>(0))? {
+        let task = task?;
+        if !tasks.contains(&task) {
+            tasks.push(task);
+        }
+    }
+    drop(stmt);
 
     // A project checkout is shared by its tasks, so it is read once.
     let mut shared: HashMap<String, Option<Facts>> = HashMap::new();
     let mut out = Vec::new();
     let mut tidied = Vec::new();
-    for task in tasks {
+    for task in &tasks {
+        let task = task.as_str();
         // Taken before git runs, so a change made meanwhile is seen next time.
         let checked = now_ms();
         let project: Option<String> =
@@ -88,12 +106,18 @@ pub fn run(paths: &Paths) -> Result<()> {
                 let facts = git::facts(p, Some(&base), true).ok();
                 // Asking gh can take seconds, in which the task may have been
                 // started again: its state then, not before, says to tidy.
-                let state: String =
-                    store.conn.query_row("SELECT state FROM task WHERE id = ?1", [task], |r| r.get(0))?;
+                let (state, closed): (String, Option<i64>) =
+                    store.conn.query_row("SELECT state, closed FROM task WHERE id = ?1", [task], |r| {
+                        Ok((r.get(0)?, r.get(1)?))
+                    })?;
                 if state == "done" && done::live_runs(&store, task)?.is_empty() {
+                    let waited = closed.is_some_and(|c| now_ms() - c >= PUT_AWAY_AFTER_MS);
                     let action = match &facts {
                         // A failure here must not stop the others being checked.
-                        Some(f) => tidy(repo, p, &branch, f).unwrap_or(None),
+                        Some(f) => match tidy(repo, p, &branch, f).unwrap_or(None) {
+                            None if waited => put_away(repo, p, &branch, task).unwrap_or(None),
+                            action => action,
+                        },
                         // The repo moved or was deleted, and took them with it.
                         None if !repo.join(".git").exists() => Some("removed"),
                         // Deleted by hand: its commits are still on the branch.
@@ -202,6 +226,23 @@ pub fn tidy(repo: &Path, path: &Path, branch: &str, f: &Facts) -> Result<Option<
         git::delete_if_merged(repo, base, branch)?;
     }
     Ok(Some(if f.landed { "merged" } else { "removed" }))
+}
+
+/// Put away a done task's worktree whose work has not landed a day after
+/// the task closed: its work kept under its discarded ref, as `drop` keeps
+/// it, so starting the task again brings it back. Saying done is saying
+/// you are finished with it, and a worktree off the board is never looked
+/// at again. Left alone while it holds what no ref can keep. Returns the
+/// worktree's new state, `removed`.
+pub fn put_away(repo: &Path, path: &Path, branch: &str, task: &str) -> Result<Option<&'static str>> {
+    if git::included_changes(repo, path).map_or(true, |c| !c.is_empty()) {
+        return Ok(None);
+    }
+    if !git::stranded(path)?.is_empty() {
+        return Ok(None);
+    }
+    git::put_away(repo, path, branch, &varde_core::task::short(task))?;
+    Ok(Some("removed"))
 }
 
 /// The task's branch in its worktree at `path`, recorded as `branch`: the

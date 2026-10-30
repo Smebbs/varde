@@ -307,13 +307,7 @@ fn close_task(store: &Store, id: &str, opts: Options) -> Result<Value> {
         } else if opts.discard {
             // A repo that is gone took the worktree and branch with it.
             if repo_p.join(".git").exists() {
-                let saved_ref = git::discarded_ref(p);
-                saved = git::save(repo_p, p, &branch, &saved_ref, &task::short(&id))?.map(|_| saved_ref);
-                git::remove(repo_p, p)?;
-                // `save` kept the branch's commits, so deleting it loses nothing.
-                if git::has_branch(repo_p, &branch) {
-                    git::git(repo_p, &["branch", "-D", &branch])?;
-                }
+                saved = git::put_away(repo_p, p, &branch, &task::short(&id))?;
             }
             action = "discarded";
         } else if !opts.keep_running && p.exists() && live_runs(store, &id)?.is_empty() {
@@ -732,7 +726,11 @@ fn describe_as(report: &Value, verb: &str) -> String {
                         why.push("uncommitted changes".to_string());
                     }
                     let why = if why.is_empty() { String::new() } else { format!(" ({})", why.join(", ")) };
-                    format!("worktree kept at {} until its work lands{why}", s("path"))
+                    format!(
+                        "worktree kept at {} until its work lands{why}, \
+                         else put away under refs/varde/discarded/ a day from now",
+                        s("path")
+                    )
                 }
                 None => format!(
                     "worktree kept at {} (its git state could not be read)",
@@ -776,7 +774,7 @@ mod tests {
             "{said}"
         );
         let said = report(true, 2, json!([]));
-        assert!(said.contains("until its work lands (2 commits ahead of main)"), "{said}");
+        assert!(said.contains("until its work lands (2 commits ahead of main), else put away"), "{said}");
         let said = report(false, 0, json!([".env"]));
         assert!(
             said.contains("its .env differs from the main checkout's;") && !said.contains("ahead"),

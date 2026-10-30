@@ -795,7 +795,8 @@ was settled when it was closed."
                       (if series "; it no longer repeats" "")
                       (if board "; u reopens" "")
                       (if (equal (plist-get wt :action) "kept")
-                          (format "; %s is kept until its work lands" (plist-get wt :branch))
+                          (format "; %s is kept until its work lands, else put away a day from now"
+                                  (plist-get wt :branch))
                         ""))))
          (if keep (org-varde--put-away-idle task) (org-varde--put-away task))
          (org-varde-refresh))))))

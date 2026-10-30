@@ -490,6 +490,21 @@ pub fn save(repo: &Path, dir: &Path, branch: &str, refname: &str, task: &str) ->
     Ok(Some(kept))
 }
 
+/// Put the worktree at `path` away: its work kept under its discarded ref
+/// (`save`), then the worktree and `branch` removed. Starting its task
+/// again brings both back. Returns the ref, `None` when there was nothing
+/// to keep.
+pub fn put_away(repo: &Path, path: &Path, branch: &str, task: &str) -> Result<Option<String>> {
+    let kept = discarded_ref(path);
+    let saved = save(repo, path, branch, &kept, task)?.map(|_| kept);
+    remove(repo, path)?;
+    // `save` kept the branch's commits, so deleting it loses nothing.
+    if has_branch(repo, branch) {
+        git(repo, &["branch", "-D", branch])?;
+    }
+    Ok(saved)
+}
+
 /// The tree of everything in the worktree at `dir`, changes and untracked
 /// files included, written through a scratch index.
 fn snapshot(dir: &Path) -> Result<String> {
