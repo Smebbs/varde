@@ -120,7 +120,10 @@ impl Agent for Pi {
             }
             // By exact id: `--session-id` would make a new session if the
             // id were gone.
-            Launch::Resume { id } => argv.extend([s("--session"), s(id)]),
+            Launch::Resume { id, prompt } => {
+                argv.extend([s("--session"), s(id)]);
+                argv.extend(prompt.into_iter().flat_map(|p| [s("--"), crate::as_text(p, &['@', '/'])]));
+            }
             Launch::Fork { from, id } => {
                 argv.extend([s("--fork"), s(from)]);
                 argv.extend(id.into_iter().flat_map(|id| [s("--session-id"), s(id)]));
@@ -197,9 +200,33 @@ impl Agent for Pi {
 
     /// A node script, or a single binary built with bun; the extension
     /// runs the hook directly, with no shell between.
+    /// varde's extension listens in each pi process, at `inbox(pid)`, and
+    /// hands what comes to the session with `pi.sendUserMessage`: a turn
+    /// when idle, steered into the turn under way (`urgent`) or after it.
+    fn push(&self, pid: i64, native_id: &str, text: &str, urgent: bool) -> std::io::Result<bool> {
+        use std::io::Write;
+        let Some(path) = inbox(pid).filter(|p| p.exists()) else { return Ok(false) };
+        let mut s = std::os::unix::net::UnixStream::connect(path)?;
+        let line = serde_json::json!({"session_id": native_id, "text": text, "urgent": urgent});
+        s.write_all(format!("{line}\n").as_bytes())?;
+        // In only once the extension says so: one meant for a session that
+        // moved on is dropped there, and left for the session's hooks here.
+        s.set_read_timeout(Some(std::time::Duration::from_secs(2)))?;
+        let mut ack = String::new();
+        std::io::BufRead::read_line(&mut std::io::BufReader::new(&s), &mut ack).ok();
+        Ok(ack.trim() == "ok")
+    }
+
     fn process_names(&self) -> &'static [&'static str] {
         &["pi", "node", "bun"]
     }
+}
+
+/// Where varde's extension in pi process `pid` listens: in the user's
+/// runtime directory, as the extension works it out too.
+pub fn inbox(pid: i64) -> Option<std::path::PathBuf> {
+    let dir = std::env::var_os("XDG_RUNTIME_DIR").filter(|d| !d.is_empty()).map(std::path::PathBuf::from)?;
+    Some(dir.join("varde").join(format!("pi-{pid}.sock")))
 }
 
 #[cfg(test)]
@@ -285,10 +312,36 @@ mod tests {
         let prompt = |p| Pi.launch(Launch::New { id: None, name: "n", prompt: Some(p) }).0;
         assert_eq!(prompt("@alice please review")[3..], ["--", " @alice please review"]);
         assert_eq!(prompt("/review the login")[3..], ["--", " /review the login"]);
-        let (argv, _) = Pi.launch(Launch::Resume { id: "u1" });
+        let (argv, _) = Pi.launch(Launch::Resume { id: "u1", prompt: None });
         assert_eq!(argv, ["pi", "--session", "u1"]);
         let (argv, _) = Pi.launch(Launch::Fork { from: "u1", id: Some("u2") });
         assert_eq!(argv, ["pi", "--fork", "u1", "--session-id", "u2"]);
+    }
+
+    #[test]
+    fn a_message_goes_to_the_extensions_inbox() {
+        let d = tempfile::tempdir().unwrap();
+        // SAFETY: a test of its own process; nothing else reads it here.
+        unsafe { std::env::set_var("XDG_RUNTIME_DIR", d.path()) };
+        assert!(!Pi.push(4242, "s1", "hi", false).unwrap(), "no extension listening");
+        std::fs::create_dir_all(d.path().join("varde")).unwrap();
+        let listener = std::os::unix::net::UnixListener::bind(inbox(4242).unwrap()).unwrap();
+        // The extension: it reads the line, and says whether it took it.
+        let ext = std::thread::spawn(move || {
+            let mut seen = Vec::new();
+            for answer in ["ok", "dropped"] {
+                let (conn, _) = listener.accept().unwrap();
+                let mut line = String::new();
+                std::io::BufRead::read_line(&mut std::io::BufReader::new(&conn), &mut line).unwrap();
+                std::io::Write::write_all(&mut &conn, format!("{answer}\n").as_bytes()).unwrap();
+                seen.push(serde_json::from_str::<Value>(line.trim()).unwrap());
+            }
+            seen
+        });
+        assert!(Pi.push(4242, "s1", "Check the de-CH locale.", true).unwrap());
+        assert!(!Pi.push(4242, "s0", "Not yours.", false).unwrap(), "dropped there: not in");
+        let seen = ext.join().unwrap();
+        assert_eq!(seen[0], json!({"session_id": "s1", "text": "Check the de-CH locale.", "urgent": true}));
     }
 
     #[test]

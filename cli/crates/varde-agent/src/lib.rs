@@ -25,13 +25,29 @@ pub enum Launch<'a> {
         name: &'a str,
         prompt: Option<&'a str>,
     },
+    /// `prompt`, when given, is the turn the conversation carries on
+    /// with (`varde say`).
     Resume {
         id: &'a str,
+        prompt: Option<&'a str>,
     },
     Fork {
         from: &'a str,
         id: Option<&'a str>,
     },
+}
+
+/// What a session asks the user that the steward may answer for them
+/// (§6.6): a permission, or a question.
+#[derive(Debug, Clone)]
+pub struct Asked {
+    pub kind: varde_core::steward::Kind,
+    /// The session's own id, as its hooks give it.
+    pub session: String,
+    pub tool: String,
+    pub input: Value,
+    /// The session's directory, whose worktree bounds what may be handed over.
+    pub cwd: String,
 }
 
 pub trait Agent {
@@ -82,6 +98,35 @@ pub trait Agent {
     /// says: an interrupt is recorded as of then, not when it was seen.
     fn line_time(&self, line: &str) -> Option<i64> {
         tools::when(&serde_json::from_str::<Value>(line).ok()?["timestamp"])
+    }
+
+    /// Hand `text` to the live session `native_id` in process `pid` as a
+    /// message to it now: it starts a turn if idle, and joins the turn if
+    /// working; `urgent`, it cuts into that turn where the agent allows.
+    /// `Ok(false)` when this agent offers no way in, or the session is not
+    /// where its process says; varde then waits for the session's next
+    /// hook that can carry it (`varde say`).
+    fn push(&self, _pid: i64, _native_id: &str, _text: &str, _urgent: bool) -> std::io::Result<bool> {
+        Ok(false)
+    }
+
+    /// What hook `event` asks the user, when the steward may answer it in
+    /// the hook: `None` for one it may not, or an agent whose hooks cannot
+    /// carry an answer.
+    fn asked(&self, _event: &str, _payload: &Value) -> Option<Asked> {
+        None
+    }
+
+    /// The hook's reply carrying `answer` (as `varde answer` keeps it) to
+    /// what `asked` was.
+    fn answer_reply(&self, _asked: &Asked, _answer: &Value) -> Option<Value> {
+        None
+    }
+
+    /// The tool a session asks the user a question with, when the steward
+    /// can answer it from a hook.
+    fn question_tool(&self) -> Option<&'static str> {
+        None
     }
 
     /// When the session `native_id` in process `pid` went idle, if the
@@ -191,6 +236,11 @@ fn as_text(prompt: &str, marks: &[char]) -> String {
     } else {
         prompt.to_string()
     }
+}
+
+/// Every agent varde knows.
+pub fn all() -> Vec<Box<dyn Agent>> {
+    ["claude", "pi"].iter().filter_map(|n| by_name(n)).collect()
 }
 
 pub fn by_name(name: &str) -> Option<Box<dyn Agent>> {

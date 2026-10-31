@@ -68,6 +68,9 @@ pub fn meta(r: &Row, now: i64, project: bool) -> Vec<(String, Tone)> {
     for part in [n(r.agents, "agent"), n(r.shells, "shell")].into_iter().flatten() {
         out.push((part, Tone::Quiet));
     }
+    if r.steward_until.is_some() {
+        out.push(("steward's".to_string(), Tone::Working));
+    }
     if let Some(o) = &r.origin {
         out.push((format!("← {}", o.short), Tone::Quiet));
     }

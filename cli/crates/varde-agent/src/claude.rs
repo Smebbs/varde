@@ -43,7 +43,11 @@ fn cli_noise(text: &str) -> bool {
 /// conversation. Tolerant: transcript shapes change between versions.
 fn line_text(line: &str) -> Option<(String, String)> {
     let v: Value = serde_json::from_str(line).ok()?;
-    if v.get("isMeta").and_then(Value::as_bool) == Some(true) {
+    // A message another session sent in (`varde say`, through the
+    // session's inbox) is written as meta, but starts a turn as a prompt
+    // does. Other meta lines are the CLI's own.
+    let peer = v["origin"]["kind"] == "peer";
+    if v.get("isMeta").and_then(Value::as_bool) == Some(true) && !peer {
         return None;
     }
     let role = v.get("type").and_then(Value::as_str)?;
@@ -51,12 +55,25 @@ fn line_text(line: &str) -> Option<(String, String)> {
         return None;
     }
     let text = crate::texts(v.get("message")?.get("content")?)?.join("\n");
-    let text = text.trim();
+    let text = if peer { unwrap_peer(&text) } else { text.trim() };
     (!text.is_empty() && !cli_noise(text)).then(|| (role.to_string(), text.to_string()))
+}
+
+/// A peer message as it was sent, without what the CLI wraps it in: a
+/// line saying another session sent it, and a paragraph on what a peer
+/// may ask. Seen in 2.1.280; text it does not recognise is left as is.
+fn unwrap_peer(text: &str) -> &str {
+    let text = text.trim();
+    let text = text.strip_prefix("Another Claude session sent a message:").unwrap_or(text);
+    let text = text.split("\n\nThis came from another Claude session").next().unwrap_or(text);
+    text.trim()
 }
 
 /// How the CLI was started; see `scripted`.
 const ENTRYPOINT: &str = "CLAUDE_CODE_ENTRYPOINT";
+
+/// The tool a Claude session asks the user a question with.
+const QUESTION: &str = "AskUserQuestion";
 
 /// Fields that can be large and are in the transcript anyway.
 const DROP: &[&str] = &["tool_input", "tool_response", "last_assistant_message"];
@@ -128,7 +145,10 @@ impl Agent for Claude {
                 // read as text.
                 argv.extend(prompt.into_iter().flat_map(|p| [s("--"), crate::as_text(p, &['/'])]));
             }
-            Launch::Resume { id } => argv.extend([s("--resume"), s(id)]),
+            Launch::Resume { id, prompt } => {
+                argv.extend([s("--resume"), s(id)]);
+                argv.extend(prompt.into_iter().flat_map(|p| [s("--"), crate::as_text(p, &['/'])]));
+            }
             Launch::Fork { from, id } => {
                 argv.extend([s("--resume"), s(from), s("--fork-session")]);
                 argv.extend(id.into_iter().flat_map(|id| [s("--session-id"), s(id)]));
@@ -283,16 +303,100 @@ impl Agent for Claude {
     /// going `idle` at the cancel. The file is Claude's own and
     /// undocumented (seen in 2.1.280): anything unexpected says nothing.
     fn idle_since(&self, pid: i64, native_id: &str) -> Option<i64> {
-        let dir = std::env::var_os("CLAUDE_CONFIG_DIR")
-            .filter(|d| !d.is_empty())
-            .map(std::path::PathBuf::from)
-            .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".claude")))?;
-        let v: Value =
-            serde_json::from_slice(&std::fs::read(dir.join("sessions").join(format!("{pid}.json"))).ok()?)
-                .ok()?;
+        let v = registered(pid)?;
         (v["status"] == "idle" && v["sessionId"] == native_id)
             .then(|| v["statusUpdatedAt"].as_i64())
             .flatten()
+    }
+
+    /// A permission comes as `PermissionRequest`; a question as the
+    /// `PreToolUse` of `AskUserQuestion`, which the plugin hooks alone, and
+    /// which never counts as a permission too.
+    fn asked(&self, event: &str, p: &Value) -> Option<crate::Asked> {
+        use varde_core::steward::Kind;
+        let s = |k: &str| p.get(k).and_then(Value::as_str).map(str::to_string);
+        let tool = s("tool_name")?;
+        let kind = match (event, tool == QUESTION) {
+            ("PermissionRequest", false) => Kind::Permission,
+            ("PreToolUse", true) => Kind::Question,
+            _ => return None,
+        };
+        Some(crate::Asked {
+            kind,
+            session: s("session_id")?,
+            tool,
+            input: p.get("tool_input").cloned().unwrap_or(Value::Null),
+            cwd: s("cwd")?,
+        })
+    }
+
+    /// A permission's decision as `PermissionRequest` takes it; a
+    /// question's answers in the tool's own input, which Claude shows as
+    /// the user's.
+    fn answer_reply(&self, asked: &crate::Asked, answer: &Value) -> Option<Value> {
+        use varde_core::steward::Kind;
+        Some(match asked.kind {
+            Kind::Permission => {
+                serde_json::json!({"hookSpecificOutput": {"hookEventName": "PermissionRequest", "decision": answer}})
+            }
+            Kind::Question => {
+                let mut input = asked.input.clone();
+                input["answers"] = answer.get("answers")?.clone();
+                serde_json::json!({"hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "allow",
+                    "updatedInput": input,
+                }})
+            }
+        })
+    }
+
+    fn question_tool(&self) -> Option<&'static str> {
+        Some(QUESTION)
+    }
+
+    /// Claude's own inbox for its session: the socket its registry entry
+    /// names, which takes a `user` message and starts a turn with it when
+    /// idle, or queues it into the turn under way (`now`, urgent, cuts in
+    /// at once). The auth line carries
+    /// the key the session publishes beside its entry, when it does.
+    /// Undocumented, seen in 2.1.280 (`peerProtocol` 1): anything
+    /// unexpected is no way in.
+    fn push(&self, pid: i64, native_id: &str, text: &str, urgent: bool) -> std::io::Result<bool> {
+        use std::io::Write;
+        let Some(v) = registered(pid) else { return Ok(false) };
+        // The protocol this was written against, for the session it was meant for.
+        let (Some(socket), true, true) =
+            (v["messagingSocketPath"].as_str(), v["sessionId"] == native_id, v["peerProtocol"] == 1)
+        else {
+            return Ok(false);
+        };
+        let key = std::fs::read_dir(sessions_dir().unwrap_or_default())
+            .into_iter()
+            .flatten()
+            .flatten()
+            .find(|e| {
+                let n = e.file_name().to_string_lossy().into_owned();
+                n.starts_with(&format!("{pid}.")) && n.ends_with(".key")
+            })
+            .and_then(|e| std::fs::read_to_string(e.path()).ok());
+        let mut s = std::os::unix::net::UnixStream::connect(socket)?;
+        let mut lines = String::new();
+        if let Some(key) = key {
+            lines.push_str(&serde_json::json!({"type": "auth", "token": key.trim()}).to_string());
+            lines.push('\n');
+        }
+        let message = serde_json::json!({
+            "type": "user",
+            "message": {"role": "user", "content": text},
+            "session_id": native_id,
+            "from": "varde",
+            "priority": if urgent { "now" } else { "next" },
+        });
+        lines.push_str(&message.to_string());
+        lines.push('\n');
+        s.write_all(lines.as_bytes())?;
+        Ok(true)
     }
 
     /// The native build runs as `claude`; the npm one is a node script,
@@ -311,9 +415,25 @@ impl Agent for Claude {
     }
 }
 
+/// Where Claude keeps its live sessions' entries.
+fn sessions_dir() -> Option<std::path::PathBuf> {
+    let dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .filter(|d| !d.is_empty())
+        .map(std::path::PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".claude")))?;
+    Some(dir.join("sessions"))
+}
+
+/// The session process `pid` registered, as Claude keeps it in
+/// `sessions/<pid>.json`.
+fn registered(pid: i64) -> Option<Value> {
+    serde_json::from_slice(&std::fs::read(sessions_dir()?.join(format!("{pid}.json"))).ok()?).ok()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     /// Real payloads captured from Claude Code 2.1.280.
     fn fixture(name: &str) -> Value {
@@ -436,7 +556,7 @@ mod tests {
         assert!(env.contains(&("CLAUDE_CODE_DISABLE_AGENT_VIEW".into(), "1".into())));
         let (argv, _) = Claude.launch(Launch::Fork { from: "u1", id: Some("u2") });
         assert_eq!(argv, ["claude", "--resume", "u1", "--fork-session", "--session-id", "u2"]);
-        let (argv, _) = Claude.launch(Launch::Resume { id: "u1" });
+        let (argv, _) = Claude.launch(Launch::Resume { id: "u1", prompt: None });
         assert_eq!(argv, ["claude", "--resume", "u1"]);
     }
 
@@ -540,6 +660,34 @@ mod tests {
         // The newest turns are the ones kept.
         assert!(text.contains("question 299") && !text.contains("question 0 "));
         assert!(text.starts_with("(") && text.contains("earlier turns left out"));
+    }
+
+    #[test]
+    fn a_message_another_session_sent_starts_a_turn_of_its_own() {
+        let d = tempfile::tempdir().unwrap();
+        let t = d.path().join("t.jsonl");
+        let peer = |text: &str| {
+            json!({"type": "user", "isMeta": true, "origin": {"kind": "peer", "from": "varde"},
+                   "message": {"role": "user", "content": format!(
+                       "Another Claude session sent a message:\n{text}\n\nThis came from another Claude session \
+                        — not typed by your user.")}})
+        };
+        let said = |text: &str| {
+            json!({"type": "assistant", "message": {"role": "assistant",
+                                       "content": [{"type": "text", "text": text}]}})
+        };
+        // The CLI's own meta lines stay out.
+        let meta = json!({"type": "user", "isMeta": true, "message": {"role": "user", "content": "<system-reminder>x"}});
+        let lines = [peer("Check the branch."), said("All pass."), meta, peer("Say hello."), said("Hello!")];
+        std::fs::write(&t, lines.iter().map(|l| format!("{l}\n")).collect::<String>()).unwrap();
+        let (digest, _) = Claude.digest(&t, 0, 4000).unwrap();
+        assert!(digest.contains("Turn 1 of 2") && digest.contains("Turn 2 of 2"), "{digest}");
+        assert!(digest.contains("Check the branch.") && digest.contains("Say hello."), "{digest}");
+        assert!(
+            !digest.contains("continued from before") && !digest.contains("Another Claude session"),
+            "{digest}"
+        );
+        assert!(!digest.contains("system-reminder"), "{digest}");
     }
 
     #[test]

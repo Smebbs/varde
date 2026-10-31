@@ -61,7 +61,7 @@ impl App<'_> {
         self.launch(&id, start, None, None)
     }
 
-    fn launch(
+    pub(super) fn launch(
         &mut self,
         id: &str,
         start: Start,

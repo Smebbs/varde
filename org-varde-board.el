@@ -262,6 +262,8 @@ Every window showing it stays on the task it was on."
                   (setq need-you (- (length all) (length rows))))
                 (unless closed
                   (dolist (row rows) (org-varde-board--row row now key kept))))))
+          (when-let* ((steward (plist-get org-varde-board-data :steward)))
+            (insert "\n" (org-varde-board--steward-line steward) "\n"))
           (unless any
             (insert (propertize "\nNo tasks here yet.  n writes one, or start an agent in a repository:\nits session shows up here once you ask it something.\n"
                                 'face 'org-varde-board-empty)))))
@@ -296,6 +298,67 @@ Every window showing it stays on the task it was on."
           (ignore-error user-error (org-varde-board-first-task))
           (dolist (w windows) (set-window-point (car w) (point))))
         (org-varde--highlight)))))
+
+(defun org-varde-board--steward-line (steward)
+  "The steward's line under the groups: its state, the tasks handed to
+it, what waits on it, and the key that goes there.  STEWARD is the
+board's `:steward'."
+  (let ((state (pcase (plist-get steward :status)
+                 ((or "working" "delegated") "at work")
+                 ((or "waiting" "blocked") "waits on you")
+                 (_ (if (plist-get steward :run) "idle" "not started"))))
+        (held (or (plist-get steward :delegated) 0))
+        (asks (or (plist-get steward :asks) 0)))
+    (concat (propertize "Steward" 'face 'org-varde-board-group)
+            (propertize (concat "  " state
+                                (if (> held 0) (format " · holds %d" held) ""))
+                        'face 'org-varde-board-empty)
+            (if (> asks 0) (propertize (format " · %d asked" asks) 'face 'org-varde-board-waiting) "")
+            (propertize "  S goes there" 'face 'org-varde-board-empty))))
+
+(defun org-varde-board-steward ()
+  "Go to the steward's session, starting or resuming it.
+With the steward off, offer to turn it on first."
+  (interactive)
+  (let ((steward (plist-get org-varde-board-data :steward)))
+    (unless steward
+      (unless (y-or-n-p "The steward is off.  Turn it on? ")
+        (user-error "The steward stays off"))
+      (condition-case e
+          (org-varde--varde "steward" "on")
+        (org-varde-varde-error (user-error "varde: %s" (cadr e))))
+      (setq steward (plist-get (org-varde--varde-json "list" "--json") :steward))
+      (unless steward
+        (user-error "The steward is on, but not on the board yet: g refreshes it"))
+      (org-varde-refresh))
+    (org-varde-go-task (plist-get steward :task) (plist-get steward :title))))
+
+(defun org-varde-board-trust (span brief)
+  "Hand the task at point to the steward for SPAN, with BRIEF saying what
+it will need of you; on a task handed over already, take it back.  Its
+permission requests and questions then wait on the steward's answer."
+  (interactive
+   (let ((row (car (org-varde-board--rows))))
+     (unless row (user-error "No task here"))
+     (if (plist-get row :steward_until)
+         (list nil nil)
+       (unless (plist-get org-varde-board-data :steward)
+         (user-error "The steward is off: varde steward on"))
+       (list (read-string "Hand it to the steward for (2h): " nil nil "2h")
+             (read-string "What will it need of you (optional): ")))))
+  (let* ((row (car (org-varde-board--rows)))
+         (task (plist-get row :task))
+         (name (org-varde--named task (plist-get row :title))))
+    (org-varde-board--keep-place)
+    (condition-case e
+        (if (null span)
+            (progn (org-varde--varde "trust" task "--off")
+                   (message "%s is yours again" name))
+          (apply #'org-varde--varde "trust" task "--for" span
+                 (and brief (not (string-empty-p brief)) (list "--brief" brief)))
+          (message "%s is the steward's for %s" name span))
+      (org-varde-varde-error (user-error "varde: %s" (cadr e)))))
+  (org-varde-refresh))
 
 (defun org-varde-board--refreshed ()
   "Redraw the board after a refresh, when a window shows it and it changed.
@@ -1288,7 +1351,9 @@ task in the region."
     ("RET" "go to it" org-varde-board-start)
     ("s" "start, stay" org-varde-board-start-background)
     ("R" "fresh" org-varde-board-start-fresh)
-    ("F" "fork" org-varde-board-start-fork)]
+    ("F" "fork" org-varde-board-start-fork)
+    ("S" "steward" org-varde-board-steward)
+    ("T" "hand to steward" org-varde-board-trust)]
    ["Task"
     ("n" "new" org-varde-board-create)
     ("e" "edit" org-varde-board-edit)
@@ -1347,6 +1412,8 @@ Rebind them here; under evil, its normal state takes them from here too."
   "s" #'org-varde-board-start-background
   "R" #'org-varde-board-start-fresh
   "F" #'org-varde-board-start-fork
+  "S" #'org-varde-board-steward
+  "T" #'org-varde-board-trust
   "n" #'org-varde-board-create
   "e" #'org-varde-board-edit
   "N" #'org-varde-board-new

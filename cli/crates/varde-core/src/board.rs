@@ -15,6 +15,20 @@ const RECENT_MS: i64 = 7 * 24 * 3600 * 1000;
 pub struct Board {
     pub v: u32,
     pub groups: Vec<Group>,
+    /// The steward's line, below the groups and outside them (§6.6), when
+    /// it is on.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steward: Option<Steward>,
+}
+
+/// The steward's task as a row, with what it holds: the tasks handed to
+/// it and the asks waiting on it.
+#[derive(Debug, Serialize)]
+pub struct Steward {
+    #[serde(flatten)]
+    pub row: Row,
+    pub delegated: u32,
+    pub asks: u32,
 }
 
 #[derive(Debug, Serialize)]
@@ -87,6 +101,9 @@ pub struct Row {
     pub git_checked: Option<i64>,
     /// When varde starts it next, if it is scheduled.
     pub schedule: Option<Schedule>,
+    /// Until when the task is handed to the steward (§6.6), in unix ms.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub steward_until: Option<i64>,
 }
 
 #[derive(Debug, Serialize)]
@@ -176,6 +193,8 @@ pub fn build(
     // shows whichever run is most urgent, not just the newest.
     let (others, busy_older, results) = urgent_older_runs(store, now, alive)?;
 
+    let handed: std::collections::HashMap<String, i64> =
+        crate::steward::trusts(&store.conn, now)?.into_iter().map(|t| (t.task, t.until)).collect();
     let mut stmt = store.conn.prepare_cached(sql)?;
     let mut rows = stmt.query(params![all, day_start])?;
     let mut groups: Vec<Group> = GROUPS
@@ -284,7 +303,9 @@ pub fn build(
             Some(task) => Some(Origin { short: crate::task::short(&task), task, title: r.get(20)? }),
             None => None,
         };
+        let steward_until = handed.get(&task).copied();
         groups[group].rows.push(Row {
+            steward_until,
             short: crate::task::short(&task),
             task,
             title: r.get(1)?,
@@ -311,6 +332,27 @@ pub fn build(
             schedule,
         });
     }
+    let steward = match crate::steward::task(&store.conn)? {
+        Some(id) => groups.iter_mut().find_map(|g| {
+            let i = g.rows.iter().position(|r| r.task == id)?;
+            Some(g.rows.remove(i))
+        }),
+        None => None,
+    };
+    let steward = match steward {
+        Some(row) => {
+            let delegated = crate::steward::trusts(&store.conn, now)?.len() as u32;
+            let asks: u32 =
+                // A hook waits at most this long: older asks are gone.
+                store.conn.query_row(
+                    "SELECT count(*) FROM ask WHERE settled IS NULL AND created > ?1",
+                    [now - 26 * 60 * 1000],
+                    |r| r.get(0),
+                )?;
+            Some(Steward { row, delegated, asks })
+        }
+        None => None,
+    };
     if !all {
         groups.pop();
     }
@@ -325,7 +367,7 @@ pub fn build(
             b.unread.cmp(&a.unread).then(b.last.cmp(&a.last)).then_with(|| a.task.cmp(&b.task))
         });
     }
-    Ok(Board { v: 2, groups })
+    Ok(Board { v: 2, groups, steward })
 }
 
 fn is_zero(n: &u32) -> bool {

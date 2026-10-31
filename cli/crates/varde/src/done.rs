@@ -526,9 +526,26 @@ pub fn from_command_line() {
     AGENT.store(std::env::var_os("CLAUDECODE").is_some(), std::sync::atomic::Ordering::Relaxed);
 }
 
-/// Run by an agent, from its tool shell, rather than by you.
+/// Run by an agent, from its tool shell, rather than by you. The
+/// steward's session acts for you (§6.6): it is you here.
 fn in_agent() -> bool {
-    AGENT.load(std::sync::atomic::Ordering::Relaxed)
+    AGENT.load(std::sync::atomic::Ordering::Relaxed) && !crate::steward::from_steward()
+}
+
+/// `varde stop <task>`: stop the task's sessions and leave the task as it
+/// is; starting it, or `varde say`, carries its conversation on.
+pub fn stop(paths: &Paths, reference: &str) -> Result<()> {
+    from_command_line();
+    let store = paths.open(Duration::from_secs(2))?;
+    let id = task::resolve(&store, reference)?;
+    let short = task::short(&id);
+    let (stopped, left) = stop_sessions(&store, &id, false)?;
+    match (stopped.len(), left.len()) {
+        (0, 0) => println!("{short} has no session to stop"),
+        (0, _) => println!("{short}: its session is this one, or yours, and was left running"),
+        (n, _) => println!("{short}: stopped {n} session{}", if n == 1 { "" } else { "s" }),
+    }
+    Ok(())
 }
 
 /// Stop `run`, one `varde run` launched, and wait for it to go: SIGTERM,

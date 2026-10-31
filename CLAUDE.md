@@ -45,9 +45,9 @@ emacs --batch -Q -L . -l test/test-helper.el -f batch-byte-compile org-varde.el 
 
 | File | Owns |
 |---|---|
-| `cli/crates/varde-core` | `store/` (schema, migrations), status, attach decision (`plan.rs`), board, `cairn.rs` (the document and its edits), `memory/` (bullets, update jobs, recall) |
+| `cli/crates/varde-core` | `store/` (schema, migrations), status, attach decision (`plan.rs`), board, `cairn.rs` (the document and its edits), `memory/` (bullets, update jobs, recall), `steward.rs` (hand-overs, asks, what is never delegated) |
 | `cli/crates/varde-agent` | the Claude and pi adapters: hook payloads, launch flags, transcript digest, tool calls |
-| `cli/crates/varde` | the CLI, hook, `run` supervisor, `git/`, `job.rs` (memory updates), `deliver.rs` (memory into sessions), `stale.rs`, `eval.rs`, `tui/` |
+| `cli/crates/varde` | the CLI, hook, `run` supervisor, `git/`, `job.rs` (memory updates), `deliver.rs` (memory into sessions), `stale.rs`, `eval.rs`, `steward.rs` (its commands, and the hook's wait for an answer), `steward_guide.rs` (its manual), `tui/` |
 | `cli/crates/varde/tests` | integration tests; `common/` has the temp store and the fake `claude`, `pi`, `gh` and tmux |
 | `cli/plugin` | Claude plugin: only `hooks.json`, every entry calls `varde hook` |
 | `org-varde.el` | start/terminals/workspaces, the view (cairn view and edit), `varde:` links, new task from a doc |

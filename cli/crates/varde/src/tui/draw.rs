@@ -30,6 +30,17 @@ impl App<'_> {
         let mut line = self.bottom_line(f.area().width as usize);
         let rows = line.len().max(1) as u16;
         let [main, bottom] = Layout::vertical([Constraint::Min(1), Constraint::Length(rows)]).areas(f.area());
+        // The steward's line, below the board and every pane (§6.6).
+        let (main, steward_area) = match &self.steward {
+            Some(_) => {
+                let [a, b] = Layout::vertical([Constraint::Min(1), Constraint::Length(1)]).areas(main);
+                (a, Some(b))
+            }
+            None => (main, None),
+        };
+        if let (Some(area), Some(s)) = (steward_area, &self.steward) {
+            f.render_widget(Paragraph::new(steward_line(s, &self.keys.label(Act::Steward))), area);
+        }
         // A pane is as tall as what it shows, its tabs and border, up to
         // most of the screen: a short cairn leaves the board in view. On a
         // short screen, or in a popup, the view leaves the board three rows
@@ -285,6 +296,7 @@ impl App<'_> {
                 );
                 ask(format!("{question}{keys}"))
             }
+            Mode::StewardOn => ask("The steward is off. Turn it on?  y/N".into()),
             Mode::Drop(ids) => {
                 let working = ids.iter().any(|id| self.row_of(id).is_some_and(|r| working(r.status)));
                 // Only a worktree's work is kept: a task without one has
@@ -586,6 +598,26 @@ fn draw_help(f: &mut Frame, keys: &Keys, area: Rect, scroll: &mut u16) -> u16 {
 
 /// A group's header: its name and count, dim when it is empty or the
 /// board is, and `▸` when folded.
+/// The steward's line: its state, the tasks handed to it, what waits on
+/// it, and the key that goes there.
+fn steward_line(s: &varde_core::board::Steward, key: &str) -> Line<'static> {
+    let state = match s.row.status {
+        "working" | "delegated" => "at work",
+        "waiting" | "blocked" => "waits on you",
+        _ if s.row.run.is_some() => "idle",
+        _ => "not started",
+    };
+    let mut spans = vec![Span::raw("Steward").bold(), format!("  {state}").dark_gray()];
+    if s.delegated > 0 {
+        spans.push(format!(" · holds {}", s.delegated).dark_gray());
+    }
+    if s.asks > 0 {
+        spans.push(format!(" · {} asked", s.asks).yellow());
+    }
+    spans.push(format!("  {key} goes there").dark_gray());
+    Line::from(spans)
+}
+
 fn header_line(label: &str, count: usize, folded: bool, dim: bool) -> Line<'static> {
     if count == 0 || dim {
         return Line::from(format!("{label}  {count}{}", if folded { " ▸" } else { "" }).dark_gray());

@@ -58,6 +58,22 @@ pub fn agent(names: &[&str]) -> Option<Agent> {
 
 /// Whether `pid` runs under the process `ancestor` (pid and start time),
 /// as an agent does under a wrapper that did not `exec` it.
+/// This process's ancestors, nearest first: each one's pid and command
+/// name, as far as the platform can say.
+pub fn ancestors() -> Vec<(u32, String)> {
+    let mut out = Vec::new();
+    let mut pid = std::os::unix::process::parent_id();
+    for _ in 0..16 {
+        let Some((name, parent, _)) = imp::info(pid) else { break };
+        out.push((pid, name));
+        if parent <= 1 {
+            break;
+        }
+        pid = parent;
+    }
+    out
+}
+
 pub fn descends(pid: u32, ancestor: (i64, i64)) -> bool {
     let mut pid = pid;
     for _ in 0..8 {

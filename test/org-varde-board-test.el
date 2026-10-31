@@ -57,6 +57,56 @@ test's, else one of its own."
       (should (string-match-p "^ ○ Seen .*proj · " text))
       (should-not (string-match-p "your turn" text)))))
 
+(ert-deftest org-varde-board-the-steward-has-the-bottom-line ()
+  (let ((data (org-varde-board-test--data
+               '(("needs_you" "Needs you" ("T0000000000000000000AAA111" "Fix login" "waiting" nil))
+                 ("open" "Open")))))
+    (org-varde-board-test--with data
+      (should-not (string-match-p "Steward" (buffer-string)))
+      ;; Off, S offers to turn it on; no keeps it off.
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) nil)))
+        (should-error (org-varde-board-steward) :type 'user-error))
+      (let (calls went)
+        (cl-letf (((symbol-function 'y-or-n-p) (lambda (_) t))
+                  ((symbol-function 'org-varde--varde) (lambda (&rest args) (push args calls) ""))
+                  ((symbol-function 'org-varde--varde-json)
+                   (lambda (&rest _) '(:steward (:task "T0000000000000000000SSS999" :title "Steward"))))
+                  ((symbol-function 'org-varde-refresh) #'ignore)
+                  ((symbol-function 'org-varde-go-task) (lambda (task &rest _) (setq went task))))
+          (org-varde-board-steward))
+        (should (equal calls '(("steward" "on"))))
+        (should (equal went "T0000000000000000000SSS999"))))
+    (setq data (plist-put data :steward
+                          (list :task "T0000000000000000000SSS999" :short "sss999" :title "Steward"
+                                :status "waiting" :run '(:id "R1") :delegated 2 :asks 1)))
+    (org-varde-board-test--with data
+      (let ((text (buffer-string)))
+        ;; Last, after every group.
+        (should (string-match-p "\nOpen  0\n\nSteward  waits on you · holds 2 · 1 asked  S goes there\n\\'" text)))
+      (let (went)
+        (cl-letf (((symbol-function 'org-varde-go-task) (lambda (task title &rest _) (setq went (list task title)))))
+          (should (eq (keymap-lookup org-varde-board-mode-map "S") #'org-varde-board-steward))
+          (call-interactively #'org-varde-board-steward))
+        (should (equal went '("T0000000000000000000SSS999" "Steward"))))
+      ;; T hands the task at point over, and takes a handed one back.
+      (should (eq (keymap-lookup org-varde-board-mode-map "T") #'org-varde-board-trust))
+      (let (calls)
+        (cl-letf (((symbol-function 'org-varde--varde) (lambda (&rest args) (push args calls) ""))
+                  ((symbol-function 'org-varde-refresh) #'ignore))
+          (org-varde-board-test--first-row)
+          (org-varde-board-trust "30m" "Runs cargo.")
+          (org-varde-board-trust nil nil))
+        (should (equal (reverse calls)
+                       '(("trust" "T0000000000000000000AAA111" "--for" "30m" "--brief" "Runs cargo.")
+                         ("trust" "T0000000000000000000AAA111" "--off"))))))))
+
+(ert-deftest org-varde-board-a-handed-over-task-says-so ()
+  (let ((data (org-varde-board-test--data
+               '(("open" "Open" ("T0000000000000000000AAA111" "Fix login" "open" nil))))))
+    (plist-put (car (plist-get (car (plist-get data :groups)) :rows)) :steward_until 1)
+    (org-varde-board-test--with data
+      (should (string-match-p "^ ○ Fix login +steward's · proj · " (buffer-string))))))
+
 (ert-deftest org-varde-board-renders-what-varde-grouped ()
   (org-varde-board-test--with
       (org-varde-board-test--inbox

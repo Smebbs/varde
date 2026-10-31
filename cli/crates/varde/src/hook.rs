@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use rusqlite::OptionalExtension;
 use serde_json::Value;
 use varde_core::event::{Kind, Source};
+use varde_core::steward;
 
 use crate::{now_ms, pending, Paths};
 
@@ -80,7 +81,14 @@ pub fn run(paths: &Paths, agent: &str, event: &str) {
 fn record(paths: &Paths, agent_name: &str, event: &str, input: &str) -> Result<Option<Value>> {
     let payload: Value = serde_json::from_str(input).context("payload is not JSON")?;
     let agent = varde_agent::by_name(agent_name).context("unknown agent")?;
+    // What the session asks that the steward may answer, read before
+    // `keep` drops the tool's input. A question is no event of its own.
+    let asked = agent.asked(event, &payload);
+    if let Some(q) = asked.as_ref().filter(|a| a.kind == steward::Kind::Question) {
+        return question(paths, &*agent, q);
+    }
     let Some(norm) = agent.normalize(event, &payload) else { return Ok(None) };
+    let asked = asked.filter(|_| norm.kind == Kind::Blocked);
     let kept = agent.keep(payload);
     let now = now_ms();
     let claim = crate::run_env();
@@ -117,7 +125,15 @@ fn record(paths: &Paths, agent_name: &str, event: &str, input: &str) -> Result<O
         if norm.kind == Kind::Started(Source::Fork) {
             link(&mut store)?;
         }
-        let Some(run) = run else { return Ok(None) };
+        let Some(run) = run else {
+            // A tool run mid-turn is not recorded, but a session handed to
+            // the steward while it runs is told at its next one.
+            if norm.kind == Kind::ToolRan {
+                return Ok(told_mid_turn(&store, agent.name(), &norm.native_id, now)?
+                    .map(|c| agent.hook_reply(event, &c)));
+            }
+            return Ok(None);
+        };
         // Where the session runs, so a client can go to it rather than
         // fork it, and for a session varde did not launch, its process:
         // once that is gone the session is over, whatever its last event
@@ -139,6 +155,11 @@ fn record(paths: &Paths, agent_name: &str, event: &str, input: &str) -> Result<O
             }
         }
         crate::job::maybe_fold(paths, &store, &run, norm.kind.name(), now)?;
+        // A delegated session's permission waits on the steward's answer.
+        if let Some(a) = &asked {
+            let answer = crate::steward::wait(paths, &store, &run, a)?;
+            return Ok(answer.and_then(|d| agent.answer_reply(a, &d)));
+        }
         // What the session is given: guidance and memory as it starts,
         // and memory with the prompt that made an ad-hoc session's task.
         // Memory that cannot be read leaves the guidance.
@@ -156,12 +177,86 @@ fn record(paths: &Paths, agent_name: &str, event: &str, input: &str) -> Result<O
             Kind::Prompt => crate::deliver::on_prompt(&store.conn, &run, norm.prompt.as_deref(), now)?,
             _ => None,
         };
+        // What the steward means to this session: its role, or that its
+        // task was handed over, told as it starts or, handed over while it
+        // ran, at its next tool.
+        let told = match norm.kind {
+            Kind::Started(_) | Kind::ToolRan => {
+                crate::deliver::steward(&store.conn, &run, matches!(norm.kind, Kind::Started(_)), now)?
+            }
+            _ => None,
+        };
+        // A turn that took a message asking for an answer has ended: its
+        // report goes back, read and sent off the hook's path.
+        let ended = matches!(norm.kind, Kind::TurnEnd { agents: 0, .. } | Kind::Ended);
+        if ended && varde_core::message::owed(&store.conn, &run, now)? {
+            crate::detach(&["reply", &run], "the reply")?;
+        }
+        // Messages left for the task while its session ran.
+        let said = match norm.kind {
+            Kind::Started(_) | Kind::Prompt | Kind::ToolRan => {
+                crate::deliver::messages(&store.conn, &run, now)?
+            }
+            _ => None,
+        };
+        let parts: Vec<String> = [context, told, said].into_iter().flatten().collect();
+        let context = (!parts.is_empty()).then(|| parts.join("\n\n"));
         Ok(context.map(|c| agent.hook_reply(event, &c)))
     };
     Ok(after().unwrap_or_else(|e| {
         log(paths, &format!("hook {event}: after recording: {e:#}"));
         None
     }))
+}
+
+/// `deliver::steward` and `deliver::messages` for a session whose tool
+/// run was not recorded: a read of the live hand-overs and of waiting
+/// messages first, so every other tool run stays as cheap as it was.
+fn told_mid_turn(
+    store: &varde_core::store::Store,
+    agent: &str,
+    native: &str,
+    now: i64,
+) -> Result<Option<String>> {
+    let any: bool = store
+        .conn
+        .prepare_cached("SELECT EXISTS (SELECT 1 FROM trust WHERE ended IS NULL AND until > ?1)")?
+        .query_row([now], |r| r.get(0))?;
+    if !any && !varde_core::message::any_waiting(&store.conn)? {
+        return Ok(None);
+    }
+    let run: Option<String> = store
+        .conn
+        .prepare_cached(
+            "SELECT id FROM run WHERE agent = ?1 AND native_id = ?2 ORDER BY started DESC LIMIT 1",
+        )?
+        .query_row((agent, native), |r| r.get(0))
+        .optional()?;
+    let Some(run) = run else { return Ok(None) };
+    let parts: Vec<String> = [
+        crate::deliver::steward(&store.conn, &run, false, now)?,
+        crate::deliver::messages(&store.conn, &run, now)?,
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    Ok((!parts.is_empty()).then(|| parts.join("\n\n")))
+}
+
+/// A question in a delegated session: the steward's answer goes back in
+/// the agent's reply. Recorded as no event: the tool's own run follows.
+fn question(paths: &Paths, agent: &dyn varde_agent::Agent, q: &varde_agent::Asked) -> Result<Option<Value>> {
+    let store = paths.open(BUSY)?;
+    let run: Option<String> = store
+        .conn
+        .prepare_cached(
+            "SELECT id FROM run WHERE agent = ?1 AND native_id = ?2 ORDER BY started DESC LIMIT 1",
+        )?
+        .query_row((agent.name(), &q.session), |r| r.get(0))
+        .optional()?;
+    let Some(run) = run else { return Ok(None) };
+    let answer = crate::steward::wait(paths, &store, &run, q)?;
+    Ok(answer.and_then(|a| agent.answer_reply(q, &a)))
 }
 
 /// `varde run` records the process it starts, which is a wrapper when the

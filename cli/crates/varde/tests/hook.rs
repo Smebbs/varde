@@ -30,6 +30,8 @@ fn replay_a_turn(e: &Env) {
     let context = answer["hookSpecificOutput"]["additionalContext"].as_str().unwrap();
     assert!(context.contains("varde note --run ") && context.contains("varde recall"));
     assert!(context.contains("varde new --from "));
+    // And how to reach another task.
+    assert!(context.contains("varde say <task>"), "{context}");
     // A session with no task yet has nothing to close.
     assert!(!context.contains("varde done"), "{context}");
     hook(e, "UserPromptSubmit", &fixture("user-prompt-submit.json"));
@@ -57,7 +59,8 @@ fn a_turn_that_ends_on_an_api_error_needs_you() {
     let plugin =
         std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../plugin/hooks/hooks.json"));
     let plugin: Value = serde_json::from_str(&plugin.unwrap()).unwrap();
-    for event in plugin["hooks"].as_object().unwrap().keys() {
+    // `PreToolUse` is a question for the steward, not an event (§6.6).
+    for event in plugin["hooks"].as_object().unwrap().keys().filter(|e| *e != "PreToolUse") {
         let p = serde_json::json!({"session_id": "s", "notification_type": "idle_prompt"});
         assert!(varde_agent::Claude.normalize(event, &p).is_some(), "{event}");
     }

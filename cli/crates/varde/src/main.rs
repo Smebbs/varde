@@ -26,6 +26,8 @@ mod run;
 mod schedule;
 mod stale;
 mod start;
+mod steward;
+mod steward_guide;
 mod sweep;
 mod tasks;
 mod tmux;
@@ -381,6 +383,109 @@ enum Cmd {
         #[arg(long)]
         json: bool,
     },
+    /// The steward: an agent session that manages varde with you. Opt-in.
+    ///
+    /// With no command, go to its session. It files tasks, reviews what is
+    /// stuck, reports, finds past work, routes what you forward to it, and
+    /// answers for you on tasks you hand it (varde trust).
+    #[command(display_order = 12)]
+    Steward {
+        #[command(subcommand)]
+        what: Option<StewardCmd>,
+    },
+    /// Hand a task to the steward: its permission requests and questions
+    /// wait on the steward's answer, and on yours as before.
+    #[command(display_order = 13)]
+    Trust {
+        /// The task: the six characters the board shows, or their first four.
+        task: String,
+        /// For how long: 30m, 2h (the default), 1d.
+        #[arg(long = "for")]
+        span: Option<String>,
+        /// What the task will need of you, for the steward to go by; `-`
+        /// reads it from stdin.
+        #[arg(long)]
+        brief: Option<String>,
+        /// What the hook allows by itself, steward or not, as Claude's
+        /// rules are written: `Bash(cargo test*)`, `Edit(src/*)`. Again for
+        /// more. Alone, it adds to the hand-over there is.
+        #[arg(long = "allow", value_name = "RULE")]
+        allow: Vec<String>,
+        /// Take it back.
+        #[arg(long, conflicts_with_all = ["brief", "allow", "span"])]
+        off: bool,
+    },
+    /// Tell a task something, whether its session is open or not.
+    ///
+    /// An open session, working or waiting, gets it now where the agent
+    /// allows, else with its next tool call or prompt. With none, the task
+    /// carries on in the background with TEXT as its next turn, as a
+    /// schedule starts one; `varde attach` takes it over.
+    #[command(display_order = 13)]
+    Say {
+        /// The task: the six characters the board shows, or their first four.
+        task: String,
+        /// What to say; `-` reads it from stdin.
+        text: Option<String>,
+        /// For a first start in a repository: whether it gets a worktree.
+        #[arg(long, value_enum)]
+        worktree: Option<WorktreeArg>,
+        /// Wait for the turn that answers it, and print what it said.
+        #[arg(long)]
+        wait: bool,
+        /// Cut into a turn under way, where the agent allows, rather than
+        /// after it.
+        #[arg(long)]
+        now: bool,
+        /// Carry a done or dropped task on, open again, as starting it would.
+        #[arg(long)]
+        reopen: bool,
+    },
+    /// Send what `run`'s last turn reported back to the sessions whose
+    /// messages it took (started by the hook as the turn ends).
+    #[command(hide = true)]
+    Reply { run: String },
+    /// What a task's latest session said last, read from its transcript.
+    #[command(hide = true)]
+    Said {
+        task: String,
+        /// About how many characters to show, the latest turns first.
+        #[arg(long, default_value_t = 3000)]
+        budget: usize,
+    },
+    /// Stop a task's sessions and leave it as it is; starting it again, or
+    /// varde say, carries its conversation on.
+    #[command(hide = true)]
+    Stop { task: String },
+    /// What waits on the steward's answer (for the steward).
+    #[command(hide = true)]
+    Asks {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Answer an ask: allow or deny a permission, or one answer per
+    /// question, in order (for the steward).
+    #[command(hide = true)]
+    Answer {
+        ask: String,
+        answers: Vec<String>,
+        /// Why: a deny's is told to the session.
+        #[arg(long)]
+        why: Option<String>,
+        /// Give it back to the user at once.
+        #[arg(long, conflicts_with = "answers")]
+        pass: bool,
+    },
+    /// Print a JSON line per ask and per handed-over task that needs you,
+    /// until stopped; delegated sessions wait on the steward only while it
+    /// runs (for the steward).
+    #[command(hide = true)]
+    Watch {
+        /// A line for every task that comes to need you, not only those
+        /// handed over.
+        #[arg(long)]
+        all: bool,
+    },
     /// Check the installation, and say how to fix what is wrong.
     #[command(display_order = 14)]
     Doctor {
@@ -432,6 +537,16 @@ struct StartArgs {
     /// Continue this run's conversation rather than the newest.
     #[arg(long, conflicts_with = "fresh")]
     run: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum StewardCmd {
+    /// Turn the steward on: it gets a task of its own, and a line on the board.
+    On,
+    /// Turn it off: every task handed to it is yours again.
+    Off,
+    /// Print its manual, or one playbook of it.
+    Guide { topic: Option<String> },
 }
 
 #[derive(Clone, Copy, ValueEnum)]
@@ -739,6 +854,25 @@ fn dispatch(paths: &Paths, cmd: Option<Cmd>, popup: bool) -> Result<i32> {
         Cmd::Run { run } => return run::run(paths, &run),
         Cmd::Reap { task, spare } => done::reap(paths, &task, &spare),
         Cmd::GitRefresh => sweep::run(paths),
+        Cmd::Steward { what: None } => return steward::go(paths),
+        Cmd::Steward { what: Some(StewardCmd::On) } => steward::on(paths),
+        Cmd::Steward { what: Some(StewardCmd::Off) } => steward::off(paths),
+        Cmd::Steward { what: Some(StewardCmd::Guide { topic }) } => steward::guide(topic.as_deref()),
+        Cmd::Trust { task, span, brief, allow, off } => {
+            steward::trust(paths, &task, span.as_deref(), brief, &allow, off)
+        }
+        Cmd::Say { task, text, worktree, wait, now, reopen } => {
+            let worktree = worktree.map(|w| matches!(w, WorktreeArg::Always));
+            steward::say(paths, &task, text, worktree, steward::Say { wait, now, reopen })
+        }
+        Cmd::Said { task, budget } => steward::said(paths, &task, budget),
+        Cmd::Reply { run } => steward::reply(paths, &run),
+        Cmd::Stop { task } => done::stop(paths, &task),
+        Cmd::Asks { json } => steward::asks(paths, json),
+        Cmd::Answer { ask, answers, why, pass } => {
+            steward::answer(paths, &ask, &answers, why.as_deref(), pass)
+        }
+        Cmd::Watch { all } => steward::watch(paths, all),
         Cmd::Name { task } => naming::run(paths, &task),
     };
     result.map(|()| 0)

@@ -60,7 +60,7 @@ pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
     // Empty when the agent picks its own id.
     let preset = (!native.is_empty()).then_some(native.as_str());
     let how = match relation.as_str() {
-        "resume" => Launch::Resume { id: &native },
+        "resume" => Launch::Resume { id: &native, prompt: prompt.as_deref() },
         "fork" => {
             Launch::Fork { from: parent_native.as_deref().context("fork without a parent")?, id: preset }
         }

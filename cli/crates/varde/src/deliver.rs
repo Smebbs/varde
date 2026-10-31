@@ -230,6 +230,74 @@ pub fn guidance_for(conn: &Connection, run: &str, updates: bool) -> Result<Optio
     Ok(Some(guidance(run, task.as_ref(), held, updates)))
 }
 
+/// Messages `varde say` left for `run`'s task while its session ran,
+/// handed over now and marked in. One read when none waits.
+pub fn messages(conn: &Connection, run: &str, now: i64) -> Result<Option<String>> {
+    if !varde_core::message::any_waiting(conn)? || !varde_core::message::waiting_for(conn, run)? {
+        return Ok(None);
+    }
+    let transcript: Option<String> =
+        conn.query_row("SELECT transcript FROM run WHERE id = ?1", [run], |r| r.get(0)).optional()?.flatten();
+    let mark = transcript.and_then(|t| std::fs::metadata(t).ok()).map(|m| m.len());
+    let taken = varde_core::message::take(conn, run, mark, now)?;
+    if taken.is_empty() {
+        return Ok(None);
+    }
+    let all: Vec<String> = taken.iter().map(crate::steward::framed_for).collect();
+    Ok(Some(all.join("\n\n")))
+}
+
+/// What the steward means to `run`'s session, said once: the steward's
+/// own sessions are told their role at each start, and a session whose
+/// task is handed to the steward (§6.6) that it answers its questions.
+pub fn steward(conn: &Connection, run: &str, starting: bool, now: i64) -> Result<Option<String>> {
+    let Some(task) = conn
+        .prepare_cached("SELECT task FROM run WHERE id = ?1")?
+        .query_row([run], |r| r.get::<_, Option<String>>(0))
+        .optional()?
+        .flatten()
+    else {
+        return Ok(None);
+    };
+    if varde_core::steward::task(conn)?.as_deref() == Some(task.as_str()) {
+        if !starting {
+            return Ok(None);
+        }
+        let mut out = "You are the user's varde steward. varde steward guide prints your manual: read it \
+                       before acting on a request."
+            .to_string();
+        // Tasks handed over before it started wait on it from the start.
+        let held = varde_core::steward::trusts(conn, now)?;
+        if !held.is_empty() {
+            let shorts: Vec<String> = held.iter().map(|t| task::short(&t.task)).collect();
+            out.push_str(&format!(
+                " You hold {} handed over by the user ({}): start varde watch in the background now and \
+                 answer what it brings, as varde steward guide answer says.",
+                if held.len() == 1 { "a task".to_string() } else { format!("{} tasks", held.len()) },
+                shorts.join(", ")
+            ));
+        }
+        return Ok(Some(out));
+    }
+    let Some(trust) = varde_core::steward::trusted(conn, &task, now)? else { return Ok(None) };
+    if !varde_core::steward::tell(conn, trust.id, run)? {
+        return Ok(None);
+    }
+    // What the steward can answer depends on what the agent's hooks carry.
+    let agent: String = conn.query_row("SELECT agent FROM run WHERE id = ?1", [run], |r| r.get(0))?;
+    let asks = varde_agent::by_name(&agent).and_then(|a| a.question_tool());
+    Ok(Some(match asks {
+        Some(tool) => format!(
+            "varde: the user handed this task to their steward while they are away. Ask the user with \
+             the {tool} tool: the steward answers it for them, as it answers permission requests. A \
+             question asked in plain text reaches the steward when your turn ends."
+        ),
+        None => "varde: the user handed this task to their steward while they are away. What you \
+                 report when your turn ends reaches the steward, which may answer you through varde."
+            .to_string(),
+    }))
+}
+
 /// What every session is told: that varde tracks it, the two commands
 /// that make its memory, `note` and `recall`, and how to defer work the
 /// user wants left for later. Not to note what no update will fold in,
@@ -260,6 +328,11 @@ fn guidance(run: &str, task: Option<&Task>, held: bool, updates: bool) -> String
          own: varde new --from {run} \"<title>\" --context \"<why, and where to start>\". Never file \
          work only you thought of."
     ));
+    // Another task's session is reached the way the steward reaches it.
+    out.push_str(
+        " To ask or tell another task something (varde list shows them): varde say <task> \"...\"; \
+         its answer comes back to you as a message when its turn ends.",
+    );
     // Agents cut branches and worktrees of their own, and the work then
     // missed the worktree the user looks at (magit) and varde follows.
     if let Some(b) = task.and_then(|t| t.branch.as_deref()) {

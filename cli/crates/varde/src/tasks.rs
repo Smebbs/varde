@@ -29,6 +29,12 @@ pub fn new(
     if body.is_none() && varde_core::title::clean(&title.join(" ")).trim().is_empty() {
         bail!("a task needs a title, or --context TEXT to cut one from");
     }
+    // Filed by the steward: its directory is nobody's project, and what it
+    // files waits in the Inbox, as all work you did not create does.
+    let by_steward = crate::steward::from_steward();
+    if by_steward && from.is_none() && project_dir.is_none() {
+        bail!("the steward's directory is no project: give --project <the repository's directory>");
+    }
     let id = match from {
         Some(run) => {
             // By its id, or the six characters a session is told.
@@ -60,6 +66,9 @@ pub fn new(
         Some((rule, worktree)) => Some(crate::schedule::arm(&store, &id, &rule, worktree)?),
         None => None,
     };
+    if by_steward {
+        store.conn.execute("UPDATE task SET inbox = 1 WHERE id = ?1", [&id])?;
+    }
     crate::naming::start(&store, &id);
     if let Some(said) = scheduled.filter(|_| !as_json) {
         eprintln!("varde: {said}");

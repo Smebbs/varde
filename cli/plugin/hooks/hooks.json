@@ -51,7 +51,7 @@
           {
             "type": "command",
             "command": "varde hook PermissionRequest",
-            "timeout": 5
+            "timeout": 1800
           }
         ]
       }
@@ -108,6 +108,18 @@
             "type": "command",
             "command": "varde hook PreCompact",
             "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "AskUserQuestion",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "varde hook PreToolUse",
+            "timeout": 1800
           }
         ]
       }

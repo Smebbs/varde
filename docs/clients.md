@@ -141,6 +141,11 @@ task it came from: put it next to that one if you can.
   session. They stay until the user acts on them. Offer `accept`.
 - `--all` adds old done tasks and an eighth group, `dropped`
   (collapsed). Nothing else leaves the board by itself.
+- `steward`, present only while the steward is on (design §6.6), is
+  its task's row, outside every group, with `delegated` (tasks handed
+  to it) and `asks` (what waits on its answer). Show it on a line of
+  its own below the groups; `S` goes to it with `varde attach` on its
+  `task`, as for any row.
 
 ## Starting a task
 

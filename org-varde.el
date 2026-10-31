@@ -1840,8 +1840,9 @@ this session, late once that has gone on a day."
 
 (defun org-varde--row-parts (row face)
   "What ROW says after its session's status, as the board and a view say
-it: what its last turn left running, where it was deferred from, and
-where its git work stands, in FACE when that is nowhere in particular."
+it: what its last turn left running, whether the steward holds it,
+where it was deferred from, and where its git work stands, in FACE
+when that is nowhere in particular."
   (let* ((git (plist-get row :git))
          (label (plist-get git :label))
          (count (lambda (k what)
@@ -1849,6 +1850,7 @@ where its git work stands, in FACE when that is nowhere in particular."
                     (and (> n 0) (format "%d %s%s" n what (if (= n 1) "" "s")))))))
     (list (funcall count :agents "agent")
           (funcall count :shells "shell")
+          (and (plist-get row :steward_until) (propertize "steward's" 'face 'org-varde-board-working))
           (let ((origin (plist-get row :origin)))
             (and origin (concat "← " (plist-get origin :short))))
           (and label (not (string-empty-p label))

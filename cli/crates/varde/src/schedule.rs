@@ -391,7 +391,7 @@ fn fire(store: &mut Store, task: &str, rule: &str, worktree: Option<bool>, now: 
 /// `varde run <run>` in a session of its own, with no terminal, so it
 /// outlives the tick. Not marked internal, as the tick may be: its
 /// agent's hooks must track it.
-fn launch(run: &str, cwd: &Path) -> Result<()> {
+pub(crate) fn launch(run: &str, cwd: &Path) -> Result<()> {
     use std::os::unix::process::CommandExt;
     use std::process::{Command, Stdio};
     let mut cmd = Command::new(crate::exe());

@@ -20,6 +20,7 @@ The CLI is in `cli/`, and the Emacs client is `org-varde.el` and
 | **Memory** | One cairn per task, written by its updates, and one per project, written only by you (Q38): a fixed shape, hard caps, changed only by checked edits. It reaches every session through the agent's hooks, anchored bullets are checked against the code, and `varde eval` measures what it was worth. |
 | **Standalone UI** | Plain commands with `--json`, plus a TUI board (`varde` with no arguments). |
 | **Emacs** | A thin client. It renders a board varde has already grouped, and adds terminals, workspaces and the task view. Org meets varde through `varde:` links, which show where their tasks stand; nothing is synced, and org-varde writes nothing to org but the links you ask for (Q31). |
+| **Steward** | Opt-in: one task whose agent files, reviews, reports, routes and answers for you on tasks you hand it (§6.6). |
 | **Clients** | The elisp is the reference integration, and `docs/clients.md` is the contract for others. |
 
 ## 1. Principles
@@ -60,7 +61,9 @@ The CLI is in `cli/`, and the Emacs client is `org-varde.el` and
 
 Non-goals: MCP, orchestration, a daemon, LLM calls in any interactive
 path, attaching a second front end to a live session, cross-machine
-sync (§5), and embeddings (§7.4).
+sync (§5), and embeddings (§7.4). The steward (§6.6) is no
+orchestrator: it acts on a task only when you file it, ask it, or hand
+the task to it.
 
 ## 3. Architecture
 
@@ -477,6 +480,156 @@ derived as any run's, and the guidance tells it nobody is watching.
   allow, and the session says what it could not do. varde widens
   nothing: `agents.<agent>.background` arguments (e.g. Claude's
   `--permission-mode auto`) go on background launches only.
+
+### 6.6 The steward
+
+The steward is an agent session that manages varde with you (Q41):
+files tasks, reviews what is stuck, reports, finds past work, routes
+what you forward to it, and answers for you on tasks you hand it. It is
+opt-in, and with it off varde behaves as if it did not exist.
+
+- **One task.** `varde steward on` creates it: an ordinary task, marked
+  as the steward, whose cairn is its memory of you. Turned off and on
+  again, it is the same task. Each of its sessions
+  starts told its role and the tasks it holds, so one started after a
+  hand-over starts `watch` by itself. `varde steward`
+  goes to its session (bind it in tmux as `varde next` is), and both
+  boards pin it to a line of its own at the bottom, outside the groups:
+  its status, how many tasks it holds, and what waits on it. `S` on
+  either board goes there. It is the one session you need to reach
+  remotely (Remote Control, channels); varde builds no phone client.
+- **It can do what you can, on your word.** Every command is the
+  CLI's, and three are there for it: `say` reaches any task in any
+  state, `said` reads what a task's session said last (from its
+  transcript, through the adapter), and `stop` ends a task's sessions
+  and leaves the task as it is. `watch --all` reports every task that
+  comes to need you. Its session counts as you where varde spares your
+  sessions from an agent's `done`, `park` or `drop`: an agent never
+  stops a session of yours, but the steward is you. Answering a
+  permission stays yours unless you hand it the task.
+- **It does as little as it can itself.** Work on a task is that
+  task's: the steward hands it over with `say` (a check runs in the
+  task's own session, not the steward's), the answer comes back as a
+  message, and it reads, decides, routes and reports.
+- **Its manual comes from the binary,** as the guidance does (Q12): its
+  session start gets a short role and an index, and `varde steward
+  guide <topic>` prints each playbook on demand: `file` (one task or a
+  batch, confirmed first), `review` (why each Done or stuck task is
+  still there, and what to close), `report`, `find`, `check` (what a
+  task's branch and tests actually say), `route` and `answer`. Works the
+  same for pi, and no other session sees it.
+- **What it files waits in the Inbox** (§4: you did not create it), and
+  needs `--project`: `new` run from the steward's session refuses
+  without one, since its directory is nobody's project.
+- **Route.** Something you forward is matched against every task, done
+  ones included (`recall --all`, `list --all --json`), and becomes a new
+  task, a line on a task that is not running (`edit --add open`, read by
+  its next session), a resume of an ended session (`varde say`), or a
+  follow-up to a done one (`new --from`). Creating and adding it does
+  and reports; resuming a session, reopening, or a close call it asks.
+- **`varde say <task> TEXT`** tells a task something, whatever state
+  its session is in, so the steward (or you) can reach it. The message
+  is kept in the store first (`message`), the same for every agent:
+  - **Open, working or waiting:** it goes in by the agent's own way when
+    the adapter has one (`Agent::push`), else with the session's next
+    hook that carries context (a tool call or a prompt), marked
+    delivered either way. Claude's way in is the session's own inbox,
+    the socket its `sessions/<pid>.json` entry names, which starts a
+    turn when idle and joins the turn under way (2.1.280, undocumented;
+    anything unexpected is no way in). pi's is varde's extension, which
+    listens at `$XDG_RUNTIME_DIR/varde/pi-<pid>.sock` and hands what
+    comes to `pi.sendUserMessage`. Each drops a message meant for a
+    session that has moved on.
+  - **`--now`** cuts into a turn under way rather than after it
+    (Claude's `now` priority, pi's `steer`), where the agent allows.
+  - **No session:** the task carries on in the background with TEXT as
+    its next turn (a task never run starts with TEXT beside its
+    context), through the schedule's machinery (§6.5); `attach` takes
+    it over. A closed task gets a follow-up task instead.
+  - **Closed:** a done or dropped task with no session gets a follow-up
+    task, or with `--reopen` carries on, open again, as starting it would.
+  - Any session can use it, so one task can ask another and `--wait`
+    for the answer. It says who it is from: you, the steward, or the
+    task whose session sent it. Handing a task over (`trust`, rules
+    included) and `answer` are refused from a task's session: nothing
+    a worker runs speaks in your name.
+  - **The answer comes back by itself.** Sent from a session (the
+    steward's or a task's), the message records that session's run;
+    when the turn that took it ends, the hook (one indexed read) starts
+    a detached `varde reply`, which reads what that turn reported from
+    the transcript, where it stood when the message went in, and sends
+    it back as a message of its own, through the same delivery. So the
+    steward hands work to the task it belongs to and keeps talking with
+    you meanwhile. varde writes the reply, not the model, so none is
+    forgotten and every agent answers the same way. A sender with no
+    session open gets it when it next runs: a reply never starts a
+    session, and asks for no reply, so two sessions never answer each
+    other for ever. Several messages one turn took get one reply. The
+    reply waits for the transcript to stop growing: the turn's last
+    lines may land after its end is heard. A pushed message may queue
+    behind the turn under way, so it counts as answered only by a turn
+    whose transcript holds it, and the reply reads from there. A push
+    is in only when the agent takes it (pi's extension says `ok`;
+    Claude's inbox is checked for its protocol), else the session's
+    next hook carries it; it is claimed first, so no hook takes it
+    twice.
+  - **The receiver answers in its turn.** A message that wants an
+    answer tells the session so (varde sends the turn back; do not
+    `say` it back), and a `say` that answers a message from that task
+    asks for none in turn. A real session, untold, answered with a
+    `say` of its own, which started a session of the sender.
+  - **A task's session starts no session.** Its `say` to a task with no
+    session open waits for that task's next one; only you and the
+    steward start sessions with `say`.
+  - `--wait`, for a terminal or a script, waits for that turn and
+    prints it instead.
+  - Print mode fires `PermissionRequest` (2.1.280), so a session `say`
+    or a schedule started on a handed-over task waits on the steward
+    like any other.
+- **A permission dialog shows at once,** beside the waiting hook, and
+  the first answer wins: yours at the keyboard or the steward's. A hook
+  is not cancelled when you answer, so it stops waiting at the run's
+  next event. The plugin gives both hooks 30 minutes (a hook waited 700
+  s on 2.1.280 and its answer still landed), and an ask gives up at 25. A question is not shown until its hook returns, so a
+  delegated task's questions wait on the steward until the deadline.
+- **Every failure is today's behaviour.** No steward session, no
+  answer before the deadline, or an ask it may not take: the hook
+  returns nothing and the agent asks you as usual.
+- **Never delegated,** decided by the hook before an ask is made, so
+  nothing an agent writes can talk the steward into it: `git push`,
+  merging a PR, `varde done`/`drop`/`park`/`trust`/`answer`, deletes
+  and writes outside the worktree, agent settings (`.claude`) and git's
+  own files. A shell command is read as words wherever they stand
+  (`env git push`, `sh -c '…'`, `rm -rf ~`), and a path as it resolves
+  (`src/../x` is `x`), so it errs towards you. The worktree is the
+  session's checkout top, wherever in it the session has gone.
+- **Delegated sessions are told** (session start, or the first hook
+  after `trust` that can carry context) that the steward answers
+  `AskUserQuestion`, so they ask with it. A question asked in plain
+  text at a turn's end reaches the steward as a needs-you line, and it
+  answers with `say`: Claude treats a `Stop` hook's reply as injected
+  and asks again, even when told to expect it, so that is not the way.
+- **The only hooks that wait.** An ask's hook breaks the 10 ms budget
+  (Q35) by design, on delegated tasks only, where the agent is already
+  waiting on a person. Every other hook, and a delegated one with
+  nothing to ask, keeps the budget: the check is one indexed read.
+- **Who runs a command** is read from the process tree, not the
+  environment: the nearest ancestor that is a live run's agent process
+  is the session, so no session passes itself off as you or the
+  steward. `trust` and `answer` refuse a task's session; a message
+  says which session sent it, and its text is quoted line by line, so
+  none poses as another's.
+- **Asks end.** A hook lets go when the task is taken back, and an ask
+  whose session went on or whose hook is gone is settled by `watch`;
+  the board counts only live ones. What an agent can be asked in a hook
+  is its adapter's (`Agent::asked`, `answer_reply`, `question_tool`):
+  Claude's permissions and `AskUserQuestion`; pi's none yet.
+- **Rules** (`--allow 'Bash(cargo test*)'`, `Edit(src/*)`, written as
+  Claude's are) are applied by the hook itself, steward or not, and
+  kept as asks settled `by` the rule. A Bash command needs every part
+  of it allowed, and one with a substitution or redirection never
+  matches. The steward proposes rules from what you confirm; `--allow`
+  alone adds them to the hand-over there is.
 
 ## 7. Memory
 
@@ -988,3 +1141,4 @@ What looks like a missing feature is often one of these.
 | Q38 | The project cairn is yours | Nothing promotes into it: an audit found every promoted bullet was one task's facts, acted on 11% of the times shown. A fact true of most tasks is rarely what a task finds, so you write it. |
 | Q39 | Repeating tasks reviewed by whole flows | `tests/schedule_flows.rs` walks weeks of a series and checks after every step that the right runs are unread and every surface agrees. A session's own `done` ends only its run; an agent never stops a session of yours; a run at work keeps its row in Working. Open: a notification for a finding, pruning `cairn_history` for frequent series, refreshing a series' worktree once its work lands, and letting background runs call `varde done`/`note` unprompted. |
 | Q40 | Done leaves the board | A done task leaves the board the day after it closed, landed or not, and a day after closing an unlanded worktree is put away under its discarded ref. Done held every task whose work had not landed as a reminder, but most such work was notes and experiments never meant to land, and work squashed by hand after an edit cannot be told from it: Done filled with tasks you had to drop by hand. Saying done is saying you are finished, and the ref loses nothing. Rejected: matching edited squashes loosely, since whether work can be lost is a question git answers exactly; keeping an open PR on the board. |
+| Q41 | The steward | One opt-in task that manages varde with you and answers for you on tasks you hand it (§6.6). Its playbooks come from the binary, so Q12 stands. Asks go through the two channels Claude trusts, a `PermissionRequest` decision and `AskUserQuestion`'s answers, both tested on 2.1.280; a `Stop` hook's reply was refused as injection even when announced. `say` reaches an open session through the agent's own inbox (Claude's session socket) or its next hook, so the steward reaches tasks working or waiting, and hands them work rather than doing it. The hook decides what is never delegated, every failure falls back to asking you, and only an ask's hook waits. Rejected: the steward judging in the hook (an LLM on the hook's path), typing into terminals (§11), and a daemon to host it. |

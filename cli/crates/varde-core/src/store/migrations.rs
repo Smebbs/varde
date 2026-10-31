@@ -273,4 +273,76 @@ DELETE FROM memory_fts WHERE rowid IN (
   WHERE f.c8 = 'history' AND i.state = 'history'
     AND i.reason IN ('removed by you', 'edited by you', 'removed in varde edit'));
 "#,
+    // 8: the steward (§6.6). `steward` holds its one task. `trust` is
+    // each hand-over of a task to it, kept once ended; one is live while
+    // it has not ended and `until` is ahead. `ask` is what a delegated
+    // session waits on: `answer` is the JSON handed back, and `settled`
+    // is when it was answered, or given up because the hook stopped
+    // waiting (`by` = 'gone').
+    r#"
+CREATE TABLE steward (
+  task  TEXT PRIMARY KEY REFERENCES task(id),
+  since INTEGER NOT NULL
+);
+CREATE TABLE trust (
+  id      INTEGER PRIMARY KEY,
+  task    TEXT NOT NULL REFERENCES task(id),
+  brief   TEXT,
+  created INTEGER NOT NULL,
+  until   INTEGER NOT NULL,
+  ended   INTEGER,
+  -- Rules the hook answers by itself, as a JSON array: `Bash(cargo test*)`.
+  allow   TEXT
+);
+CREATE INDEX trust_task ON trust(task, until) WHERE ended IS NULL;
+CREATE TABLE ask (
+  id      TEXT PRIMARY KEY,
+  task    TEXT NOT NULL REFERENCES task(id),
+  run     TEXT NOT NULL REFERENCES run(id),
+  kind    TEXT NOT NULL CHECK (kind IN ('permission','question')),
+  tool    TEXT NOT NULL,
+  input   TEXT NOT NULL,
+  created INTEGER NOT NULL,
+  answer  TEXT,
+  why     TEXT,
+  by      TEXT,
+  settled INTEGER
+);
+CREATE INDEX ask_open ON ask(created) WHERE settled IS NULL;
+-- The sessions told of a hand-over, once each.
+CREATE TABLE trust_told (
+  trust INTEGER NOT NULL REFERENCES trust(id),
+  run   TEXT NOT NULL,
+  PRIMARY KEY (trust, run)
+);
+"#,
+    // 9: what `varde say` sends a task with a session open (§6.6). It
+    // goes in by the agent's own way when there is one (`via` 'push'),
+    // else with the session's next hook that carries context ('hook'). A
+    // message not yet in is `delivered` NULL; `run` is the session it
+    // reached, and `mark` where that session's transcript stood then, so
+    // the reply can be read back.
+    r#"
+CREATE TABLE message (
+  id        TEXT PRIMARY KEY,
+  task      TEXT NOT NULL REFERENCES task(id),
+  text      TEXT NOT NULL,
+  sender    TEXT,
+  created   INTEGER NOT NULL,
+  delivered INTEGER,
+  via       TEXT,
+  run       TEXT REFERENCES run(id),
+  mark      INTEGER
+);
+CREATE INDEX message_waiting ON message(task) WHERE delivered IS NULL;
+"#,
+    // 10: a message sent from a session gets its answer back (§6.6):
+    // `reply_to` is the run that sent it, and `replied` when the turn
+    // that took it ended and its report went back. A reply has none, so
+    // two sessions never answer each other for ever.
+    r#"
+ALTER TABLE message ADD COLUMN reply_to TEXT;
+ALTER TABLE message ADD COLUMN replied INTEGER;
+CREATE INDEX message_owed ON message(run) WHERE reply_to IS NOT NULL AND replied IS NULL;
+"#,
 ];

@@ -89,6 +89,8 @@ enum Mode {
     Project(Start, Asked, Pick),
     /// Picking the project to keep the board to, opened outside one.
     Scope(Pick),
+    /// Asked whether to turn the steward on, to go to it.
+    StewardOn,
 }
 
 impl Mode {
@@ -223,6 +225,8 @@ struct App<'a> {
     here_has: bool,
     /// What keeping to `here` left out, while it does.
     elsewhere: Option<board::Elsewhere>,
+    /// The steward's line, when it is on (§6.6).
+    steward: Option<board::Steward>,
     /// Recall results, shown in the detail pane until dismissed.
     found: Option<Found>,
     message: String,
@@ -340,6 +344,7 @@ impl<'a> App<'a> {
             scoped: true,
             here_has: false,
             elsewhere: None,
+            steward: None,
             found: None,
             message: String::new(),
             kept: Vec::new(),
@@ -452,12 +457,22 @@ impl<'a> App<'a> {
             Some(p) if self.scoped && self.here_has => Some(board.only(p)),
             _ => None,
         };
+        self.steward = board.steward;
         self.groups = board.groups;
         self.layout();
         let mut marked = std::mem::take(&mut self.marked);
         marked.retain(|t| self.row_of(t).is_some());
         self.marked = marked;
         kicked
+    }
+
+    /// Go to the steward's session, whatever is selected.
+    fn steward(&mut self) -> Option<Away> {
+        let Some(id) = self.steward.as_ref().map(|s| s.row.task.clone()) else {
+            self.mode = Mode::StewardOn;
+            return None;
+        };
+        self.launch(&id, Start { want: Want::Continue, go: true, ..Start::default() }, Some(false), None)
     }
 
     /// Whether group `g` shows only its header: as varde has it, unless
@@ -837,6 +852,17 @@ impl<'a> App<'a> {
                 KeyCode::Char('y' | 'Y') => self.drop_tasks(&ids),
                 _ => self.unasked(ids),
             },
+            Mode::StewardOn => match key.code {
+                KeyCode::Char('y' | 'Y') => {
+                    let on = crate::steward::enable(self.paths).and_then(|_| self.refresh());
+                    if let Err(e) = on {
+                        self.report(Err(e));
+                        return None;
+                    }
+                    return self.steward();
+                }
+                _ => self.message = "the steward stays off".into(),
+            },
             Mode::EndSeries(ids) => match key.code {
                 KeyCode::Char('y' | 'Y') => self.end_series(ids),
                 _ => self.unasked(ids),
@@ -906,6 +932,7 @@ impl<'a> App<'a> {
                     Some(Act::Background) => start(Want::Continue, false),
                     Some(Act::Fresh) => start(Want::Fresh, true),
                     Some(Act::Fork) => start(Want::Fork, true),
+                    Some(Act::Steward) => return self.steward(),
                     Some(Act::Edit) => return self.edit(),
                     Some(Act::Editor) => return self.editor(),
                     Some(Act::Diff) => return self.current_id().and_then(|id| self.changes(&id)),
@@ -1168,6 +1195,7 @@ impl<'a> App<'a> {
             }
             Act::Mark => self.mark(),
             Act::Accept => self.accept(),
+            Act::Trust => self.hand_over(),
             Act::Reopen => self.reopen_last(),
             Act::Done => self.close(Close::Done),
             Act::Park => self.close(Close::Park),
@@ -1182,7 +1210,14 @@ impl<'a> App<'a> {
                 self.stale = true;
             }
             Act::Scope => self.toggle_scope(),
-            Act::Start | Act::Background | Act::Fresh | Act::Fork | Act::Edit | Act::Editor | Act::Diff => {}
+            Act::Start
+            | Act::Background
+            | Act::Fresh
+            | Act::Fork
+            | Act::Steward
+            | Act::Edit
+            | Act::Editor
+            | Act::Diff => {}
         }
     }
 
@@ -1684,6 +1719,28 @@ impl<'a> App<'a> {
         });
         // The selection follows the accepted task into Open.
         self.keep = inbox;
+    }
+
+    /// `T`: hand the selected task to the steward for two hours, or take
+    /// it back. `varde trust` says more: how long, a brief, rules.
+    fn hand_over(&mut self) {
+        let Some((id, handed)) = self.current().map(|r| (r.task.clone(), r.steward_until.is_some())) else {
+            return;
+        };
+        let short = task::short(&id);
+        let result = (|| -> Result<String> {
+            let store = self.paths.open(BUSY)?;
+            let now = now_ms();
+            if handed {
+                varde_core::steward::untrust(&store, &id, now)?;
+                return Ok(format!("{short} is yours again"));
+            }
+            varde_core::steward::trust(&store, &id, None, &[], now + 2 * 3_600_000, now)?;
+            Ok(format!(
+                "{short} is the steward's for 2h; T takes it back, varde trust {short} --brief tells it more"
+            ))
+        })();
+        self.report(result);
     }
 
     /// Close or park the targets, asking first when that stops a session
@@ -2818,6 +2875,35 @@ mod tests {
     }
 
     #[test]
+    fn the_steward_has_the_bottom_line_and_s_goes_there() {
+        let (_dir, paths) = temp_paths();
+        let mut app = board(&paths, &["Work"]);
+        assert!(!screen(&mut app, 80, 12).contains("Steward"));
+        // Off, S offers to turn it on: n leaves it off, y turns it on.
+        key(&mut app, KeyCode::Char('S'));
+        assert!(screen(&mut app, 80, 12).contains("The steward is off. Turn it on?  y/N"));
+        key(&mut app, KeyCode::Char('n'));
+        assert_eq!(app.message, "the steward stays off");
+        key(&mut app, KeyCode::Char('S'));
+        key(&mut app, KeyCode::Char('y'));
+        assert!(app.steward.is_some(), "on, and on the board");
+        app.refresh().unwrap();
+        let s = screen(&mut app, 80, 12);
+        let lines: Vec<&str> = s.lines().collect();
+        let at = lines.iter().position(|l| l.contains("Steward  idle  S goes there")).expect(&s);
+        assert!(lines[..at].iter().all(|l| !l.contains("Steward")), "not among the rows: {s}");
+        assert!(lines[..at].iter().any(|l| l.contains("Work")));
+        // T hands the selected task over, and takes it back.
+        key(&mut app, KeyCode::Char('T'));
+        assert!(app.message.contains("is the steward's for 2h"), "{}", app.message);
+        app.refresh().unwrap();
+        let s = screen(&mut app, 80, 12);
+        assert!(s.contains("steward's") && s.contains("holds 1"), "{s}");
+        key(&mut app, KeyCode::Char('T'));
+        assert!(app.message.ends_with("is yours again"), "{}", app.message);
+    }
+
+    #[test]
     fn the_board_dims_under_an_open_pane() {
         let (_dir, paths) = temp_paths();
         let mut app = board(&paths, &["One", "Two"]);
@@ -3075,7 +3161,7 @@ mod tests {
         key(&mut app, KeyCode::Char('q'));
         key(&mut app, KeyCode::Char('?'));
         let help = screen(&mut app, 80, 24);
-        assert!(help.contains("diff of its work") && help.contains("redraw and refresh"), "{help}");
+        assert!(help.contains("diff of its work") && help.contains("steward / hand it over"), "{help}");
         assert!(help.contains("move to another project"), "{help}");
         // It opens with what each group holds.
         for group in ["Needs you", "Working", "Open", "Inbox  ", "Done", "Parked"] {
@@ -3095,6 +3181,7 @@ mod tests {
         assert!(help.lines().nth(cairn).unwrap().contains("› yours  ? stale: its code is gone"), "{help}");
         // Taller than 80x24, it scrolls to its end; any other key closes it.
         assert!(help.contains("↓ j more") && !help.contains("u undoes"), "{help}");
+        key(&mut app, KeyCode::Char('j'));
         key(&mut app, KeyCode::Char('j'));
         key(&mut app, KeyCode::Char('j'));
         let end = screen(&mut app, 80, 24);
