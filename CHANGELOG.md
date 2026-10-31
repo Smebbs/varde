@@ -4,6 +4,36 @@ Notable changes to varde and org-varde.
 
 ## Unreleased
 
+## 1.6.0-beta1 - 2026-10-31
+
+A beta: the steward is new, opt-in, and may change or go before 1.6.0.
+
+### Added
+
+- The steward (beta, opt-in): `varde steward on` gives you an agent
+  session that manages varde with you. It files tasks, reviews what is
+  stuck, reports, finds past work, and routes what you forward to it.
+  `S` on either board goes to it, and offers to turn it on.
+- `varde trust <task>` (or `T` on a board) hands a task to the steward
+  for a while: its permission requests and questions wait on the
+  steward's answer, and on yours as before. Pushing, merging, closing
+  tasks and writes outside the worktree always come to you.
+  `--allow 'Bash(cargo test*)'` lets the hook allow what a rule names.
+- `varde say <task> TEXT` reaches a task in any state: an open session,
+  working or waiting, gets it now; with none, the task carries on in
+  the background. Sent from a session, the answer comes back to it as
+  a message when the task's turn ends. `varde said` reads what a
+  session said last, and `varde stop` ends a task's sessions.
+
+### Changed
+
+- The store moves to schema 10. Earlier versions refuse it: keep a
+  copy of `~/.local/state/varde/varde.db` if you may go back to 1.5.
+- The Claude plugin gives `PermissionRequest` a 30-minute timeout and
+  hooks `AskUserQuestion`. Both do nothing unless a task is handed to
+  the steward. The pi extension takes in what `varde say` sends.
+- Every session is told how to reach another task with `varde say`.
+
 ## 1.5.3 - 2026-10-30
 
 ### Changed
