@@ -444,6 +444,7 @@ fn the_steward_starts_told_what_it_holds() {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "stands in for a session by its process, read from /proc")]
 fn what_the_steward_files_needs_a_project_and_waits_in_the_inbox() {
     let e = Env::new();
     let s = steward_on(&e);
@@ -479,6 +480,7 @@ fn say_reopens_a_closed_task_only_when_told() {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "stands in for a session by its process, read from /proc")]
 fn said_reads_back_the_latest_turns_and_stop_ends_a_session() {
     let e = Env::with_agent(AGENT);
     let (t, run, pid, _) = open_session(&e);
@@ -497,6 +499,7 @@ fn said_reads_back_the_latest_turns_and_stop_ends_a_session() {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "stands in for a session by its process, read from /proc")]
 fn the_steward_closes_what_you_could_and_another_agent_spares_your_session() {
     let e = Env::with_agent(AGENT);
     let s = steward_on(&e);
@@ -529,6 +532,7 @@ fn watch_all_says_every_task_that_needs_you() {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "stands in for a session by its process, read from /proc")]
 fn another_tasks_session_may_say_but_not_answer_or_hand_over() {
     let e = Env::with_agent(AGENT);
     steward_on(&e);
@@ -567,6 +571,7 @@ fn another_tasks_session_may_say_but_not_answer_or_hand_over() {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "stands in for a session by its process, read from /proc")]
 fn a_task_asked_from_a_session_answers_back_by_itself() {
     let e = Env::with_agent(AGENT);
     // A: the session asking (here the steward's would do as well).
@@ -616,6 +621,7 @@ fn a_task_asked_from_a_session_answers_back_by_itself() {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "stands in for a session by its process, read from /proc")]
 fn a_tasks_session_starts_no_session_and_an_answer_asks_for_none() {
     let e = Env::with_agent(AGENT);
     let (a, a_run, _) = task_with_run(&e);
@@ -677,6 +683,7 @@ fn turned_on_again_the_steward_is_the_one_it_was() {
 }
 
 #[test]
+#[cfg_attr(not(target_os = "linux"), ignore = "stands in for a session by its process, read from /proc")]
 fn a_push_queued_behind_a_turn_is_answered_by_the_turn_that_takes_it() {
     let e = Env::with_agent(AGENT);
     let (_, a_run, _) = task_with_run(&e);
