@@ -203,6 +203,8 @@ impl Env {
             ("VARDE_GH", self.path("no-gh")),
             ("VARDE_BIN", PathBuf::from(env!("CARGO_BIN_EXE_varde"))),
             ("FAKE_HOME", self.dir.path().to_path_buf()),
+            // The system's sandbox only where a test asks for it.
+            ("VARDE_SANDBOX", PathBuf::from("off")),
             ("FAKE_LOG", self.path("argv.log")),
             ("CLAUDE_CONFIG_DIR", self.path("claude-config")),
             // git as on a machine of its own: the user's identity, signing

@@ -31,6 +31,44 @@ pub struct Config {
     /// The profile each role uses unless told otherwise.
     pub roles: Roles,
     pub loops: Loops,
+    /// What every sandbox does (design §6.8).
+    pub sandbox: Sandbox,
+    /// Sandboxes of your own, by name, for a task or a recipe's step:
+    /// what each shows, lets write, sets and denies beyond the default.
+    pub sandboxes: BTreeMap<String, Fence>,
+}
+
+/// The sandbox background sessions and checks run in.
+#[derive(Debug, Default, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Sandbox {
+    /// `false`: none, and background sessions ask their agent's
+    /// permission as a grant allows. `true`: one, or they do not start.
+    /// Unset: one where the system has it (bwrap, sandbox-exec).
+    pub on: Option<bool>,
+    /// More every sandbox lets write: a cache your builds use.
+    pub write: Vec<String>,
+    /// More every sandbox hides: a login of yours varde does not know.
+    pub hide: Vec<String>,
+    /// Variables every sandbox keeps that it would drop as a login, by
+    /// name or prefix.
+    pub pass: Vec<String>,
+}
+
+/// A named sandbox: the default one, and these.
+#[derive(Debug, Default, Clone, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Fence {
+    /// What the default hides that it shows: `~/.azure`.
+    pub show: Vec<String>,
+    /// More it lets write.
+    pub write: Vec<String>,
+    /// Variables it sets: `AZURE_CONFIG_DIR = "~/.azure-reader"`.
+    pub env: BTreeMap<String, String>,
+    /// Commands its agent must never run: `az * delete*`.
+    pub deny: Vec<String>,
+    /// Variables it keeps that it would drop as a login: `AZURE_SUBSCRIPTION_ID`.
+    pub pass: Vec<String>,
 }
 
 /// Who does the work, and how hard.
@@ -43,10 +81,6 @@ pub struct Profile {
     pub model: Option<String>,
     /// `low`, `medium`, `high`, `xhigh` or `max`.
     pub effort: Option<String>,
-    /// In place of the agent's `background` arguments, for a session on
-    /// this profile that nobody is at: e.g. `["--permission-mode",
-    /// "acceptEdits"]`, since Claude's `auto` mode does not run on haiku.
-    pub background: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -101,9 +135,8 @@ pub struct Agent {
     /// The program and leading arguments varde runs in place of the
     /// agent's own name, e.g. a wrapper script.
     pub command: Option<Vec<String>>,
-    /// Arguments added to a session a schedule starts in the background,
-    /// e.g. `["--permission-mode", "auto"]`: nobody is there to approve a
-    /// tool, and varde widens nothing on its own.
+    /// Arguments added to a session started in the background, before
+    /// what varde grants it (design §6.8), which wins where both say.
     pub background: Vec<String>,
 }
 
@@ -298,6 +331,9 @@ fn check(c: &Config) -> std::result::Result<(), String> {
             efforts.join(", ")
         ));
     }
+    if let Some(name) = c.sandboxes.keys().find(|n| crate::sandbox::BUILT_IN.contains(&n.as_str())) {
+        return Err(format!("sandboxes.{name}: {name} is varde's own; give yours another name"));
+    }
     if !(0.0..=1.0).contains(&c.memory.holdout) {
         return Err(format!("memory.holdout is a share of sessions, from 0 to 1, not {}", c.memory.holdout));
     }
@@ -329,40 +365,6 @@ impl Config {
         argv
     }
 
-    /// The same for a session on `profile`: its own arguments when it has
-    /// them, else the agent's.
-    pub fn background_on(&self, agent: &str, profile: Option<&str>, mut argv: Vec<String>) -> Vec<String> {
-        match profile.and_then(|p| self.profile(p)).and_then(|p| p.background) {
-            Some(args) if !argv.is_empty() => {
-                argv.splice(1..1, args);
-                argv
-            }
-            _ => self.background(agent, argv),
-        }
-    }
-
-    /// What is wrong with how a background session on `profile` would
-    /// run: Claude's `auto` permission mode does not run on haiku, so such
-    /// a session can change no file.
-    pub fn background_warning(&self, profile: &str) -> Option<String> {
-        let p = self.profile(profile)?;
-        let agent = p.agent.clone().unwrap_or_else(|| "claude".into());
-        if agent != "claude" || !p.model.as_deref().is_some_and(|m| m.contains("haiku")) {
-            return None;
-        }
-        let args = p
-            .background
-            .clone()
-            .unwrap_or_else(|| self.agents.get(&agent).map(|a| a.background.clone()).unwrap_or_default());
-        let auto = args.windows(2).any(|w| w[0] == "--permission-mode" && w[1] == "auto")
-            || args.iter().any(|a| a == "--permission-mode=auto");
-        auto.then(|| {
-            format!(
-                "profile {profile} runs haiku, and Claude's auto permission mode does not run on haiku: in the background it can change no file. Give it its own, e.g. {profile} = {{ model = \"haiku\", background = [\"--permission-mode\", \"acceptEdits\", \"--allowedTools\", \"Bash(git add *) Bash(git commit *)\"] }}"
-            )
-        })
-    }
-
     /// Where `repo`'s worktrees go, without `..`: a session's directory is
     /// matched against it, and hooks report that one resolved.
     pub fn worktree_dir(&self, repo: &Path) -> PathBuf {
@@ -377,24 +379,30 @@ impl Config {
     }
 
     /// The profile `name`: yours, else one varde ships (`quick`, `build`,
-    /// `deep`, `review`), on Claude's aliases so a release never breaks it.
+    /// `deep`, `review`), on your agent at the model its adapter names for
+    /// it (Claude's aliases, so a release never breaks it).
     pub fn profile(&self, name: &str) -> Option<Profile> {
         if let Some(p) = self.profiles.get(name) {
             return Some(p.clone());
         }
-        let (model, effort) = match name {
-            "quick" => ("haiku", "medium"),
-            "build" => ("sonnet", "medium"),
-            "deep" => ("opus", "high"),
-            "review" => ("opus", "high"),
+        let effort = match name {
+            "quick" | "build" => "medium",
+            "deep" | "review" => "high",
             _ => return None,
         };
-        Some(Profile {
-            agent: Some("claude".into()),
-            model: Some(model.into()),
-            effort: Some(effort.into()),
-            background: None,
-        })
+        // On the agent you use, at the model it names for the tier.
+        let agent = crate::start::default_agent();
+        let model = varde_agent::by_name(&agent).and_then(|a| a.tier(name)).map(String::from);
+        Some(Profile { agent: Some(agent), model, effort: Some(effort.into()) })
+    }
+
+    /// What is wrong with running on `profile`, as its agent sees it: on
+    /// a cloud provider, an alias it may not serve.
+    pub fn profile_warning(&self, name: &str) -> Option<String> {
+        let p = self.profile(name)?;
+        let agent = p.agent.clone().unwrap_or_else(crate::start::default_agent);
+        let w = varde_agent::by_name(&agent)?.model_warning(p.model.as_deref()?)?;
+        Some(format!("profile {name}: {w}"))
     }
 
     /// Every profile there is, yours and the shipped ones, by name.
@@ -458,31 +466,6 @@ impl Repo {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn haiku_in_the_background_under_auto_is_warned_of_and_a_profile_can_say_its_own() {
-        let c: Config = toml::from_str(
-            r#"
-            [agents.claude]
-            background = ["--permission-mode", "auto"]
-            [profiles]
-            mine = { model = "haiku", background = ["--permission-mode", "acceptEdits"] }
-            "#,
-        )
-        .unwrap();
-        assert!(c.background_warning("quick").is_some_and(|w| w.contains("acceptEdits")));
-        assert!(c.background_warning("mine").is_none());
-        assert!(c.background_warning("deep").is_none(), "opus runs under auto");
-        let argv = || vec!["claude".to_string(), "-p".to_string()];
-        assert_eq!(
-            c.background_on("claude", Some("mine"), argv()),
-            ["claude", "--permission-mode", "acceptEdits", "-p"]
-        );
-        assert_eq!(
-            c.background_on("claude", Some("deep"), argv()),
-            ["claude", "--permission-mode", "auto", "-p"]
-        );
-    }
 
     #[test]
     fn every_key_is_optional_and_unknown_ones_are_refused() {

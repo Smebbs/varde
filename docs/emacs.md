@@ -155,6 +155,7 @@ every key.
 | `A` | Approve its work: what waits on your approval can start. |
 | `t` | Its trail, drawn as a tree: `RET` shows a task, `S` sets the trail going, and `L` `c` `C` `A` `M` work on the line's task. |
 | `M` | The profile (agent, model, effort) it runs on. |
+| `f` | Follow it at work, read-only, in a buffer of its own: what each session says, the tools it calls, each check, the next round. `q` stops. |
 | `r` | The recipes: `RET` shows one, `n` makes tasks from it, `e` edits your copy, `?` how to write one. |
 
 In the form, an empty Title has a model name the task, `When:` takes
@@ -199,7 +200,7 @@ you wrote (updates keep it); a yellow `?` one about code that's gone.
 | `J` / `K` | The next / previous task. |
 | `RET` | Go to the session. |
 | `d`, `P`, `X`, `s`, `/` | As on the board (`X` drops). |
-| `L` `c` `C` `O` `A` `t` `M` | Loops, checks and trails, as on the board. |
+| `L` `c` `C` `O` `A` `t` `M` `f` | Loops, checks and trails, as on the board. |
 | `q` | Close. |
 
 Lines are typed in the minibuffer. `C-g` keeps a draft, and the same
@@ -213,8 +214,15 @@ passes, `⧗ abc123` while it waits on another, `⚑ touched tests/a.rs`
 when a round changed what its check guards. The view has a **Loop**
 section: its profile and recipe, its check and the last result, then one
 line per round with the profile it ran on, how long it took and what its
-check found. `RET` on a round opens that session, `O` what its check
-printed, and `RET` on a task before or after it shows that one.
+check found, and the sandbox its background sessions run in. `RET` on a
+round opens that session, `O` what its check printed, and `RET` on a
+task before or after it shows that one.
+
+Opening a task whose loop is going (`RET`) takes the loop over: your
+session is the round (`↺ 2/3 with you`), each of your turns that changes
+files is checked as it ends, and a failure comes back into the session.
+When you close it, the next round starts in the background. To watch
+without taking over, `f`.
 
 The new-task form (`n`) has four more fields:
 
@@ -226,6 +234,12 @@ The new-task form (`n`) has four more fields:
 
 With a recipe, `C-c C-c` makes one task per step and asks whether to
 set the trail going.
+
+Emacs started from the Dock or Finder on macOS has none of your shell's
+variables: varde, and the agents it starts, would miss your PATH and
+your provider settings (`CLAUDE_CODE_USE_VERTEX` and the like). Copy
+them in with `exec-path-from-shell`, naming those variables in
+`exec-path-from-shell-variables`.
 
 ## Moving between sessions
 

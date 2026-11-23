@@ -421,4 +421,18 @@ CREATE TABLE edge (
 );
 CREATE INDEX edge_after ON edge(after);
 "#,
+    // 12: the sandbox a task's background sessions and checks run in, by
+    // name (NULL: the default one), and whether a run ran in one. A task
+    // made from a recipe's step keeps the step's `output`: one that is a
+    // `trail` makes its tasks when you approve it.
+    r#"
+ALTER TABLE task ADD COLUMN sandbox TEXT;
+ALTER TABLE task ADD COLUMN output TEXT;
+ALTER TABLE run ADD COLUMN fenced INTEGER;
+"#,
+    // 13: a check's verifier: what an agent session, with its tools and
+    // skills, is asked to find out about the work, a prompt or a file.
+    r#"
+ALTER TABLE check_def ADD COLUMN verify TEXT;
+"#,
 ];

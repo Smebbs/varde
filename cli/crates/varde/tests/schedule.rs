@@ -59,7 +59,14 @@ fn a_due_task_runs_in_the_background_and_comes_round_again_fresh() {
     poll(100, || runs(&e, &t).first().is_some_and(|r| r["status"] == "exited"));
     let run = &runs(&e, &t)[0];
     assert_eq!((run["relation"].as_str(), run["background"].as_bool()), (Some("fresh"), Some(true)), "{run}");
-    assert!(e.argv()[0].starts_with("-p "), "{:?}", e.argv());
+    // With no sandbox, on what varde grants it: edits here, and commits.
+    let argv = &e.argv()[0];
+    assert!(
+        argv.starts_with(
+            "--permission-mode acceptEdits --allowedTools Bash(git add *) Bash(git commit *) -p "
+        ),
+        "{argv}"
+    );
     let board = e.board();
     let row = &group(&board, "needs_you")[0];
     assert_eq!((row["short"].as_str(), row["unread"].as_bool()), (Some(t.as_str()), Some(true)), "{row}");
@@ -125,10 +132,11 @@ fn a_session_at_work_in_the_background_is_taken_over() {
         (Some("resume"), runs[0]["id"].as_str())
     );
     assert!(runs[1].get("background").is_none());
-    // The user's arguments for a background session, and only for one.
+    // The user's arguments for a background session, and only for one:
+    // first, so what varde grants comes after them and wins.
     e.ok(&["run", plan["run"].as_str().unwrap()]);
     let argv = e.argv();
-    assert!(argv[0].starts_with("--permission-mode auto -p "), "{argv:?}");
+    assert!(argv[0].starts_with("--permission-mode auto --permission-mode acceptEdits "), "{argv:?}");
     assert!(!argv[1].contains("--permission-mode"), "{argv:?}");
 }
 

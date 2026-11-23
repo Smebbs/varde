@@ -445,7 +445,7 @@ pub fn say(
 /// message, and pushed in where the agent allows, else left for the
 /// session's next hook. The message and whether it went in now; `None`
 /// with no session open, and nothing kept.
-fn deliver(
+pub(crate) fn deliver(
     store: &Store,
     task: &str,
     text: &str,
@@ -703,8 +703,14 @@ fn caller(store: &Store) -> Result<Caller> {
 /// Refuse `what` from another task's session: handing tasks over, rules
 /// and answers in the user's name are the user's, and the steward's.
 pub(crate) fn yours(store: &Store, what: &str) -> Result<()> {
-    if let Caller::Task(short, _) = caller(store)? {
-        bail!("{what} is the user's to do, or the steward's, not a task's session ({short})");
+    match caller(store)? {
+        Caller::Task(short, _) if short == "?" => {
+            bail!("{what} is the user's to do, or the steward's, not an agent session's")
+        }
+        Caller::Task(short, _) => {
+            bail!("{what} is the user's to do, or the steward's, not a task's session ({short})")
+        }
+        _ => {}
     }
     Ok(())
 }

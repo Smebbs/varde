@@ -1,0 +1,26 @@
+# A change to a live system, planned in a sandbox that can only look: the
+# result is a checklist, and you make the changes, outside it.
+label = "change-plan"
+description = "Look, read-only, at what a change to a live system takes, and write CHECKLIST.md; you apply it."
+
+[vars.sandbox]
+description = "The sandbox it looks from: one of yours that shows a read-only login and denies what changes things (varde sandbox shows them)."
+required = true
+
+[[steps]]
+id = "plan"
+title = "{{title}}"
+profile = "deep"
+sandbox = "{{sandbox}}"
+output = "file:CHECKLIST.md"
+prompt = """
+Find out what this change takes, from the live system as it is now and
+from this checkout. This sandbox gives you the command-line tools and the
+login for that system (an `az`, `kubectl`, `gcloud` or `aws` on PATH):
+use them to read only (list, show, get, describe). Run nothing that
+changes a system, and change no file but CHECKLIST.md. Then write CHECKLIST.md:
+what you found, then each change as a numbered step with the exact
+command, what it does, how to see it worked, and how to undo it. Mark what
+is risky, and what you could not find out.
+
+{{context}}"""

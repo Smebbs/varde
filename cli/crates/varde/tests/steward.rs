@@ -289,13 +289,17 @@ fn say_carries_a_task_on_in_the_background() {
     assert_eq!(said, format!("{t} starts in the background; varde attach {t} takes it over"));
     ended(&e, &t, 1);
     let first = e.argv().pop().unwrap();
-    assert!(first.starts_with("-p --session-id "), "{first}");
+    assert!(first.contains(" -p --session-id "), "{first}");
     assert!(first.contains("Fix the cache~~Slack: the locale bug is back"), "{first}");
     // Ended: its conversation resumes with the text as its turn.
     e.ok(&["say", &t, "Also check the de-CH locale."]);
     ended(&e, &t, 2);
     let native = runs(&e, &t)[0]["native_id"].as_str().unwrap().to_string();
-    assert_eq!(e.argv().pop().unwrap(), format!("-p --resume {native} -- Also check the de-CH locale."));
+    let resumed = e.argv().pop().unwrap();
+    assert!(
+        resumed.ends_with(&format!(" -p --resume {native} -- Also check the de-CH locale.")),
+        "{resumed}"
+    );
     assert!(runs(&e, &t).iter().all(|r| r["background"] == true), "{:?}", runs(&e, &t));
 }
 

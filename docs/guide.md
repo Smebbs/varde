@@ -43,7 +43,8 @@ Or grab a binary from the
 A beta is a pre-release, which Homebrew and "latest" leave out: take its
 binary from its [release page](https://github.com/Smebbs/varde/releases),
 or `cargo install --locked --git https://github.com/Smebbs/varde --tag
-v1.6.0-beta2 varde`.
+v1.6.0-beta3 varde`. On macOS a downloaded binary is quarantined until
+you clear it: `xattr -d com.apple.quarantine ./varde`.
 `varde` must be on your PATH, since the hooks call it by name.
 
 Claude Code: install the plugin (it's just hooks calling `varde hook`).
@@ -143,11 +144,12 @@ keeps the row in Needs you, and RET opens them newest first. The view
 (`v`) lists every run (`●` unopened, `quiet` found nothing); RET opens
 one (`varde attach <task> --run <run>`).
 
-Nobody is around to approve tools, so a tool your settings don't allow
-is refused. To let the agent decide, pass its flags in `background`
-(see [Configure](#configure)), e.g. `["--permission-mode", "auto"]`.
-For the same reason, a first start that would ask about a worktree
-needs `--worktree always|never` up front.
+Nobody is around to approve tools, so a scheduled session runs in the
+sandbox, where it asks for nothing (see [The sandbox](#the-sandbox-beta)).
+A schedule that needs a login the sandbox hides (`gh`, `az`) gets a
+sandbox that shows it: `varde set <task> --sandbox push`, or one of
+yours. For the same reason, a first start that would ask about a
+worktree needs `--worktree always|never` up front.
 
 Each run of a repeating task is a fresh conversation given the cairn,
 so put what to do in the context and let the cairn track progress. A
@@ -168,10 +170,20 @@ another model, or both.
 ```sh
 varde check fix1 -- cargo test -p parser    # passes when it exits 0
 varde check fix1 --review --rubric review.md  # then another model reads the diff
-varde check fix1 --guard 'tests/*'            # a session that changes these is flagged
+varde check fix1 --verify 'run it and use /verify-app'  # then an agent checks it, with its tools and skills
+varde check fix1 --guard 'tests/*'            # read-only to its sessions; a change is flagged
 varde check fix1 --now                        # run it here and see
 varde approve fix1                            # you say it is good
 ```
+
+`--verify` is the strongest check for work a command cannot judge: a
+fresh session on the review profile, in the task's sandbox, with its
+tools and your skills, asked what you wrote (a file or the text). It
+ends with PASS or FAIL, and what it touched to look is put back. A
+skill is the how (`/verify-app` knows how to test your app); varde is
+when it runs, on which model, in which sandbox, and what its answer
+means for the loop. The same goes for a step's prompt: name the skill
+(`/spec`, `/simplify`) and every round runs it.
 
 A **loop** runs a task in fresh background sessions until its check
 passes. Each round gets the task's cairn and how the last check failed.
@@ -184,10 +196,18 @@ It stops when the check passes (`✓ verified in 2`, in Needs you), after
 `--max` rounds or `--minutes`, when two rounds fail the same way with no
 change and no profile is left to escalate to (`■ stuck`), when a round
 asks you something (`? asked you`), or when a round touches the guard
-(`⚑ touched tests/a.rs`). Opening the task (RET, `attach`) takes over
-the round under way and pauses the loop; `varde loop fix1` resumes it.
-`varde show fix1` lists every round. Each is an ordinary session of the
-task, so RET in the view opens any of them.
+(`⚑ touched tests/a.rs`). `varde show fix1` lists every round. Each is
+an ordinary session of the task, so RET in the view opens any of them.
+
+`varde follow fix1` (`f` on the boards) watches a task at work without
+taking it over: what each round says, the tools it calls, each check as
+it lands, and the next round as it starts.
+
+Opening the task (RET, `attach`) takes the loop over: your session is
+the round now (`↺ 2/3 with you`). Each of your turns that changes files
+is checked when it ends, and a failure comes back to you in the session.
+When you leave, the next round starts in the background.
+`varde loop fix1 --pause` stops it; `varde loop fix1` sets it going again.
 
 A **trail** is tasks joined by `after`: a task starts once what it
 waits on is verified, or approved with `--approved`.
@@ -207,28 +227,139 @@ branch. varde merges nothing and lands nothing.
 yours go in the config. `varde profiles` lists them. `--profile` on
 `new`, `start` and `attach` picks one.
 
-**Recipes** are loops and trails written down once. `varde recipe list`
-shows them (`fix-until-green`, `bugfix`, `feature`, `draft-revise` and
-`research` are built in), `varde recipe show bugfix --origin` draws one
-and says where each value came from, and `varde recipe edit bugfix`
-gives you your own copy. To use one:
+**Recipes** are loops and trails written down once. `varde recipe
+list` shows them, `varde recipe show bugfix --origin` draws one and says
+where each value came from, and `varde recipe edit bugfix` gives you
+your own copy. Built in:
+
+| Recipe | What it does |
+|---|---|
+| `fix-until-green` | fresh rounds until a command passes |
+| `bugfix` | a failing test you approve, fixed until green without touching tests, reviewed |
+| `feature` | a spec you approve, built until green and reviewed, then simplified |
+| `epic` | a spec and a plan of pieces you approve; the pieces built at once, each until green, then merged and checked whole |
+| `change-plan` | a live system looked at read-only; you get `CHECKLIST.md` and make the changes yourself |
+| `draft-revise` | writing: a draft, critiqued against your rubric, revised |
+| `research` | a question explored on the deepest profile; a report |
 
 ```sh
-varde new "Parser crashes on empty input" --recipe bugfix --start
+varde new "Parser crashes on empty input" --recipe bugfix --var check='cargo test' --start
 varde new "Login race" --recipe bugfix --set fix.output=draft-pr
+varde new "Sync engine" --recipe epic --var check='cargo test' --start
 ```
+
+With `epic`, the plan step writes `SPEC.md` and `trail.toml`, a recipe
+of its own, and loops until `varde recipe check trail.toml` passes.
+`varde show` on the plan says where both are, and `varde recipe show
+<path>/trail.toml` draws the trail. `varde approve` on the plan makes its
+tasks, in the plan's sandbox, and sets them going. Pieces that need
+nothing of each other run at the same time, each in a worktree cut from
+the plan's branch, and the last step merges their branches and runs the
+whole check. At most `loops.parallel` (3) background sessions run at
+once, across all your trails.
+
+To land it, merge the last step's branch (`varde show` names it) as you
+would any: it holds every piece, `SPEC.md` and `trail.toml` (delete
+those if you don't want them kept). Then `varde done` each task of the
+trail; done puts the pieces' worktrees away.
 
 `varde recipe guide` prints every key with its default. It is written
 for agents too: ask any session to "write a varde recipe that…" and it
-finds the guide by itself. `varde recipe check FILE` says whether a
+finds the guide by itself. The Claude plugin also brings a skill,
+`varde-loops`, so a session asked to "loop this until the tests pass" or
+"split this feature" knows to set it up with varde; for pi, link it:
+`ln -s "$PWD/cli/plugin/skills/varde-loops" ~/.pi/agent/skills/`. `varde recipe check FILE` says whether a
 recipe is usable.
 
 Loops need the heartbeat (`varde schedule --install`) to be sure the
 next round starts; varde also wakes itself when a round, a check or a
-cairn update ends. At most `loops.parallel` (3) background sessions run
-at once. Nobody approves tools in the background, so give the agent's
-flags in `background` (see [Configure](#configure)), or hand the task to
-the steward.
+cairn update ends. Install it from the shell your agent works in: it
+carries that shell's `PATH` and the agent's provider variables
+(`CLAUDE_CODE_USE_VERTEX`, `ANTHROPIC_*`, `AWS_*` and the like), and
+says which secrets it left out. At most `loops.parallel` (3) background
+sessions run at once.
+
+### The sandbox (beta)
+
+Nobody is at a background session to approve its tools, so varde runs
+it, and every check, in the system's sandbox: bubblewrap on Linux
+(install `bubblewrap`), `sandbox-exec` on macOS. Inside, the agent may
+use any tool without asking. It can still only:
+
+- write its checkout, its session files, temporary files and build caches;
+- commit, unsigned (sign them as you land them, `git rebase -S`, if your
+  repository asks for it). In a task with no worktree it changes files
+  but cannot commit, since the repository's git directory decides what
+  runs as you.
+
+And it cannot:
+
+- read your logins: ssh, gpg, cloud CLIs, gh, git credentials, browsers,
+  or the tokens in your environment;
+- reach what runs things outside it: your service manager, tmux, an ssh
+  agent, docker, and on macOS launchd and other apps;
+- touch varde's store. Each `varde` it runs is handed to the varde
+  outside, which does only what a session may: hooks, `note`, `recall`,
+  `new` (in its own project and sandbox), and reading its own project.
+  Changing a check, a loop or a sandbox, approving, scheduling and
+  starting things are yours.
+
+The network stays open, since the agent needs its model. Set
+`sandbox.on = true` (on macOS above all): then a round where no sandbox
+can start stops, rather than run without one, as it otherwise does. `varde sandbox`
+shows what it allows; `varde sandbox -- CMD` runs a command in it, to
+see; `varde doctor` checks that it, and the agent in it, start.
+
+A task or a recipe step picks its sandbox: `default`; `push`, which
+shows git's logins and your ssh agent, and which a `draft-pr` step gets;
+`off`; or one of yours. On macOS, check that `push` can push with
+`varde sandbox push -- git push --dry-run`.
+
+```toml
+# ~/.config/varde/config.toml
+[sandboxes.azure-read]
+write = ["~/.azure-reader"]                 # shown and writable: az refreshes its tokens there
+env = { AZURE_CONFIG_DIR = "~/.azure-reader" }
+pass = ["AZURE_SUBSCRIPTION_ID"]            # variables it keeps that look like a login
+deny = ["az * create*", "az * delete*", "az * update*", "az * set*", "az deployment *", "terraform apply*"]
+```
+
+```sh
+AZURE_CONFIG_DIR=~/.azure-reader az login       # once, as an identity with the Reader role only
+varde sandbox azure-read -- az group list       # see what it sees
+varde new "Move the app to the new subnet" --recipe change-plan --var sandbox=azure-read --start
+```
+
+The plan looks with the reader's login and ends in `CHECKLIST.md`: each
+change with its command, how to check it, and how to undo it. You make
+the changes. `deny` keeps the agent from a command it might run by
+mistake, but a script can still run one, so the real limit is what the
+login may do: give it the Reader role only.
+
+Where there is no sandbox (or with `sandbox.on = false`), a background
+session runs on what varde grants its agent. Claude may change files in
+its checkout, commit and run the check, and is refused everything else.
+pi asks before nothing, so it does not run in the background without a
+sandbox, unless you give the task the sandbox `off`.
+
+A round that leaves a git repository of its own in its checkout is
+flagged and its loop stops, set aside as `*.varde-held`: git you run
+there (your prompt, magit) would run what that repository's config
+names. So does a link it leaves out of the checkout to where a sandbox
+writes (a cache, temporary files, a git directory), which is removed. Look at it before you rename it back. Set
+`git config --global safe.bareRepository explicit` too (`varde doctor`
+asks): it keeps git from running a bare repository it finds, which work
+you land could carry as well.
+
+What it is not: a wall against a program set on getting out. A build
+cache it writes (a crate's source) is what you build from next, and the
+checkout's own scripts (`Makefile`, `package.json`) are yours to read
+before you run them. On macOS it is weaker than on Linux: sandbox-exec
+allows what it does not name, so a program set on it can still reach
+launchd and the keychain's service; and a round's processes can outlive
+it. On macOS, a repository under `~/Documents`,
+`~/Desktop` or iCloud Drive is closed to the heartbeat's sessions
+unless you give `varde` Full Disk Access; keep projects elsewhere.
 
 ## The board
 
@@ -262,6 +393,7 @@ shows them all.
 | `c` / `C` / `O` | Set its check / run it now / show what it last printed. |
 | `A` | Approve its work. |
 | `t` | Its loop, check and trail. |
+| `f` | Follow it at work, read-only. |
 | `M` | The profile it runs on. |
 | `r` | New tasks from a recipe, set going. |
 
@@ -386,7 +518,7 @@ agent = "claude"                  # or "pi"
 
 [agents.claude]
 command = ["claude"]              # e.g. a wrapper that ends in: exec claude "$@"
-background = []                   # added to a scheduled session, e.g. ["--permission-mode", "auto"]
+background = []                   # more arguments for a background session; varde's grant comes after
 
 [memory]
 enabled = true                    # false: no model calls
@@ -405,9 +537,9 @@ scope = "project"                 # or "all"
 [profiles]                        # an agent, a model and an effort, by name
 # deep = { model = "opus", effort = "xhigh" }
 # review = { agent = "pi", model = "openai/gpt-5", effort = "high" }
-# Claude's `auto` permission mode does not run on haiku: a haiku profile
-# that works in the background needs its own permission flags.
-# quick = { model = "haiku", effort = "medium", background = ["--permission-mode", "acceptEdits", "--allowedTools", "Bash(git add *) Bash(git commit *)"] }
+# On Vertex or Bedrock, pin what an alias means in your shell's profile,
+# before varde schedule --install: export ANTHROPIC_DEFAULT_SONNET_MODEL=claude-sonnet-4-6
+# (a model your project serves; varde doctor says which aliases need it)
 
 [roles]
 # work = "build"                  # what a task's sessions run on; default: the agent's own
@@ -416,6 +548,15 @@ review = "review"                 # what a check's review runs on
 [loops]
 parallel = 3                      # background rounds and checks at once
 check_minutes = 30                # a check that takes longer is an error
+
+[sandbox]
+# on = true                       # default: on where the system has one; false: none
+write = []                        # more every sandbox may write, e.g. "~/.m2"
+hide = []                         # more logins every sandbox hides
+
+pass = []                         # variables every sandbox keeps that look like a login
+
+# [sandboxes.NAME]                # yours: show, write (shown too), env, pass, deny
 
 [keys]                            # rebind a board key by action
 # park = "p"

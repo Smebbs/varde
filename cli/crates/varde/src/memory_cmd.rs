@@ -22,6 +22,7 @@ pub fn note(paths: &Paths, run: Option<String>, text: &[String]) -> Result<()> {
         .context("which run? pass --run <id>; the session's varde context names it")?;
     let store = paths.open(BUSY)?;
     let run = resolve_run(&store.conn, &run)?;
+    crate::sandbox::own_run(&run)?;
     let (_, redacted) = memory::add_note(&store, &run, &text.join(" "), now_ms())?;
     let state: Option<String> = store
         .conn
@@ -95,7 +96,17 @@ pub fn recall(paths: &Paths, words: &[String], all: bool, dir: Option<PathBuf>, 
     // A session varde launched or tracks carries its run.
     let run = crate::run_env();
     let asker = memory::Asker { source: if run.is_some() { "agent" } else { "user" }, run: run.as_deref() };
-    let found = memory::recall(&store, &words.join(" "), scope.as_deref(), None, 10, asker, now_ms())?;
+    let mut found = memory::recall(&store, &words.join(" "), scope.as_deref(), None, 10, asker, now_ms())?;
+    // A session in a sandbox recalls its own project, with nothing else
+    // to fall back on.
+    if crate::sandbox::inside() {
+        if found.everywhere {
+            found.hits.clear();
+            found.everywhere = false;
+        }
+        // Nor, by a task's id, another project's.
+        found.hits.retain(|h| h.project.is_none() || h.project == scope);
+    }
     if as_json {
         println!("{}", json!({"v": 1, "hits": found.hits, "everywhere": found.everywhere}));
         return Ok(());

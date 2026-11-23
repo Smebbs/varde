@@ -1,0 +1,25 @@
+# Large work: a spec and a plan of pieces you approve; then the pieces are
+# built at the same time, each in its own worktree until its check passes,
+# merged by a last step and checked whole.
+label = "epic"
+description = "A spec and a plan of pieces you approve; built at once, each until green, then merged and checked whole."
+
+[vars.check]
+description = "The command that checks the whole: give it, or set git config varde.check."
+required = true
+
+[[steps]]
+id = "plan"
+title = "{{title}}"
+profile = "deep"
+gate = "approved"
+output = "trail"
+check = { cmd = "varde recipe check trail.toml" }
+loop = { max = 2 }
+prompt = """
+Plan this work. First write SPEC.md: what it does, what it does not, the
+pieces, and how each is tested. Then write the plan of pieces, as said
+below. The whole is checked by `{{check}}`; give each piece the narrowest
+command that checks it. Write no code beyond the plan.
+
+{{context}}"""

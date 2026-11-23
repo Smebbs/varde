@@ -1,7 +1,7 @@
 # A feature: a short spec you approve, then built in a loop until its tests
-# pass, then reviewed by another model.
+# pass and another model approves, then made simpler the same way.
 label = "feature"
-description = "A spec you approve, then built until its tests pass, then reviewed."
+description = "A spec you approve, built until its tests pass and a review agrees, then simplified."
 
 [vars.check]
 description = "The command that runs the tests; git config varde.check when left out."
@@ -30,3 +30,15 @@ Build what SPEC.md describes, with tests for it.
 
 {{context}}"""
 check = { cmd = "{{check}}", review = true }
+
+[[steps]]
+id = "simplify"
+needs = ["build"]
+title = "Simplify: {{title}}"
+profile = "build"
+prompt = """
+Make the change on this branch simpler without changing what it does:
+remove what it does not need, fold what repeats, and match the code around
+it. Change no test; the tests must still pass."""
+check = { cmd = "{{check}}", review = true }
+loop = { max = 2 }

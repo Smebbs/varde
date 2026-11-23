@@ -2157,13 +2157,19 @@ the question, or nil."
 
 (defconst org-varde-test--flow
   (concat ",\"flow\":{\"profile\":\"fast\",\"recipe\":\"bugfix@abc\",\"before\":[\"T0000000000000000000NEXT11\"],"
-          "\"check\":{\"cmd\":\"cargo test\",\"review\":false,\"guard\":[\"tests/*\"],\"again\":1,\"running\":false},"
+          "\"check\":{\"cmd\":\"cargo test\",\"review\":false,\"guard\":[\"tests/*\"],\"again\":1,\"running\":false,"
+          "\"words\":\"`cargo test`; guarding tests/*\"},"
+          "\"sandbox\":{\"name\":\"default\",\"words\":\"default, in bwrap\"},"
           "\"last_check\":{\"verdict\":\"fail\",\"summary\":\"1 failed\",\"finished\":1760000000000,\"output\":\"/tmp/out.log\"},"
           "\"loop\":{\"def\":{\"max\":3,\"escalate\":[\"deep\"]},"
-          "\"state\":{\"state\":\"due\",\"round\":2,\"profile\":\"deep\"},"
+          "\"state\":{\"state\":\"due\",\"round\":3,\"profile\":\"deep\"},\"words\":\"round 3 next, on deep\","
           "\"rounds\":[{\"run\":\"RUN1\",\"n\":1,\"started\":1760000000000,\"ended\":1760000180000,"
-          "\"live\":false,\"asked\":false,\"profile\":\"fast\"}],"
-          "\"checks\":[{\"run\":\"RUN1\",\"verdict\":\"fail\",\"summary\":\"1 failed\",\"output\":\"/tmp/r1.log\"}]},"
+          "\"live\":false,\"asked\":false,\"profile\":\"fast\"},"
+          "{\"run\":\"RUN2\",\"turn\":7,\"n\":2,\"started\":1760000200000,\"ended\":1760000260000,"
+          "\"live\":false,\"asked\":false}],"
+          "\"checks\":[{\"id\":5,\"run\":\"RUN1\",\"verdict\":\"fail\",\"summary\":\"1 failed\",\"output\":\"/tmp/r1.log\"},"
+          "{\"id\":7,\"run\":\"RUN2\",\"verdict\":\"fail\",\"summary\":\"2 failed\",\"output\":\"/tmp/r2.log\"},"
+          "{\"id\":8,\"run\":\"RUN2\",\"verdict\":\"pass\",\"output\":\"/tmp/r3.log\"}]},"
           "\"after\":[{\"after\":\"T0000000000000000000PREV11\",\"kind\":\"approved\",\"met\":true}]}")
   "A task's check, loop and trail, as `varde show --json' has them.")
 
@@ -2171,10 +2177,13 @@ the question, or nil."
   (org-varde-test-with-varde
     (let ((org-varde-test--shown (concat (string-remove-suffix "}" org-varde-test--shown) org-varde-test--flow "}")))
       (org-varde-test--viewing
-        (should (string-match-p "^Loop · round 2 next, on deep$" (buffer-string)))
+        (should (string-match-p "^Loop · round 3 next, on deep$" (buffer-string)))
         (should (string-match-p "runs on fast · made from recipe bugfix@abc" (buffer-string)))
-        (should (string-match-p "Check  `cargo test` · guarding tests/\\*" (buffer-string)))
+        (should (string-match-p "Check  `cargo test`; guarding tests/\\*" (buffer-string)))
+        (should (string-match-p "Sandbox  default, in bwrap" (buffer-string)))
         (should (string-match-p "#1  fast      3m  ✗ 1 failed" (buffer-string)))
+        ;; A turn of a session of yours, by the check that made it a round.
+        (should (string-match-p "#2  -         1m  ✗ 2 failed" (buffer-string)))
         (should (string-match-p "after ✓ prev11 · your approval" (buffer-string)))
         (should (string-match-p "then next11" (buffer-string)))
         ;; RET on a round opens that session; O what its check printed.
@@ -2227,14 +2236,14 @@ the question, or nil."
         (org-varde-approve))
       (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "fast")))
         (org-varde-set-profile))
-      (let ((answers '("cargo test" "" "tests/*")))
+      (let ((answers '("cargo test" "" "use /verify-app" "tests/*")))
         (cl-letf (((symbol-function 'read-string) (lambda (&rest _) (pop answers)))
                   ((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
           (org-varde-check))))
     (let ((calls (org-varde-test-calls)))
       (should (member (format "approve %s" org-varde-test--id) calls))
       (should (member (format "set %s --profile fast" org-varde-test--id) calls))
-      (should (member (format "check %s --review --guard tests/* -- cargo test" org-varde-test--id) calls)))))
+      (should (member (format "check %s --review --verify use /verify-app --guard tests/* -- cargo test" org-varde-test--id) calls)))))
 
 (ert-deftest org-varde-trail-draws-a-tree-and-shows-its-tasks ()
   (org-varde-test-with-varde

@@ -23,7 +23,7 @@ fn bin() -> String {
 /// "parentSession"?}`.
 fn header(transcript: &Path) -> Option<Value> {
     let mut line = String::new();
-    BufReader::new(std::fs::File::open(transcript).ok()?).read_line(&mut line).ok()?;
+    BufReader::new(crate::open_transcript(transcript).ok()?).read_line(&mut line).ok()?;
     let v: Value = serde_json::from_str(&line).ok()?;
     (v.get("type").and_then(Value::as_str) == Some("session")).then_some(v)
 }
@@ -109,6 +109,55 @@ impl Agent for Pi {
         bin()
     }
 
+    /// pi asks before no tool, so there is nothing to grant; but nor can
+    /// it be kept from a command, which only a sandbox's files bound.
+    fn unattended(&self, argv: Vec<String>, grant: &crate::Grant) -> Result<Vec<String>, String> {
+        if !grant.deny.is_empty() {
+            return Err(format!(
+                "pi cannot be kept from a command, and this sandbox denies {}: run it on another agent",
+                grant.deny.join(", ")
+            ));
+        }
+        if !grant.fenced && !grant.trusted {
+            return Err("pi asks before nothing, so with no sandbox here it would run as you: give it one \
+                        (varde doctor says how), or give the task the sandbox off to let it"
+                .into());
+        }
+        Ok(argv)
+    }
+
+    /// Its own, and the keys of the providers it reaches.
+    fn env(&self) -> Vec<String> {
+        [
+            "PI_",
+            "OPENAI_",
+            "ANTHROPIC_",
+            "GEMINI_",
+            "GOOGLE_",
+            "OPENROUTER_",
+            "GROQ_",
+            "XAI_",
+            "MISTRAL_",
+            "CEREBRAS_",
+            "AZURE_OPENAI_",
+        ]
+        .map(String::from)
+        .to_vec()
+    }
+
+    /// Its sessions and its login, under `$PI_CODING_AGENT_DIR`, else
+    /// `~/.pi/agent`; not its settings or extensions, which later
+    /// sessions run.
+    fn writes(&self, _cwd: &Path) -> Vec<std::path::PathBuf> {
+        let dir = std::env::var_os("PI_CODING_AGENT_DIR")
+            .filter(|d| !d.is_empty())
+            .map(std::path::PathBuf::from)
+            .unwrap_or_else(|| crate::home(".pi/agent"));
+        let sessions = dir.join("sessions");
+        let _ = std::fs::create_dir_all(&sessions);
+        vec![sessions, dir.join("auth.json")]
+    }
+
     fn launch(&self, how: Launch) -> (Vec<String>, Vec<(String, String)>) {
         let mut argv = vec![bin()];
         let s = |x: &str| x.to_string();
@@ -160,6 +209,17 @@ impl Agent for Pi {
             let ts = crate::tools::when(&v["timestamp"]).or_else(|| crate::tools::when(&m["timestamp"]));
             crate::calls(&m["content"], "toolCall", "arguments", &["edit", "write"], ts)
         })
+    }
+
+    fn follow(&self, line: &str) -> Vec<String> {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { return Vec::new() };
+        let m = &v["message"];
+        match (v["type"].as_str(), m["role"].as_str()) {
+            (Some("message"), Some(role @ ("user" | "assistant"))) => {
+                crate::shown(role, &m["content"], "toolCall", "arguments")
+            }
+            _ => Vec::new(),
+        }
     }
 
     fn interrupted(&self, line: &str) -> bool {
@@ -303,6 +363,19 @@ mod tests {
         assert_eq!(n.cwd.as_deref(), Some("/repo"));
         assert_eq!(n.transcript.as_deref(), Some("/p/s1.jsonl"));
         assert!(Pi.normalize("agent_settled", &json!({"session_id": ""})).is_none());
+    }
+
+    #[test]
+    fn pi_cannot_be_kept_from_a_command_so_a_deny_refuses() {
+        let argv = vec!["pi".to_string(), "-p".to_string()];
+        let fenced = crate::Grant { fenced: true, ..Default::default() };
+        assert_eq!(Pi.unattended(argv.clone(), &fenced).unwrap(), argv);
+        assert!(Pi
+            .unattended(argv.clone(), &crate::Grant::default())
+            .unwrap_err()
+            .contains("no sandbox here"));
+        let deny = crate::Grant { fenced: true, deny: vec!["rm *".into()], ..Default::default() };
+        assert!(Pi.unattended(argv, &deny).unwrap_err().contains("cannot be kept from a command"));
     }
 
     #[test]

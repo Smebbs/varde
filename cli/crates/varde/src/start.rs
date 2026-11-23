@@ -266,15 +266,11 @@ const UNLAUNCHED_MS: i64 = 60_000;
 /// How long a worktree's setup may run before the run counts as gone.
 const SETUP_MS: i64 = 10 * 60_000;
 
-/// [`prepare`], for a start of yours: a session of yours on a task that
-/// loops takes it over, and the loop pauses until `varde loop` resumes it.
+/// [`prepare`], for a start of yours. A session of yours on a task that
+/// loops attends the loop: it goes on in your session, a turn a round
+/// (`flow::attend`), and in the background again once you leave.
 pub fn yours(store: &mut Store, task_id: &str, opts: Options, interactive: bool) -> Result<Outcome> {
-    let outcome = prepare(store, task_id, opts, interactive)?;
-    // Said on its row (`↺ paused`), not here: the board owns its screen.
-    if matches!(outcome, Outcome::Ready { .. } | Outcome::Focus { .. }) {
-        crate::flow::taken_over(store, task_id)?;
-    }
-    Ok(outcome)
+    prepare(store, task_id, opts, interactive)
 }
 
 pub fn prepare(store: &mut Store, task_id: &str, opts: Options, interactive: bool) -> Result<Outcome> {

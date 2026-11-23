@@ -4,6 +4,100 @@ Notable changes to varde and org-varde.
 
 ## Unreleased
 
+## 1.6.0-beta3 - 2026-11-23
+
+Still a beta. Background sessions now run in a sandbox, a loop carries
+on while you are in it, and large work can fan out to several sessions.
+
+### Added
+
+- The sandbox: background sessions (rounds, trail steps, schedules) and
+  every check run in the system's own sandbox, bubblewrap on Linux and
+  `sandbox-exec` on macOS, around any agent. Inside, the agent asks
+  nothing, and it can write only its checkout, its session files,
+  temporary files and build caches, and commit (unsigned). It
+  cannot read your logins (ssh, gpg, cloud CLIs, gh, git credentials,
+  browsers, tokens in the environment), reach what runs things outside it
+  (your service manager, tmux, an ssh agent, docker), or touch varde's
+  store: its varde hands each command to the varde outside, which runs
+  only what a session may (hooks, `note`, `recall`, `new`, reading). `varde sandbox [NAME] [-- CMD]` shows one or runs
+  a command in it, and `varde doctor` checks it starts. Built in:
+  `default`, `push` (shows git's logins; a `draft-pr` step gets it) and
+  `off`. Yours go under `[sandboxes.NAME]` with `show`, `write`, `env`
+  `pass` and `deny`. A task picks one with `new --sandbox` or `set --sandbox`,
+  and a recipe step with `sandbox`.
+- In a sandbox a session's commits go to a quarantine of their own, and
+  varde brings them into the repository re-hashed when it is done, as a
+  push is received: nothing it writes can change `main`. A repository it
+  leaves inside its checkout, however deep, bare or hidden, is set aside
+  (`*.varde-held`) and flagged, and a link out of the checkout to where
+  a sandbox writes (a cache, temporary files, a git directory) is
+  removed. Pipes it leaves for git to wait on are removed, and git varde
+  runs stops after two minutes. Hooks kept in the checkout (husky's) are
+  read-only to it. `varde doctor` asks for `safe.bareRepository =
+  explicit`.
+- What a session with nobody at it may do is one grant, which each
+  agent's adapter says its own way. With no sandbox, Claude may change
+  files in its checkout, commit and run its check. pi cannot be kept
+  from a command or asked before a tool, so it runs in the background
+  only in a sandbox that denies nothing, or with the sandbox `off`; else
+  the loop stops, saying why.
+- A check's guard is read-only to background sessions in a sandbox:
+  they cannot edit the tests they are checked by, rather than being
+  flagged after they did.
+- Checks: `--verify "FILE or text"` (and `verify` in a recipe's check)
+  has an agent verify the work once the command passes: a fresh session
+  on the review profile, in the task's sandbox, with its tools and your
+  skills ("run it and use /verify-app"). Its last line, PASS or FAIL,
+  decides, and what it touched to look is put back.
+- The Claude plugin brings a skill, `varde-loops`: asked to loop work,
+  verify it, split it or make it a recipe, a session sets it up with
+  varde. pi can link it from `cli/plugin/skills/`.
+- `varde follow <task>` (`f` on both boards) watches a task's sessions
+  at work, read-only: what each says, its tools, each check, the next
+  round.
+- Opening a looping task takes the loop over instead of pausing it.
+  Each of your turns that changes files is checked as it ends, and a
+  failure comes back into your session (`↺ 2/3 with you`). The loop
+  goes on in the background when you leave.
+- Recipes: `epic`, where a plan you approve becomes a trail of pieces
+  built at once, each in its own worktree until green, then merged and
+  checked whole; and `change-plan`, which looks at a live system from a
+  read-only sandbox and writes `CHECKLIST.md` for you to apply. A step
+  whose `output` is `trail` writes `trail.toml`, and approving it makes
+  those tasks. `feature` gains a simplify step. `varde new --recipe`
+  takes `--after`.
+- A step after several others is told to merge their branches.
+
+### Changed
+
+- The store moves to schema 12.
+- Scheduled tasks now run in the sandbox too. One that needs a login it
+  hides (`gh`, `az`, ssh) needs `varde set <task> --sandbox push`, or a
+  sandbox of yours that shows it.
+- The heartbeat carries your agent's provider settings
+  (`CLAUDE_CODE_USE_VERTEX`, `ANTHROPIC_*`, `AWS_*`, `GOOGLE_*`,
+  `CLOUD_ML_*` and the proxies) and a `PATH` without temporary entries.
+  It says which secrets it left out, and `doctor` says when it lacks
+  what your shell has.
+- `doctor` says when a profile's alias may name a model your Vertex or
+  Bedrock project does not serve, and how to pin it
+  (`ANTHROPIC_DEFAULT_SONNET_MODEL`).
+- A profile's `background` arguments are gone: the grant replaces them.
+  Remove `background = …` from your `[profiles]` (a profile with it is
+  ignored, with a warning), and `["--permission-mode", "auto"]` from
+  `[agents.claude] background`, which the grant now overrides. The
+  agent's `background` arguments come before the grant, which wins
+  where they set the same thing.
+- A rubric given as a file is read when you set it and kept as text. One
+  set as a file in 1.6.0-beta2 is kept as its path: set it again.
+- A recipe whose check command comes out empty is refused, rather than
+  run on a review alone.
+- `varde after` a task with no check waits on your approval of it, which
+  can happen, rather than on its check, which cannot.
+- `varde show --json` gives the loop's and the check's words, which
+  Emacs shows as they are.
+
 ## 1.6.0-beta2 - 2026-11-23
 
 A beta: loops and trails are new, and with the steward they may change

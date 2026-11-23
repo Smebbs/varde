@@ -2,7 +2,7 @@
 //! names, payload fields, flags and file layout — lives behind `Agent`,
 //! so the core never names an agent.
 
-use std::path::Path;
+use std::path::{Path, PathBuf};
 
 use serde_json::Value;
 use varde_core::event::{Kind, Norm};
@@ -77,6 +77,52 @@ pub trait Agent {
         argv
     }
 
+    /// `argv`, a background launch's, kept to `grant`: what it may do
+    /// with nobody there to ask. `Err` says why this agent cannot keep to
+    /// it, and the session does not start.
+    fn unattended(&self, argv: Vec<String>, grant: &Grant) -> Result<Vec<String>, String>;
+
+    /// Where a session of the agent in `dir` writes as it works (its
+    /// transcript, its login refreshed), which a sandbox must leave it.
+    fn writes(&self, dir: &Path) -> Vec<PathBuf>;
+
+    /// What else under its directory every session shares and writes:
+    /// a sandbox gives a session its own, empty, where it can, so it reads
+    /// and leaves nothing of another's. `true` for what the agent also
+    /// runs (a shell script it sources): read-only where it cannot.
+    fn private(&self) -> Vec<(PathBuf, bool)> {
+        Vec::new()
+    }
+
+    /// What the agent reads to reach its model that a sandbox hides, as
+    /// the environment says: a cloud login, and whether it writes there.
+    fn reads(&self) -> Vec<(PathBuf, bool)> {
+        Vec::new()
+    }
+
+    /// The variables the agent reaches its model with, by name or prefix:
+    /// what the heartbeat carries, and what a sandbox keeps of what it
+    /// would drop as a login (keys among them).
+    fn env(&self) -> Vec<String>;
+
+    /// The variables its hooks are told who they run for by, which a
+    /// sandboxed session's varde passes on to the varde outside.
+    fn hook_env(&self) -> &'static [&'static str] {
+        &[]
+    }
+
+    /// The model it runs for one of the profiles varde ships (`quick`,
+    /// `build`, `deep`, `review`): `None` for its own default.
+    fn tier(&self, _profile: &str) -> Option<&'static str> {
+        None
+    }
+
+    /// What is wrong with running on `model`, as the environment says:
+    /// an alias a cloud provider resolves to a model it does not serve.
+    fn model_warning(&self, _model: &str) -> Option<String> {
+        None
+    }
+
     /// `argv`, a launch's, on `model` at `effort`, as a profile asks:
     /// Claude's `--model` and `--effort`, pi's `--model` and `--thinking`.
     fn tuned(&self, mut argv: Vec<String>, model: Option<&str>, effort: Option<&str>) -> Vec<String> {
@@ -110,6 +156,14 @@ pub trait Agent {
     /// characters. Returns the digest (empty when there was no
     /// conversation) and the position it read up to.
     fn digest(&self, transcript: &Path, from: u64, budget: usize) -> std::io::Result<(String, u64)>;
+
+    /// A transcript line as `varde follow` shows it: what the session
+    /// said, the tools it called and what it was asked; nothing for a
+    /// line that is none of those.
+    fn follow(&self, line: &str) -> Vec<String> {
+        let _ = line;
+        Vec::new()
+    }
 
     /// Whether a transcript line records the user interrupting a turn.
     /// Agents send no event for that, so `varde run` watches for it.
@@ -197,6 +251,42 @@ pub trait Agent {
     }
 }
 
+/// What a session with nobody at it may do without asking (design
+/// §6.8). varde decides it; each adapter says it in its agent's terms.
+#[derive(Debug, Clone, Default)]
+pub struct Grant {
+    /// It runs inside varde's sandbox, which bounds what it can reach:
+    /// it may use every tool, and asks nothing.
+    pub fenced: bool,
+    /// The user turned the sandbox off for it: it runs as they let it.
+    pub trusted: bool,
+    /// Outside one, the commands it may run, besides changing files in its
+    /// directory and `git add` and `git commit`: the check's.
+    pub commands: Vec<String>,
+    /// Commands it must never run, sandbox or not: patterns of the whole
+    /// command line, `*` standing for any text.
+    pub deny: Vec<String>,
+}
+
+/// A transcript, opened to read: a regular file, never through a link a
+/// session in a sandbox put in its place (to another's transcript).
+pub fn open_transcript(path: &Path) -> std::io::Result<std::fs::File> {
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(path)?;
+    if !f.metadata()?.is_file() {
+        return Err(std::io::Error::other("not a file"));
+    }
+    Ok(f)
+}
+
+/// `$HOME`, joined with `rel`.
+pub(crate) fn home(rel: &str) -> PathBuf {
+    PathBuf::from(std::env::var_os("HOME").unwrap_or_default()).join(rel)
+}
+
 /// A headless call's reply.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Answer {
@@ -270,4 +360,50 @@ pub fn by_name(name: &str) -> Option<Box<dyn Agent>> {
         "pi" => Some(Box::new(Pi)),
         _ => None,
     }
+}
+
+/// One message's `content` as `varde follow` shows it: its text, each
+/// tool call (`tool` is how the agent tags one, `input` where its
+/// arguments are) as `→ Name what`, and for `user` what it asked.
+pub(crate) fn shown(role: &str, content: &Value, tool: &str, input: &str) -> Vec<String> {
+    let clip = |s: &str, n: usize| -> String {
+        let s = s.trim();
+        if s.chars().count() <= n {
+            s.to_string()
+        } else {
+            s.chars().take(n - 1).chain(['…']).collect()
+        }
+    };
+    let mut out = Vec::new();
+    let blocks: Vec<Value> = match content {
+        Value::String(s) => vec![serde_json::json!({"type": "text", "text": s})],
+        Value::Array(a) => a.clone(),
+        _ => return out,
+    };
+    for b in &blocks {
+        match b["type"].as_str() {
+            Some("text") => {
+                let t = b["text"].as_str().unwrap_or("").trim();
+                // What the CLI writes as the user, of its own: not asked.
+                if t.is_empty() || (role == "user" && t.starts_with('<')) {
+                    continue;
+                }
+                if role == "user" {
+                    out.push(format!("» {}", clip(t, 300)));
+                } else {
+                    out.extend(t.lines().map(|l| format!("  {l}")));
+                }
+            }
+            Some(t) if t == tool => {
+                let args = &b[input];
+                let what = ["command", "file_path", "path", "pattern", "description", "url", "query"]
+                    .iter()
+                    .find_map(|k| args[*k].as_str())
+                    .unwrap_or("");
+                out.push(format!("→ {} {}", b["name"].as_str().unwrap_or("?"), clip(what, 120)));
+            }
+            _ => {}
+        }
+    }
+    out
 }

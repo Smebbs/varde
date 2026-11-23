@@ -104,7 +104,7 @@ impl App<'_> {
         match act {
             Act::Loop => match state {
                 Some("paused") => self.message = said(varde(&["loop", &id])),
-                Some("working" | "checking" | "due") => {
+                Some("working" | "checking" | "due" | "attended") => {
                     self.message = format!("{}; L again resumes it", said(varde(&["loop", &id, "--pause"])))
                 }
                 // None yet, or it stopped: what it loops until, to set it going.
@@ -174,6 +174,8 @@ impl App<'_> {
                             "made from ",
                             "Check ",
                             "Loop ",
+                            "Sandbox ",
+                            "Plan ",
                             "Trail ",
                             "        #",
                             "        last ",

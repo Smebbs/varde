@@ -76,6 +76,23 @@ pub fn run(paths: &Paths, agent: &str, event: &str) {
     let _ = writeln!(std::io::stdout(), "{reply}");
 }
 
+/// Whether `native` is the session of the run a sandboxed session's
+/// varde claims: that run's own id, or, before it has one, no other run's.
+fn own_session(paths: &Paths, native: &str) -> Result<bool> {
+    let Some(run) = crate::run_env() else { return Ok(false) };
+    let store = paths.open(BUSY)?;
+    let mine: Option<String> =
+        store.conn.query_row("SELECT native_id FROM run WHERE id = ?1", [&run], |r| r.get(0)).optional()?;
+    Ok(match mine.filter(|n| !n.is_empty()) {
+        Some(n) => n == native,
+        None => !store.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM run WHERE native_id = ?1 AND id != ?2)",
+            [native, run.as_str()],
+            |r| r.get::<_, bool>(0),
+        )?,
+    })
+}
+
 /// Records the event; returns the agent's reply handing the session
 /// context, if any.
 fn record(paths: &Paths, agent_name: &str, event: &str, input: &str) -> Result<Option<Value>> {
@@ -85,9 +102,17 @@ fn record(paths: &Paths, agent_name: &str, event: &str, input: &str) -> Result<O
     // `keep` drops the tool's input. A question is no event of its own.
     let asked = agent.asked(event, &payload);
     if let Some(q) = asked.as_ref().filter(|a| a.kind == steward::Kind::Question) {
+        if crate::sandbox::inside() && !own_session(paths, &q.session)? {
+            return Ok(None);
+        }
         return question(paths, &*agent, q);
     }
     let Some(norm) = agent.normalize(event, &payload) else { return Ok(None) };
+    // From a session in a sandbox, only events of its own run: one naming
+    // another session could reopen that task and be handed its memory.
+    if crate::sandbox::inside() && !own_session(paths, &norm.native_id)? {
+        return Ok(None);
+    }
     let asked = asked.filter(|_| norm.kind == Kind::Blocked);
     let kept = agent.keep(payload);
     let now = now_ms();
@@ -191,6 +216,13 @@ fn record(paths: &Paths, agent_name: &str, event: &str, input: &str) -> Result<O
         let ended = matches!(norm.kind, Kind::TurnEnd { agents: 0, .. } | Kind::Ended);
         if ended && varde_core::message::owed(&store.conn, &run, now)? {
             crate::detach(&["reply", &run], "the reply")?;
+        }
+        // A turn of yours on a task that loops: its check, then the
+        // failure as your session's next prompt (an attended loop).
+        if matches!(norm.kind, Kind::TurnEnd { agents: 0, .. }) {
+            if let Some(task) = crate::flow::attended_turn(&store.conn, &run)? {
+                crate::detach(&["verify", &task, "--run", &run], "a check")?;
+            }
         }
         // Messages left for the task while its session ran.
         let said = match norm.kind {

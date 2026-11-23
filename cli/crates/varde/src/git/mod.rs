@@ -3,7 +3,7 @@
 
 use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::Command;
 
 use anyhow::{bail, Context, Result};
 
@@ -15,15 +15,239 @@ pub fn git(dir: &Path, args: &[&str]) -> Result<String> {
     git_env(dir, args, &[])
 }
 
-/// `git -C dir args`, which never prompts.
+/// Settings for every git varde runs: a checkout a sandboxed session
+/// wrote may hold a repository of its own, whose config git would read,
+/// and run what it names (`core.fsmonitor`), as you.
+pub const SAFE: [&str; 4] = ["-c", "core.fsmonitor=false", "-c", "diff.ignoreSubmodules=all"];
+
+/// `git -C dir args`, which never prompts, and never looks into a
+/// repository inside the checkout (`--ignore-submodules`, which a
+/// `.gitmodules` cannot undo as it can the config).
 pub fn command(dir: &Path, args: &[&str]) -> Command {
     let mut c = Command::new("git");
-    c.arg("-C").arg(dir).args(args).env("GIT_TERMINAL_PROMPT", "0");
+    // No object fetched on demand: a repository's config would name the
+    // program that fetches it.
+    c.args(SAFE).arg("-C").arg(dir).env("GIT_TERMINAL_PROMPT", "0").env("GIT_NO_LAZY_FETCH", "1");
+    c.stdin(std::process::Stdio::null());
+    // The subcommand is the first word not an option of git's own.
+    let sub = args.iter().position(|a| !a.starts_with('-'));
+    match sub {
+        Some(i) if matches!(args[i], "status" | "diff" | "diff-index" | "diff-files") => {
+            // Asked to look into submodules, it reads only where each
+            // points (`dirty`): their files, and so their config, never,
+            // whatever the checkout holds. Last, so nothing undoes it.
+            let into =
+                args.iter().any(|a| a.starts_with("--ignore-submodules") && *a != "--ignore-submodules=all");
+            let rest: Vec<&str> =
+                args[i + 1..].iter().copied().filter(|a| !a.starts_with("--ignore-submodules")).collect();
+            c.args(&args[..=i]).args(&rest);
+            c.arg(if into { "--ignore-submodules=dirty" } else { "--ignore-submodules=all" });
+        }
+        _ => {
+            c.args(args);
+        }
+    }
     c
 }
 
+/// Where varde keeps the mark of a checkout a sandboxed session worked
+/// in, by its path: beside the store, out of the session's reach.
+fn mark(dir: &Path) -> PathBuf {
+    let real = dir.canonicalize().unwrap_or(dir.to_path_buf());
+    let key: String =
+        real.display().to_string().chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    crate::Paths::from_env().home.join("untrusted").join(key)
+}
+
+/// Mark the checkout `dir` as one a sandboxed session worked in: varde
+/// runs no git inside a repository it holds.
+pub fn distrust(dir: &Path) {
+    let m = mark(dir);
+    if let Some(d) = m.parent() {
+        let _ = std::fs::create_dir_all(d);
+    }
+    let _ = std::fs::write(m, "");
+}
+
+/// Whether a sandboxed session worked in the checkout `dir`, or in one
+/// holding it (a session may run below its checkout's top).
+pub fn untrusted(dir: &Path) -> bool {
+    untrusted_root(dir).is_some()
+}
+
+/// The checkout a sandboxed session worked in that holds `dir`: the
+/// outermost marked, as marked before the session ran, whatever it made
+/// below (a `.git` of its own) since.
+pub fn untrusted_root(dir: &Path) -> Option<PathBuf> {
+    let real = dir.canonicalize().unwrap_or(dir.to_path_buf());
+    // Only a checkout: a directory of many (one a command was tried in)
+    // is not one to walk.
+    real.ancestors().filter(|a| a.join(".git").exists() && mark(a).exists()).last().map(Path::to_path_buf)
+}
+
+/// Repositories in the checkout `dir` other than its own, by path: a
+/// gitlink, or an untracked directory with a `.git`. Found by reading
+/// only the index and the directory, which runs nothing of theirs.
+/// `foreign` keeps only those whose `.git` is a directory, or a file
+/// pointing anywhere but the repository's own `modules/`, where a
+/// submodule's lives.
+pub fn nested(dir: &Path, foreign: bool) -> Vec<String> {
+    let mut found: Vec<String> = git(dir, &["ls-files", "-s"])
+        .unwrap_or_default()
+        .lines()
+        .filter(|l| l.starts_with("160000"))
+        .filter_map(|l| l.split_once('\t').map(|(_, p)| p.to_string()))
+        .collect();
+    found.extend(
+        git(dir, &["ls-files", "-o", "--exclude-standard"])
+            .unwrap_or_default()
+            .lines()
+            .filter(|p| p.ends_with('/'))
+            .map(|p| p.trim_end_matches('/').to_string())
+            .filter(|p| dir.join(p).join(".git").exists()),
+    );
+    // Only what is in the checkout: no path through a link out of it.
+    found.retain(|p| {
+        let mut at = dir.to_path_buf();
+        Path::new(p).components().all(|c| {
+            at.push(c);
+            matches!(c, std::path::Component::Normal(_))
+                && std::fs::symlink_metadata(&at).is_ok_and(|m| !m.file_type().is_symlink())
+        })
+    });
+    if !foreign {
+        return found;
+    }
+    let modules = git(dir, &["rev-parse", "--path-format=absolute", "--git-common-dir"])
+        .ok()
+        .and_then(|c| PathBuf::from(c).join("modules").canonicalize().ok());
+    found
+        .into_iter()
+        .filter(|p| {
+            let git = dir.join(p).join(".git");
+            if git.is_dir() {
+                return true;
+            }
+            let Some(text) = small_text(&git) else { return false };
+            let target = text.trim().strip_prefix("gitdir:").map(|t| dir.join(p).join(t.trim()));
+            let target = target.and_then(|t| t.canonicalize().ok());
+            !matches!((target, &modules), (Some(t), Some(m)) if t.starts_with(m))
+        })
+        .collect()
+}
+
+/// How long a git varde runs may take: one that waits on something a
+/// session left (a pipe) is stopped rather than waited on for ever.
+const GIT_LIMIT: std::time::Duration = std::time::Duration::from_secs(120);
+
+/// How much of what git prints varde keeps: a listing of what a session
+/// made, larger, is not read on into memory.
+const GIT_OUTPUT: u64 = 256 << 20;
+
+/// `cmd`'s output, stopped after `GIT_LIMIT`, or once it has printed more
+/// than `GIT_OUTPUT` (no longer read, it stops on its closed pipe).
+pub fn bounded(cmd: &mut Command) -> Result<std::process::Output> {
+    use std::io::Read;
+    use std::process::Stdio;
+    let mut child = cmd.stdout(Stdio::piped()).stderr(Stdio::piped()).spawn().context("running git")?;
+    let (out, err) = (child.stdout.take(), child.stderr.take());
+    let read = |s: Option<Box<dyn Read + Send>>| {
+        std::thread::spawn(move || {
+            let mut o = Vec::new();
+            let _ = s.map(|s| s.take(GIT_OUTPUT + 1).read_to_end(&mut o));
+            o
+        })
+    };
+    let reader = read(out.map(|s| Box::new(s) as Box<dyn Read + Send>));
+    let err_reader = read(err.map(|s| Box::new(s) as Box<dyn Read + Send>));
+    let started = std::time::Instant::now();
+    let status = loop {
+        if let Some(s) = child.try_wait()? {
+            break s;
+        }
+        if started.elapsed() > GIT_LIMIT {
+            let _ = child.kill();
+            let _ = child.wait();
+            bail!("git took over {} s, and was stopped", GIT_LIMIT.as_secs());
+        }
+        std::thread::sleep(std::time::Duration::from_millis(10));
+    };
+    let stdout = reader.join().unwrap_or_default();
+    let stderr = err_reader.join().unwrap_or_default();
+    if stdout.len() as u64 > GIT_OUTPUT {
+        bail!("git printed over {} MiB, and was not read on", GIT_OUTPUT >> 20);
+    }
+    Ok(std::process::Output { status, stdout, stderr })
+}
+
+/// Remove from the git directory `dir`, all through it, every pipe, what
+/// git would wait on for ever, and every link, which git makes none of
+/// there and would write through (a reflog appended to your shell's rc).
+/// (Not a socket: git's own fsmonitor keeps one there, and opening one
+/// fails at once.) A directory
+/// made unreadable or read-only, to keep one, is opened. How many were
+/// found, and how many of them stay.
+pub fn sweep(dir: &Path) -> (usize, usize) {
+    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    let open = |d: &Path| std::fs::set_permissions(d, std::fs::Permissions::from_mode(0o755));
+    let (mut found, mut left) = (0, 0);
+    let mut stack = vec![dir.to_path_buf()];
+    while let Some(d) = stack.pop() {
+        let entries = std::fs::read_dir(&d).or_else(|_| {
+            let _ = open(&d);
+            std::fs::read_dir(&d)
+        });
+        for e in entries.into_iter().flatten().flatten() {
+            let Ok(t) = e.file_type() else { continue };
+            // And a file linked in from elsewhere, which git, appending a
+            // reflog, would write through: git makes none of either here.
+            let pipe = t.is_fifo()
+                || t.is_symlink()
+                || (t.is_file() && e.metadata().is_ok_and(|m| std::os::unix::fs::MetadataExt::nlink(&m) > 1));
+            if t.is_dir() {
+                stack.push(e.path());
+            } else if pipe {
+                found += 1;
+                if std::fs::remove_file(e.path()).is_err() {
+                    let _ = open(&d);
+                    if std::fs::remove_file(e.path()).is_err() {
+                        left += 1;
+                    }
+                }
+            }
+        }
+    }
+    (found, left)
+}
+
+/// The text of a small regular file, never waited on and never followed
+/// through a link: `None` for anything else.
+pub fn small_text(path: &Path) -> Option<String> {
+    use std::io::Read;
+    use std::os::unix::fs::OpenOptionsExt;
+    let f = std::fs::OpenOptions::new()
+        .read(true)
+        .custom_flags(libc::O_NONBLOCK | libc::O_NOFOLLOW)
+        .open(path)
+        .ok()?;
+    if !f.metadata().ok()?.is_file() {
+        return None;
+    }
+    let mut text = String::new();
+    f.take(4096).read_to_string(&mut text).ok()?;
+    Some(text)
+}
+
+/// `add -A` of the checkout `dir`, but for the repositories inside it,
+/// whose filters adding them would run.
+pub fn add_all(dir: &Path) -> Vec<String> {
+    let mut args: Vec<String> = ["add", "-A", "--", "."].map(String::from).to_vec();
+    args.extend(nested(dir, false).into_iter().map(|p| format!(":(exclude){p}")));
+    args
+}
+
 fn git_env(dir: &Path, args: &[&str], env: &[(&str, &Path)]) -> Result<String> {
-    let out = command(dir, args).envs(env.iter().copied()).output().context("running git")?;
+    let out = bounded(command(dir, args).envs(env.iter().copied()))?;
     if !out.status.success() {
         bail!("git {}: {}", args.join(" "), String::from_utf8_lossy(&out.stderr).trim());
     }
@@ -213,15 +437,21 @@ pub fn restore(repo: &Path, path: &Path, branch: &str, base: &str) -> Result<Opt
     Ok(Some(notices))
 }
 
-/// The file in a worktree's own git directory that holds the setup
-/// command its next `varde run` runs first. Kept there, it is never
-/// committed, and goes with the worktree.
-const SETUP_FILE: &str = "varde-setup";
+/// Where the setup command a worktree's next `varde run` runs first is
+/// kept: beside varde's store, by the worktree's git directory, so a
+/// session in a sandbox, which can write that directory, cannot leave
+/// one of its own to run outside it.
+fn setup_file(gitdir: &str) -> PathBuf {
+    let key: String = gitdir.chars().map(|c| if c.is_ascii_alphanumeric() { c } else { '_' }).collect();
+    crate::Paths::from_env().home.join("setup").join(key)
+}
 
 /// Leave `command` for the next `varde run` in the new worktree.
 pub fn mark_setup(worktree: &Path, command: &str) -> Result<()> {
     let gitdir = git(worktree, &["rev-parse", "--absolute-git-dir"])?;
-    Ok(std::fs::write(Path::new(&gitdir).join(SETUP_FILE), command)?)
+    let file = setup_file(&gitdir);
+    std::fs::create_dir_all(file.parent().context("its directory")?)?;
+    Ok(std::fs::write(file, command)?)
 }
 
 /// The setup command left for the worktree `dir` is in, taken so it runs
@@ -229,7 +459,7 @@ pub fn mark_setup(worktree: &Path, command: &str) -> Result<()> {
 pub fn take_setup(dir: &Path) -> Option<(String, PathBuf)> {
     let out = git(dir, &["rev-parse", "--absolute-git-dir", "--show-toplevel"]).ok()?;
     let (gitdir, root) = out.split_once('\n')?;
-    let file = Path::new(gitdir).join(SETUP_FILE);
+    let file = setup_file(gitdir);
     let command = std::fs::read_to_string(&file).ok()?;
     std::fs::remove_file(&file).ok()?;
     Some((command, PathBuf::from(root))).filter(|(c, _)| !c.trim().is_empty())
@@ -244,8 +474,10 @@ fn registered(repo: &Path, path: &Path) -> Result<bool> {
 
 /// Make a new worktree ready to work in: the ignored files
 /// `.worktreeinclude` names copied from the main checkout. Submodules are
-/// left for the session to fetch: fetching them all held a start up for
-/// minutes. A failure is reported, not fatal.
+/// not fetched: fetching them all held a start up for minutes. A session
+/// with no sandbox fetches its own; in one it cannot (their git
+/// directories are kept from it), so you run `git submodule update
+/// --init` there first. A failure is reported, not fatal.
 fn setup(repo: &Path, path: &Path) -> Vec<String> {
     let mut notices = vec![];
     let copy = || -> Result<()> {
@@ -304,28 +536,42 @@ fn included(repo: &Path, dir: &Path, worktree: &Path) -> Result<Vec<String>> {
 /// from the main checkout's copy, or has on its own. Removing the
 /// worktree would lose them.
 pub fn included_changes(repo: &Path, path: &Path) -> Result<Vec<String>> {
-    let read = |p: PathBuf| std::fs::read(p).ok();
+    // A regular file of a size to compare, never waited on; the worktree's
+    // (a session's) not through a link. Any other is a change: kept.
+    let read = |p: PathBuf, follow: bool| -> Option<Vec<u8>> {
+        use std::io::Read;
+        use std::os::unix::fs::OpenOptionsExt;
+        let flags = libc::O_NONBLOCK | if follow { 0 } else { libc::O_NOFOLLOW };
+        let f = std::fs::OpenOptions::new().read(true).custom_flags(flags).open(p).ok()?;
+        let m = f.metadata().ok()?;
+        if !m.is_file() || m.len() > 64 << 20 {
+            return None;
+        }
+        let mut text = vec![];
+        f.take(64 << 20).read_to_end(&mut text).ok()?;
+        Some(text)
+    };
     Ok(included(repo, path, path)?
         .into_iter()
-        .filter(|rel| read(path.join(rel)) != read(repo.join(rel)))
+        .filter(|rel| match (read(path.join(rel), false), read(repo.join(rel), true)) {
+            (Some(a), Some(b)) => a != b,
+            _ => true,
+        })
         .collect())
 }
 
 /// `git` with `input` on its stdin; the caller judges the exit status.
 fn git_input(dir: &Path, args: &[&str], input: &str) -> Result<std::process::Output> {
-    let mut child = command(dir, args)
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .context("running git")?;
-    let mut stdin = child.stdin.take().context("git's stdin")?;
-    let input = input.to_string();
-    // Written from a thread, so a large answer cannot stall the writing.
-    let writer = std::thread::spawn(move || stdin.write_all(input.as_bytes()));
-    let out = child.wait_with_output()?;
-    let _ = writer.join();
-    Ok(out)
+    bounded_input(&mut command(dir, args), input.as_bytes())
+}
+
+/// `cmd`'s output, `input` on its stdin, stopped after `GIT_LIMIT`.
+pub fn bounded_input(cmd: &mut Command, input: &[u8]) -> Result<std::process::Output> {
+    // From a file, so neither side waits on the other's pipe.
+    let mut file = tempfile::tempfile()?;
+    file.write_all(input)?;
+    std::io::Seek::rewind(&mut file)?;
+    bounded(cmd.stdin(file))
 }
 
 /// Anything `git worktree remove --force` would lose: changes, untracked
@@ -368,7 +614,11 @@ pub fn stranded(path: &Path) -> Result<Vec<String>> {
     {
         lost.push("commits on a detached HEAD that no branch has".to_string());
     }
-    if path.join(".gitmodules").exists() {
+    if path.join(".gitmodules").exists() && untrusted(path) {
+        // A sandboxed session worked here: its submodules may be its own,
+        // whose config git inside them would run. Not looked into: kept.
+        lost.push("submodules a sandboxed session may have made: look at them yourself".to_string());
+    } else if path.join(".gitmodules").exists() {
         // Every checked-out submodule, nested ones too, relative to `path`.
         let subs = git(
             path,
@@ -512,7 +762,8 @@ fn snapshot(dir: &Path) -> Result<String> {
     let index = scratch.path().join("index");
     let with_index = |args: &[&str]| git_env(dir, args, &[("GIT_INDEX_FILE", &index)]);
     with_index(&["read-tree", "HEAD"])?;
-    with_index(&["add", "-A"])?;
+    let add = add_all(dir);
+    with_index(&add.iter().map(String::as_str).collect::<Vec<_>>())?;
     with_index(&["write-tree"])
 }
 
@@ -580,6 +831,32 @@ fn exclude_worktrees(repo: &Path, dir: &Path) -> Result<()> {
 
 #[cfg(test)]
 pub mod tests {
+
+    #[test]
+    fn git_varde_runs_never_runs_a_repository_inside_the_checkout() {
+        let r = repo();
+        let dir = r.path();
+        let mark = dir.join("ran");
+        git(dir, &["init", "-q", "sub"]).unwrap();
+        let sub = dir.join("sub");
+        git(&sub, &["config", "filter.m.clean", &format!("sh -c 'touch {}; cat'", mark.display())]).unwrap();
+        std::fs::write(sub.join(".gitattributes"), "* filter=m\n").unwrap();
+        std::fs::write(sub.join("f"), "x").unwrap();
+        git(&sub, &["add", "-A"]).unwrap();
+        git(&sub, &["-c", "user.name=t", "-c", "user.email=t@t", "commit", "-qm", "x"]).unwrap();
+        let _ = std::fs::remove_file(&mark);
+        std::fs::write(sub.join("f"), "changed").unwrap();
+        git(dir, &["add", "sub"]).unwrap();
+        let _ = std::fs::remove_file(&mark);
+        // As the board's status asks it, into submodules: not into this one.
+        let _ =
+            command(dir, &["--no-optional-locks", "status", "--porcelain=v2", STATUS_ALL[0], STATUS_ALL[1]])
+                .output();
+        let add = add_all(dir);
+        let _ = command(dir, &add.iter().map(String::as_str).collect::<Vec<_>>()).output();
+        let _ = command(dir, &["diff", "--ignore-submodules=none"]).output();
+        assert!(!mark.exists(), "the nested repository's filter ran");
+    }
     use super::*;
 
     pub fn layout(repo: &Path) -> Layout {

@@ -421,6 +421,8 @@ pub(crate) fn launch(run: &str, cwd: &Path) -> Result<()> {
         .current_dir(cwd)
         .env_remove("VARDE_INTERNAL")
         .env_remove("VARDE_RUN")
+        // It decides its own sandbox, whoever started the tick.
+        .env_remove(crate::sandbox::FENCED)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -446,20 +448,96 @@ const LABEL: &str = "varde.tick";
 /// store and settings varde has here.
 pub fn install(paths: &Paths, on: bool) -> Result<()> {
     let exe = crate::exe();
-    let mut env: Vec<(String, String)> = vec![("PATH".into(), std::env::var("PATH").unwrap_or_default())];
-    for (k, v) in std::env::vars() {
-        if k.starts_with("VARDE_") && !["VARDE_RUN", "VARDE_INTERNAL"].contains(&k.as_str()) {
-            env.push((k, v));
-        }
-    }
+    let (mut env, secrets) = heartbeat_env(std::env::vars(), &std::env::temp_dir());
     if std::env::var_os("VARDE_HOME").is_none() {
         env.push(("VARDE_HOME".into(), paths.home.display().to_string()));
+    }
+    if on {
+        let carried: Vec<&str> = env
+            .iter()
+            .map(|(k, _)| k.as_str())
+            .filter(|k| *k != "PATH" && !k.starts_with("VARDE_"))
+            .collect();
+        if !carried.is_empty() {
+            println!("the sessions it starts get your agent's setup: {}", carried.join(", "));
+        }
+        if !secrets.is_empty() {
+            println!(
+                "not written into the heartbeat, as secrets: {}; give the agent its own way to them (its key helper, a cloud profile)",
+                secrets.join(", ")
+            );
+        }
     }
     if cfg!(target_os = "macos") {
         launchd(&exe, &env, on)
     } else {
         systemd(&exe, &env, on)
     }
+}
+
+/// What of `vars`, the environment `--install` runs in, the heartbeat
+/// keeps, so a session it starts runs as one started from your shell:
+/// `PATH`, varde's own settings, and how the agent reaches its model (a
+/// provider such as Vertex or Bedrock, its region and project, the models
+/// it pins, a proxy). A session's own variables are left out, and so are
+/// secrets, which would be written to a file: their names come back, to
+/// say so. A `PATH` entry under `temp` (fnm's per-shell directories) is
+/// replaced by where it leads, or dropped.
+fn heartbeat_env(
+    vars: impl Iterator<Item = (String, String)>,
+    temp: &Path,
+) -> (Vec<(String, String)>, Vec<String>) {
+    // What each agent reaches its model with, as its adapter says.
+    let claimed: Vec<String> = varde_agent::all().iter().flat_map(|a| a.env()).collect();
+    // A company's proxy, and the certificates its TLS inspection needs.
+    const NAMES: &[&str] = &[
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+        "NO_PROXY",
+        "http_proxy",
+        "https_proxy",
+        "no_proxy",
+        "NODE_EXTRA_CA_CERTS",
+        "SSL_CERT_FILE",
+        "REQUESTS_CA_BUNDLE",
+    ];
+    let secret = crate::sandbox::secret_name;
+    let temp = temp.canonicalize().unwrap_or_else(|_| temp.to_path_buf());
+    let temporary = |p: &Path| p.starts_with(&temp) || p.to_string_lossy().contains("fnm_multishells");
+    let mut env = Vec::new();
+    let mut secrets = Vec::new();
+    let mut path = None;
+    for (k, v) in vars {
+        if k == "PATH" {
+            path = Some(v);
+        } else if k.starts_with("VARDE_") {
+            if !["VARDE_RUN", "VARDE_INTERNAL"].contains(&k.as_str()) {
+                env.push((k, v));
+            }
+        } else if claimed.iter().any(|p| k.starts_with(p.as_str())) || NAMES.contains(&k.as_str()) {
+            if secret(&k) {
+                secrets.push(k);
+            } else {
+                env.push((k, v));
+            }
+        }
+    }
+    let mut dirs: Vec<String> = Vec::new();
+    for d in path.unwrap_or_default().split(':').filter(|d| !d.is_empty()) {
+        let p = Path::new(d);
+        let kept = if temporary(p) {
+            p.canonicalize().ok().filter(|c| !temporary(c)).map(|c| c.display().to_string())
+        } else {
+            Some(d.to_string())
+        };
+        if let Some(k) = kept.filter(|k| !dirs.contains(k)) {
+            dirs.push(k);
+        }
+    }
+    env.insert(0, ("PATH".into(), dirs.join(":")));
+    env.sort_by(|a, b| (a.0 != "PATH").cmp(&(b.0 != "PATH")).then(a.0.cmp(&b.0)));
+    secrets.sort();
+    (env, secrets)
 }
 
 fn systemctl(args: &[&str]) -> Result<()> {
@@ -542,13 +620,45 @@ fn launchd(exe: &Path, env: &[(String, String)], on: bool) -> Result<()> {
         std::fs::create_dir_all(d)?;
     }
     std::fs::write(&plist, body)?;
-    let out = launchctl(&["bootstrap", &format!("gui/{uid}"), &plist.to_string_lossy()])
+    // A bootout just made returns before the job is gone, and a bootstrap
+    // meanwhile fails: tried again, a little later.
+    let mut out = launchctl(&["bootstrap", &format!("gui/{uid}"), &plist.to_string_lossy()])
         .context("running launchctl")?;
+    for _ in 0..10 {
+        if out.status.success() {
+            break;
+        }
+        std::thread::sleep(Duration::from_millis(300));
+        out = launchctl(&["bootstrap", &format!("gui/{uid}"), &plist.to_string_lossy()])
+            .context("running launchctl")?;
+    }
     if !out.status.success() {
         bail!("launchctl bootstrap: {}", String::from_utf8_lossy(&out.stderr).trim());
     }
     println!("installed {}: varde tick runs every minute", plist.display());
     Ok(())
+}
+
+/// What of your agent's setup here the installed heartbeat does not
+/// carry, by name: installed before it carried them, or set since.
+pub fn heartbeat_missing() -> Vec<String> {
+    let Some(text) = heartbeat().and_then(|p| std::fs::read_to_string(p).ok()) else { return Vec::new() };
+    // Its own file: the plist beside the timer on Linux is the service.
+    let text = if cfg!(target_os = "macos") {
+        text
+    } else {
+        std::fs::read_to_string(systemd_dir().join(format!("{UNIT}.service"))).unwrap_or(text)
+    };
+    let (env, _) = heartbeat_env(std::env::vars(), &std::env::temp_dir());
+    env.into_iter()
+        .map(|(k, _)| k)
+        .filter(|k| {
+            k != "PATH"
+                && !k.starts_with("VARDE_")
+                && !text.contains(&format!("{k}="))
+                && !text.contains(&format!("<key>{k}</key>"))
+        })
+        .collect()
 }
 
 /// Where the heartbeat is installed, if it is.
@@ -564,4 +674,52 @@ fn systemd_dir() -> PathBuf {
 fn plist() -> PathBuf {
     PathBuf::from(std::env::var_os("HOME").unwrap_or_default())
         .join(format!("Library/LaunchAgents/{LABEL}.plist"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_heartbeat_keeps_how_the_agent_reaches_its_model_but_no_secret() {
+        let dir = tempfile::tempdir().unwrap();
+        let stable = dir.path().join("node/bin");
+        std::fs::create_dir_all(&stable).unwrap();
+        let temp = dir.path().join("T");
+        std::fs::create_dir_all(temp.join("fnm_multishells")).unwrap();
+        let shell = temp.join("fnm_multishells/123_456");
+        std::os::unix::fs::symlink(&stable, &shell).unwrap();
+        let gone = temp.join("fnm_multishells/999");
+        let vars = [
+            ("PATH", format!("/usr/bin:{}:{}:/usr/bin", shell.display(), gone.display())),
+            ("CLAUDE_CODE_USE_VERTEX", "1".into()),
+            ("CLOUD_ML_REGION", "europe-west1".into()),
+            ("ANTHROPIC_VERTEX_PROJECT_ID", "dips".into()),
+            ("ANTHROPIC_MODEL", "claude-opus-5-5".into()),
+            ("ANTHROPIC_API_KEY", "sk-x".into()),
+            ("AWS_SECRET_ACCESS_KEY", "s".into()),
+            ("CLAUDE_CODE_SESSION_ID", "abc".into()),
+            ("CLAUDE_CODE_ENTRYPOINT", "cli".into()),
+            ("VARDE_RUN", "r".into()),
+            ("VARDE_CONFIG", "/c".into()),
+            ("HOME", "/home/me".into()),
+        ]
+        .map(|(k, v)| (k.to_string(), v));
+        let (env, secrets) = heartbeat_env(vars.into_iter(), &temp);
+        let keys: Vec<&str> = env.iter().map(|(k, _)| k.as_str()).collect();
+        assert_eq!(
+            keys,
+            [
+                "PATH",
+                "ANTHROPIC_MODEL",
+                "ANTHROPIC_VERTEX_PROJECT_ID",
+                "CLAUDE_CODE_USE_VERTEX",
+                "CLOUD_ML_REGION",
+                "VARDE_CONFIG"
+            ]
+        );
+        assert_eq!(env[0].1, format!("/usr/bin:{}", stable.canonicalize().unwrap().display()));
+        // AWS's are not the agent's on Vertex: not carried, nor reported.
+        assert_eq!(secrets, ["ANTHROPIC_API_KEY"]);
+    }
 }

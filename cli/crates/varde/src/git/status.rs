@@ -97,6 +97,15 @@ impl Facts {
 /// base, a shared checkout against its upstream. With `with_pr`, a pushed
 /// branch's PR is looked up through `gh`, which goes over the network.
 pub fn facts(checkout: &Path, base: Option<&str>, with_pr: bool) -> Result<Facts> {
+    // A sandboxed session's checkout whose index git would wait on: looked
+    // at once it ends and is held, not now.
+    if super::untrusted(checkout) {
+        if let Ok(gd) = git(checkout, &["rev-parse", "--absolute-git-dir"]) {
+            if std::fs::symlink_metadata(Path::new(&gd).join("index")).is_ok_and(|m| !m.is_file()) {
+                anyhow::bail!("its git index is not a file");
+            }
+        }
+    }
     // No optional locks: a plain status refreshes the index as it reads.
     let status = git(
         checkout,
@@ -193,20 +202,10 @@ fn copied(dir: &Path, base: &str) -> bool {
 
 /// The patch ids of what `git args` prints, one per diff.
 fn patch_ids(dir: &Path, args: &[&str]) -> Vec<String> {
-    let Ok(patch) = super::command(dir, args).output() else { return vec![] };
-    let Ok(mut child) = super::command(dir, &["patch-id", "--stable"])
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::null())
-        .spawn()
-    else {
-        return vec![];
-    };
-    let mut stdin = child.stdin.take().unwrap();
-    // Written from a thread, so a large diff cannot fill both pipes at once.
-    let writer = std::thread::spawn(move || std::io::Write::write_all(&mut stdin, &patch.stdout));
-    let out = child.wait_with_output().map(|o| o.stdout).unwrap_or_default();
-    let _ = writer.join();
+    let Ok(patch) = super::bounded(&mut super::command(dir, args)) else { return vec![] };
+    let out = super::bounded_input(&mut super::command(dir, &["patch-id", "--stable"]), &patch.stdout)
+        .map(|o| o.stdout)
+        .unwrap_or_default();
     String::from_utf8_lossy(&out).lines().filter_map(|l| l.split(' ').next()).map(str::to_string).collect()
 }
 

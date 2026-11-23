@@ -51,7 +51,7 @@ pub fn digest(
     line_text: impl Fn(&str) -> Option<(String, String)>,
 ) -> std::io::Result<(String, u64)> {
     use std::io::{Seek, SeekFrom};
-    let mut f = std::fs::File::open(transcript)?;
+    let mut f = crate::open_transcript(transcript)?;
     f.seek(SeekFrom::Start(from))?;
     let mut bytes = Vec::new();
     f.read_to_end(&mut bytes)?;

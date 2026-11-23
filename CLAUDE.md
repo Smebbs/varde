@@ -49,7 +49,7 @@ emacs --batch -Q -L . -l test/test-helper.el -f batch-byte-compile org-varde.el 
 | `cli/crates/varde-agent` | the Claude and pi adapters: hook payloads, launch flags, transcript digest, tool calls |
 | `cli/crates/varde` | the CLI, hook, `run` supervisor, `git/`, `job.rs` (memory updates), `deliver.rs` (memory into sessions), `stale.rs`, `eval.rs`, `steward.rs` (its commands, and the hook's wait for an answer), `steward_guide.rs` (its manual), `flow.rs` (checks, `verify`, loops, trails, the tick's part), `recipe.rs` (+ `recipes/`), `tui/` |
 | `cli/crates/varde/tests` | integration tests; `common/` has the temp store and the fake `claude`, `pi`, `gh` and tmux |
-| `cli/plugin` | Claude plugin: only `hooks.json`, every entry calls `varde hook` |
+| `cli/plugin` | Claude plugin: `hooks.json` (every entry calls `varde hook`) and the `varde-loops` skill (`skills/`, which pi can link too) |
 | `org-varde.el` | start/terminals/workspaces, the view (cairn view and edit), `varde:` links, new task from a doc |
 | `org-varde-board.el` | renders `varde list --json`; decides nothing |
 

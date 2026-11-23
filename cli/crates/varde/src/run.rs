@@ -25,7 +25,7 @@ pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
         .map_err(|e| anyhow!("{e}; runs come from `varde start`"))?;
     let row = store.conn.query_row(
         "SELECT r.agent, r.native_id, r.relation, r.cwd, r.prompt, r.pid, r.launch, t.title, p.native_id, r.task,
-                r.background, r.model, r.effort, r.profile
+                r.background, r.model, r.effort
          FROM run r JOIN task t ON t.id = r.task LEFT JOIN run p ON p.id = r.parent_run
          WHERE r.id = ?1",
         [run_id],
@@ -44,7 +44,6 @@ pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
                 r.get::<_, bool>(10)?,
                 r.get::<_, Option<String>>(11)?,
                 r.get::<_, Option<String>>(12)?,
-                r.get::<_, Option<String>>(13)?,
             ))
         },
     );
@@ -62,7 +61,6 @@ pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
         background,
         model,
         effort,
-        profile_name,
     ) = row.with_context(|| format!("no run {run_id}; runs come from `varde start`"))?;
     // Said for the task, not the run: the user typed `varde attach`, and a
     // second one racing the first lands here.
@@ -86,16 +84,27 @@ pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
     let (argv, env) = adapter.launch(how);
     // On the model and effort its profile asked for.
     let argv = adapter.tuned(argv, model.as_deref(), effort.as_deref());
-    // Started by a schedule, with nobody at it: to the end of its reply,
-    // its output kept in a log beside the store.
-    let config = crate::config::get();
-    let argv = if background {
-        config.background_on(&agent, profile_name.as_deref(), adapter.background(argv))
-    } else {
-        argv
-    };
-    let argv = config.launch(&agent, argv);
+    // Started by a loop, a trail or a schedule, with nobody at it: to the
+    // end of its reply, on what varde grants it, in its sandbox, its
+    // output kept in a log beside the store.
     let log = if background { Some(background_log(paths, run_id)?) } else { None };
+    let (argv, fence_env, broker) = if background {
+        match unattended(paths, &store, &task, run_id, &*adapter, argv, cwd.as_deref()) {
+            Ok(a) => a,
+            Err(e) => {
+                if let Some(l) = &log {
+                    let _ = std::fs::write(l, format!("varde: {e:#}\n"));
+                }
+                // Nothing ran: a loop stops on why, said as its check's error.
+                store.record_exit(run_id, 126, now_ms())?;
+                crate::flow::not_started(&store, &task, run_id, &format!("{e:#}"))?;
+                return Err(e);
+            }
+        }
+    } else {
+        (crate::config::get().launch(&agent, argv), vec![], None)
+    };
+    let fenced = broker.is_some();
     crate::job::sync_memory(paths);
 
     // Claim the run before anything starts, so two `varde run`s of it
@@ -126,8 +135,23 @@ pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
     // the worktree's root, whichever directory the session resumes in.
     if let Some((setup, root)) = cwd.as_deref().and_then(|d| git::take_setup(Path::new(d))) {
         eprintln!("varde: setting up the worktree: {setup}");
-        let mut sh = Command::new("sh");
-        sh.args(["-c", &setup]).current_dir(root);
+        // In the session's sandbox, when it has one: what it installs may
+        // be what a session wrote (a branch cut from a plan's).
+        let mut setup_env = vec![];
+        let mut sh = if fenced {
+            let p = crate::sandbox::plan(&store, &task)?.policy.context("its sandbox")?;
+            let (mut argv, env) = crate::sandbox::wrap(&p, &root, None, &paths.home, None)?;
+            argv.extend(["sh".to_string(), "-c".to_string(), setup.clone()]);
+            let mut c = Command::new(&argv[0]);
+            c.args(&argv[1..]).env_clear().envs(env.clone());
+            setup_env = env;
+            c
+        } else {
+            let mut c = Command::new("sh");
+            c.args(["-c", &setup]);
+            c
+        };
+        sh.current_dir(&root);
         match &log {
             Some(log) => to_log(&mut sh, log)?,
             None => foreground(&mut sh),
@@ -138,10 +162,24 @@ pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
             Ok(s) => eprintln!("varde: the setup failed ({s}); the session starts anyway"),
             Err(e) => eprintln!("varde: the setup did not run ({e}); the session starts anyway"),
         }
+        crate::sandbox::import(&setup_env, &root);
     }
 
+    if fenced {
+        let _ = store.conn.execute("UPDATE run SET fenced = 1 WHERE id = ?1", [run_id]);
+    }
+    // A checkout a sandboxed session worked in: what it left held before
+    // anyone (this session, its prompt) runs git there.
+    if let Some(dir) = cwd.as_deref().filter(|d| git::untrusted(Path::new(d))) {
+        crate::flow::hold(Path::new(dir));
+    }
     let mut cmd = Command::new(&argv[0]);
-    cmd.args(&argv[1..]).envs(env).env("VARDE_RUN", run_id);
+    cmd.args(&argv[1..]);
+    if fenced {
+        // The sandbox's environment in place of ours.
+        cmd.env_clear().envs(fence_env.clone());
+    }
+    cmd.envs(env).env("VARDE_RUN", run_id);
     if let Some(dir) = &cwd {
         cmd.current_dir(dir);
     }
@@ -186,6 +224,24 @@ pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
     });
     give_back(lent);
     let status = status?;
+    // What it committed, brought in checked, before anything reads it.
+    if let Some(dir) = &cwd {
+        crate::sandbox::import(&fence_env, Path::new(dir));
+        // A repository it left there, held, check or no check.
+        if fenced {
+            let held = crate::flow::hold(Path::new(dir));
+            if let (false, Some(l)) = (held.is_empty(), &log) {
+                let note = format!(
+                    "\nvarde: set aside what git would run as you, which it left at {} (renamed *.varde-held, a link to it removed): look before you use it\n",
+                    held.join(", ")
+                );
+                let _ = std::fs::OpenOptions::new().append(true).open(l).map(|mut f| {
+                    use std::io::Write;
+                    f.write_all(note.as_bytes())
+                });
+            }
+        }
+    }
     let code = status.code().unwrap_or_else(|| {
         use std::os::unix::process::ExitStatusExt;
         128 + status.signal().unwrap_or(0)
@@ -209,6 +265,45 @@ pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
         crate::pending::append_exit(paths, run_id, code, now)?;
     }
     Ok(code)
+}
+
+/// `argv`, a background launch's, as it runs with nobody at it: on what
+/// its agent is granted (design §6.8), with the user's arguments, which
+/// come first so the grant wins, and in the task's sandbox, if it has
+/// one. Also the variables the sandbox sets, and whether there is one.
+#[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
+fn unattended(
+    paths: &Paths,
+    store: &Store,
+    task: &str,
+    run: &str,
+    adapter: &dyn varde_agent::Agent,
+    argv: Vec<String>,
+    cwd: Option<&str>,
+) -> Result<(Vec<String>, Vec<(String, String)>, Option<crate::broker::Broker>)> {
+    let plan = crate::sandbox::plan(store, task)?;
+    let grant = varde_agent::Grant {
+        fenced: plan.fenced,
+        trusted: plan.policy.is_none(),
+        commands: crate::flow::def(store, task)?.and_then(|d| d.cmd).into_iter().collect(),
+        deny: plan.policy.as_ref().map(|p| p.deny.clone()).unwrap_or_default(),
+    };
+    let argv = adapter.unattended(adapter.background(argv), &grant).map_err(|e| anyhow!(e))?;
+    let config = crate::config::get();
+    let argv = config.launch(adapter.name(), config.background(adapter.name(), argv));
+    match plan.policy.filter(|_| plan.fenced) {
+        Some(p) => {
+            let dir = Path::new(cwd.context("a session in a sandbox needs a directory")?);
+            // Its varde, inside, reaches the store through this one.
+            let broker = crate::broker::Broker::start(run, &p.name, dir, adapter)?;
+            let (mut prefix, env) =
+                crate::sandbox::wrap(&p, dir, Some(adapter), &paths.home, Some(&broker.socket))?;
+            prefix.extend(argv);
+            Ok((prefix, env, Some(broker)))
+        }
+        None => Ok((argv, vec![], None)),
+    }
 }
 
 /// Whether a background run's output ends on a question: its last line
@@ -261,7 +356,7 @@ fn foreground(cmd: &mut Command) {
 const TERMINAL_SIGNALS: [libc::c_int; 3] = [libc::SIGINT, libc::SIGQUIT, libc::SIGHUP];
 
 /// `f`, with the terminal's signals ignored until it returns.
-fn ignoring_terminal_signals<T>(f: impl FnOnce() -> T) -> T {
+pub(crate) fn ignoring_terminal_signals<T>(f: impl FnOnce() -> T) -> T {
     let before = TERMINAL_SIGNALS.map(|sig| unsafe { libc::signal(sig, libc::SIG_IGN) });
     let out = f();
     for (sig, was) in TERMINAL_SIGNALS.into_iter().zip(before) {

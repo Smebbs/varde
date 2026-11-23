@@ -7,6 +7,7 @@ use clap::{Args, Parser, Subcommand, ValueEnum};
 use varde_core::plan::Want;
 use varde_core::store::Store;
 
+mod broker;
 mod cairn_view;
 mod config;
 mod deliver;
@@ -14,6 +15,7 @@ mod doctor;
 mod done;
 mod eval;
 mod flow;
+mod follow;
 mod git;
 mod hook;
 mod job;
@@ -25,6 +27,7 @@ mod pending;
 mod process;
 mod recipe;
 mod run;
+mod sandbox;
 mod schedule;
 mod stale;
 mod start;
@@ -105,9 +108,13 @@ enum Cmd {
         /// The profile its sessions run on: quick, build, deep, review, or yours.
         #[arg(long)]
         profile: Option<String>,
+        /// The sandbox its background sessions and checks run in: default,
+        /// push, off, or yours (see `varde sandbox`).
+        #[arg(long, conflicts_with = "recipe")]
+        sandbox: Option<String>,
         /// Make a trail of tasks from a recipe (see `varde recipe`), the
         /// title and context given to each step.
-        #[arg(long, conflicts_with_all = ["from", "when", "after", "external"])]
+        #[arg(long, conflicts_with_all = ["from", "when", "external"])]
         recipe: Option<String>,
         /// A recipe's variable: `issue=gh:123`. Again for more.
         #[arg(long = "var", value_name = "NAME=VALUE", requires = "recipe")]
@@ -188,9 +195,16 @@ enum Cmd {
         /// Have a model review the change once the command passes.
         #[arg(long, value_name = "PROFILE", num_args = 0..=1, default_missing_value = "")]
         review: Option<String>,
-        /// What the review judges by: a file, or the text itself.
+        /// What the review judges by: a file (read now), or the text itself.
         #[arg(long, value_name = "FILE|TEXT")]
         rubric: Option<String>,
+        /// Have an agent verify the work once the command passes: a fresh
+        /// session on the review profile, with its tools and skills, in the
+        /// task's sandbox, asked this (a file, read now, or the text itself: "run the
+        /// app and use /verify-app"). It changes nothing, and ends with PASS
+        /// or FAIL.
+        #[arg(long, value_name = "FILE|TEXT")]
+        verify: Option<String>,
         /// A path a session must not change, `*` for any characters
         /// (`tests/*`); again for more.
         #[arg(long, value_name = "GLOB")]
@@ -202,7 +216,7 @@ enum Cmd {
         #[arg(long)]
         now: bool,
         /// Remove the check.
-        #[arg(long, conflicts_with_all = ["cmd", "review", "rubric", "guard", "again", "now"])]
+        #[arg(long, conflicts_with_all = ["cmd", "review", "rubric", "verify", "guard", "again", "now"])]
         off: bool,
     },
     /// Run a task's check and record it (started by varde itself).
@@ -250,6 +264,14 @@ enum Cmd {
         /// End the loop.
         #[arg(long, conflicts_with_all = ["check", "max", "minutes", "escalate", "pause"])]
         off: bool,
+    },
+    /// Watch a task's sessions as they work, read-only: what each says, the
+    /// tools it calls, each check as it lands, and a loop's next round as
+    /// it starts. RET stops it. It stands in no session's way.
+    #[command(display_order = 9)]
+    Follow {
+        /// The task: the six characters the board shows, or their first four.
+        task: String,
     },
     /// Make a task wait on others: it starts once each is verified.
     #[command(display_order = 9)]
@@ -318,6 +340,29 @@ enum Cmd {
         /// The profile its new sessions run on; empty for the work role's.
         #[arg(long)]
         profile: Option<String>,
+        /// The sandbox its background sessions and checks run in: default,
+        /// push, off, or yours (see `varde sandbox`).
+        #[arg(long)]
+        sandbox: Option<String>,
+    },
+    /// What a sandbox lets a background session reach, or a command run
+    /// in one, to see.
+    ///
+    /// Background sessions (a loop's rounds, a trail's tasks, schedules)
+    /// and every check run in one where the system has it: bwrap on Linux,
+    /// sandbox-exec on macOS. In it a session writes only its checkout,
+    /// its agent's files, temporary files and build caches, and cannot
+    /// read the logins varde knows of (ssh, gpg, cloud, gh, browsers); the
+    /// network stays open. Built in: default; push, which shows git's
+    /// logins; off. Yours go under [sandboxes.NAME] in the config, with
+    /// show, write, env and deny.
+    #[command(display_order = 14)]
+    Sandbox {
+        /// The sandbox: default when left out.
+        name: Option<String>,
+        /// A command to run in it, here: `varde sandbox azure-read -- az group list`.
+        #[arg(last = true)]
+        command: Vec<String>,
     },
     /// Move Inbox tasks into Open.
     #[command(display_order = 9)]
@@ -926,6 +971,8 @@ pub fn detach(args: &[&str], what: &str) -> Result<()> {
     let mut cmd = Command::new(exe());
     cmd.args(args)
         .env("VARDE_INTERNAL", "1")
+        // varde's own work, though a sandboxed session's command started it.
+        .env_remove(sandbox::FENCED)
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null());
@@ -961,6 +1008,12 @@ fn main() -> ExitCode {
     if !matches!(args.get(1).map(String::as_str), None | Some("hook" | "job" | "run")) {
         unsafe { libc::signal(libc::SIGPIPE, libc::SIG_DFL) };
     }
+    // In a sandbox, every command goes to the varde outside it.
+    if let Some(socket) = std::env::var(broker::BROKER).ok().filter(|s| !s.is_empty()) {
+        let names: Vec<String> =
+            varde_agent::all().iter().flat_map(|a| a.hook_env().iter().map(|s| s.to_string())).collect();
+        return ExitCode::from(broker::forward(&socket, &args[1..], &names).clamp(0, 255) as u8);
+    }
     let paths = Paths::from_env();
     // `varde hook [--agent NAME] <Event>` records one agent event, read as
     // JSON from stdin. It must print JSON and exit 0 whatever it is given,
@@ -995,9 +1048,32 @@ fn dispatch(paths: &Paths, cmd: Option<Cmd>, popup: bool) -> Result<i32> {
         Cmd::Agent { json } => start::agent(json),
         Cmd::Projects { json } => start::list_projects(paths, json),
         Cmd::Eval { all, since, json } => eval::run(paths, all, since.as_deref(), json),
-        Cmd::New { title, project, body, recipe: Some(name), vars, sets, start, json, profile, .. } => {
-            recipe::new(paths, &name, &title, project, body, &vars, &sets, profile, start, json)
-        }
+        Cmd::New {
+            title,
+            project,
+            body,
+            recipe: Some(name),
+            vars,
+            sets,
+            start,
+            json,
+            profile,
+            after,
+            approved,
+            ..
+        } => recipe::new(
+            paths,
+            &name,
+            &title,
+            project,
+            body,
+            &vars,
+            &sets,
+            profile,
+            (&after, approved),
+            start,
+            json,
+        ),
         Cmd::New {
             title,
             project,
@@ -1010,10 +1086,11 @@ fn dispatch(paths: &Paths, cmd: Option<Cmd>, popup: bool) -> Result<i32> {
             after,
             approved,
             profile,
+            sandbox,
             ..
         } => {
             let when = when.map(|w| (w, worktree.map(|w| matches!(w, WorktreeArg::Always))));
-            let flow = tasks::Flow { after, approved, profile };
+            let flow = tasks::Flow { after, approved, profile, sandbox };
             tasks::new(paths, &title, project, body, external, from, when, flow, json)
         }
         Cmd::Schedule { install: true, .. } => schedule::install(paths, true),
@@ -1024,14 +1101,24 @@ fn dispatch(paths: &Paths, cmd: Option<Cmd>, popup: bool) -> Result<i32> {
             let worktree = worktree.map(|w| matches!(w, WorktreeArg::Always));
             schedule::set(paths, &task.unwrap_or_default(), rule, off, worktree)
         }
+        // Inside a sandbox nothing starts: what it starts would be in it.
+        Cmd::Tick if std::env::var_os(sandbox::FENCED).is_some() => Ok(()),
         Cmd::Tick => schedule::tick(paths),
-        Cmd::Check { task, cmd, review, rubric, guard, again, now, off } => flow::check(
+        Cmd::Sandbox { name, command } => {
+            let code = sandbox::cmd(paths, name.as_deref(), &command)?;
+            if code != 0 {
+                std::process::exit(code);
+            }
+            Ok(())
+        }
+        Cmd::Check { task, cmd, review, rubric, verify, guard, again, now, off } => flow::check(
             paths,
             &task,
             flow::CheckArgs {
                 cmd,
                 review: review.map(|r| (!r.is_empty()).then_some(r)),
                 rubric,
+                verify,
                 guard,
                 again,
                 now,
@@ -1043,6 +1130,7 @@ fn dispatch(paths: &Paths, cmd: Option<Cmd>, popup: bool) -> Result<i32> {
         Cmd::Loop { task, check, max, minutes, escalate, pause, off } => {
             flow::set_loop(paths, &task, flow::LoopArgs { check, max, minutes, escalate, off, pause })
         }
+        Cmd::Follow { task } => follow::run(paths, &task),
         Cmd::After { task, after, approved, off } => flow::after(paths, &task, &after, approved, off),
         Cmd::Profiles { json } => flow::profiles(json),
         Cmd::Recipe { what: RecipeCmd::List { json } } => recipe::list(json),
@@ -1077,19 +1165,19 @@ fn dispatch(paths: &Paths, cmd: Option<Cmd>, popup: bool) -> Result<i32> {
         Cmd::Edit { task, stdin, print, .. } => {
             memory_cmd::edit(paths, &task.unwrap_or_default(), stdin, print).map(drop)
         }
-        Cmd::Set { task, title, body, project, profile } => {
-            let only = title.is_none() && body.is_none() && project.is_none();
-            match profile {
-                Some(p) => flow::set_profile(paths, &task, &p).and_then(|()| {
-                    if only {
-                        Ok(())
-                    } else {
-                        tasks::set(paths, &task, title, body, project)
-                    }
-                }),
-                None => tasks::set(paths, &task, title, body, project),
+        Cmd::Set { task, title, body, project, profile, sandbox } => (|| {
+            let rest = title.is_some() || body.is_some() || project.is_some();
+            if let Some(b) = &sandbox {
+                sandbox::set(paths, &task, b)?;
             }
-        }
+            if let Some(p) = &profile {
+                flow::set_profile(paths, &task, p)?;
+            }
+            if rest || (sandbox.is_none() && profile.is_none()) {
+                tasks::set(paths, &task, title, body, project)?;
+            }
+            Ok(())
+        })(),
         Cmd::Job { id } => job::run(paths, &id),
         Cmd::Start { task, how, json } => how.options().and_then(|o| start::start(paths, &task, o, json)),
         Cmd::Attach { task, how } => return how.options().and_then(|o| start::attach(paths, &task, o)),
@@ -1135,6 +1223,20 @@ fn dispatch(paths: &Paths, cmd: Option<Cmd>, popup: bool) -> Result<i32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_skill_names_only_commands_varde_has() {
+        use clap::CommandFactory;
+        let skill = include_str!("../../../plugin/skills/varde-loops/SKILL.md");
+        assert!(skill.starts_with("---\nname: varde-loops\ndescription: "), "its frontmatter");
+        let cli = Cli::command();
+        let named: Vec<&str> =
+            skill.split("`varde ").skip(1).filter_map(|s| s.split([' ', '`']).next()).collect();
+        assert!(named.len() > 5, "{named:?}");
+        for word in named.into_iter().filter(|w| !w.starts_with('<')) {
+            assert!(cli.find_subcommand(word).is_some(), "the skill names varde {word}, which is no command");
+        }
+    }
 
     #[test]
     fn a_replaced_binary_is_found_again() {

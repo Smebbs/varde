@@ -143,13 +143,23 @@ fn hook_from(e: &Env, event: &str, payload: &str, wrap: &str, then: &str) -> std
     if !agent.exists() {
         e.script("claude", "#!/bin/sh\ntimeout \"$@\"\nexit $?\n");
     }
-    e.env(&mut Command::new(agent))
+    let mut cmd = Command::new(agent);
+    e.env(&mut cmd)
         .args(["30", "sh", "-c"])
         .arg(format!("{wrap} \"$0\" hook {event} < \"$1\" > /dev/null; {then}"))
         .arg(env!("CARGO_BIN_EXE_varde"))
-        .arg(&file)
-        .spawn()
-        .unwrap()
+        .arg(&file);
+    // A script just written is busy while another test's child, forked
+    // meanwhile, still holds it open for writing (ETXTBSY): tried again.
+    for _ in 0..50 {
+        match cmd.spawn() {
+            Err(e) if e.raw_os_error() == Some(libc::ETXTBSY) => {
+                std::thread::sleep(std::time::Duration::from_millis(20))
+            }
+            r => return r.unwrap(),
+        }
+    }
+    cmd.spawn().unwrap()
 }
 
 #[test]

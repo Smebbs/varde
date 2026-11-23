@@ -1503,6 +1503,7 @@ task in the region."
     ("O" "check output" org-varde-check-output)
     ("A" "approve" org-varde-approve)
     ("t" "trail" org-varde-trail)
+    ("f" "follow" org-varde-follow)
     ("M" "profile" org-varde-set-profile)
     ("r" "recipes" org-varde-recipes)]]
   [["Look"
@@ -1573,6 +1574,7 @@ Rebind them here; under evil, its normal state takes them from here too."
   "O" #'org-varde-check-output
   "A" #'org-varde-approve
   "t" #'org-varde-trail
+  "f" #'org-varde-follow
   "M" #'org-varde-set-profile
   "r" #'org-varde-recipes
   "=" #'org-varde-board-diff

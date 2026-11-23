@@ -102,6 +102,17 @@ it, or hand the task to it. Loops and trails (§6.7) are data that
 - **Environment.** Every process varde spawns sets `VARDE_INTERNAL=1`,
   so its own hooks do not track it. Sessions get `VARDE_RUN=<run_id>`,
   so `varde note` never has to guess an id.
+- **Modules.** The core is tasks, sessions, worktrees and the board.
+  Each part beyond it is a module of its own files that does nothing
+  until used, and has one switch:
+
+  | Module | Files | Off, or unused |
+  |---|---|---|
+  | Memory (§7) | `memory/`, `job.rs`, `deliver.rs` | `memory.enabled = false`: no model calls |
+  | Schedules (§6.5) | `schedule.rs` | no task has `--when` |
+  | Steward (§6.6) | `steward*.rs` | `varde steward off` (the default) |
+  | Loops and trails (§6.7) | `flow.rs`, `recipe.rs`, `follow.rs` | no task has a check, loop or edge: rows, prompts and keys as before |
+  | Sandbox (§6.8) | `sandbox.rs`, `broker.rs` | `sandbox.on = false`; applies only to background sessions and checks |
 
 ## 4. Data model
 
@@ -478,10 +489,9 @@ derived as any run's, and the guidance tells it nobody is watching.
   `start` asks (`takeover`); `--take-over` stops it and plans again,
   which resumes it here. What the step under way had not written is
   lost.
-- **Permissions.** Print mode refuses a tool your settings do not
-  allow, and the session says what it could not do. varde widens
-  nothing: `agents.<agent>.background` arguments (e.g. Claude's
-  `--permission-mode auto`) go on background launches only.
+- **Permissions.** A background session runs in the sandbox, on what
+  varde grants its agent (§6.8). `agents.<agent>.background` arguments
+  go on background launches only, before the grant, which wins.
 
 ### 6.6 The steward (beta)
 
@@ -652,10 +662,9 @@ are what those lack.
   `build`, `deep` and `review` ship on Claude's aliases; yours are in
   `[profiles]`. A run records the profile, model and effort it launched
   with (`Agent::tuned`: Claude's `--model`/`--effort`, pi's
-  `--model`/`--thinking`). A resume keeps its conversation's. A profile
-  may carry its own `background` arguments, in place of the agent's:
-  Claude's `auto` permission mode refuses every write on haiku, which
-  `doctor`, `loop` and `new --recipe` say.
+  `--model`/`--thinking`). A resume keeps its conversation's. On a cloud
+  provider an alias may name a model the project lacks
+  (`Agent::model_warning`), which `doctor`, `loop` and `new --recipe` say.
 - **Checks** (`check_def`, `check_result`). A command, a review by the
   review profile, or both (the review only after the command passes).
   `varde verify` runs it detached, in the task's checkout, when a
@@ -663,8 +672,16 @@ are what those lack.
   It records the verdict, a summary line, the output's file, a
   fingerprint of the failure, and the **tree**: `git add -A` into a
   scratch index, then `write-tree`, taken before and after; a change
-  meanwhile makes it `unchecked`. A guard's paths changed since the
-  check was set (or the loop started) make it `flagged`. The review is
+  meanwhile makes it `unchecked`. `verify` adds an agent: a fresh session
+  on the review profile (the agent's own launch, grant and sandbox), its
+  tools and skills, asked what the check says; its last line PASS or
+  FAIL decides, and what it changed to look is put back. A guard's paths are read-only to
+  a session in a sandbox (ImpossibleBench found read-only tests the
+  defence that works against agents editing them), and a change to them
+  since the check was set (or the loop started) makes it `flagged`. What
+  a guard cannot stop (special-casing the code to the test) a review by
+  another model catches: a loop on a check that cannot honestly pass
+  ends spent, with the review's reasons, rather than verified. The review is
   a headless call like a memory update, never a run, and answers PASS
   or FAIL on its first line.
 - **Verified is derived**: the newest check passed for the tree there
@@ -676,7 +693,15 @@ are what those lack.
   flagged, error, verified, spent, stuck (the same fingerprint on the
   same tree twice, after the escalation list runs out), asked (a round's
   last words a question), then working, checking or due. A review-only
-  check gets 2 rounds. A start of yours pauses the loop.
+  check gets 2 rounds.
+- **Attended.** A start of yours takes the loop over rather than pausing
+  it: while your session of the task is live, each turn of it that
+  changed the files is checked as it ends and counts as a round
+  (`run#check` in `with_turns`), and a failure is handed to the session
+  as a message (`Agent::push`, as `varde say`). When it ends, the next
+  round starts in the background. `varde follow` (`f`) watches a task's
+  sessions read-only through `Agent::follow`, so a round need not be
+  opened to be seen.
 - **Trails** (`edge`). A task waits on others being verified, or
   approved (`--approved`); waits are derived. `task.auto` sets a task
   going: the tick starts it, or its loop's next round, when its waits
@@ -689,18 +714,188 @@ are what those lack.
   wake it; a tick that finds the lock held leaves `tick.again`, so no
   wake is lost.
 - **Recipes** are TOML: `[[steps]]` with `id`, `needs`, `profile`,
-  `prompt`, `gate`, `check`, `loop`, `guard`, `tree`, `output` and
-  `use`. Built-ins come from the binary; yours in
+  `prompt`, `gate`, `check`, `loop`, `guard`, `tree`, `output`,
+  `sandbox` and `use`. A step whose `output` is `trail` writes
+  `trail.toml`, a recipe of its own; when you approve the step, its
+  tasks are made after it and set going (`epic`): the planner proposes
+  the graph, you accept it (Q44). Built-ins come from the binary; yours in
   `~/.config/varde/recipes/` shadow them. A task records the recipe and
   its content hash. `varde recipe guide` is the manual, for agents too,
   and every session is pointed to it in one line (Q12).
-- **Clients.** Both boards bind the same keys: `L` loop, `c`/`C` set or
+- **Clients.** Both boards bind the same keys: `f` follow, `L` loop, `c`/`C` set or
   run the check, `O` its output, `A` approve, `t` the trail, `M` the
   profile, `r` recipes. Each runs the CLI's command and shows what it
   said; rows carry the state in `flow.label`. Emacs adds a Loop section
   to the view (a round a line, RET opens it), a trail buffer and a
   recipes buffer, and Profile, After, Recipe and Vars to the new-task
   form.
+
+### 6.8 The sandbox (beta)
+
+What makes a session with nobody at it safe to leave is not its agent's
+permission rules, which differ per agent and ask a question nobody is
+there to answer, but a wall around it. Background sessions (rounds,
+trail steps, schedules) and every check run inside the system's own
+sandbox, around whatever agent runs: bubblewrap on Linux, `sandbox-exec`
+on macOS (`sandbox.rs`). The check is inside too: what a session wrote
+(a test, a build script) runs when it runs.
+
+- **What it allows.** Writes to the checkout; of the git directory a
+  linked worktree commits into, only its own entry and the refs and logs
+  beside its branch's (`refs/heads/varde/`: it moves no `main`, tag or
+  remote). Its objects go to a quarantine of its own, the repository's
+  read through it; when it ends, varde brings them in re-hashed from what
+  they hold (`sandbox::import`, which follows no link it left there), as a push is received, since git trusts
+  an object's name and one forged into the shared store would change
+  `main`. Everything else there (config, hooks,
+  `commondir`, `gitdir`, the `.git` pointer, other worktrees,
+  submodules) is git's reading for what to run as you, and stays
+  read-only. A main checkout's git directory is all of that, so a
+  session there changes files but cannot commit. Also writable: the
+  agent's session files (`Agent::writes`, not its settings, hooks or
+  plugins, which later sessions run), its own temporary directory, and
+  named build caches, never a tool's config or programs beside them.
+  What all the agent's sessions share (`Agent::private`: Claude's
+  sessions, history, snapshots) is the session's own, empty, under bwrap,
+  and of its transcripts only its own directory's are real; under
+  sandbox-exec they stay shared, but what the agent sources (shell
+  snapshots, hook environments) is read-only. A checkout that holds your home
+  is refused.
+- **What it hides.** The logins varde knows of (ssh, gpg, cloud CLIs,
+  gh, git credentials, keyrings, browsers, shell history), except the
+  one the agent reaches its model with (`Agent::reads`: a Vertex ADC
+  file, Bedrock's caches). Its environment is rebuilt: variables that
+  look like a login are dropped, except the agent's (`Agent::env`) and
+  those a sandbox `pass`es. Git's credential helper is off and commits go
+  unsigned. It refuses what runs things outside: the user's runtime
+  directory (service manager, desktop bus), the terminal server, an
+  agent holding keys, container sockets, and on macOS any unix socket
+  but its own, `security`, launchd, LaunchServices and Apple events. Its
+  processes are its own on Linux (`--unshare-pid`): none outlives it. The network
+  stays open, since the agent needs its model.
+- **The broker.** varde's store is hidden from it. Its varde (the
+  agent's hooks, a `varde note`) finds `VARDE_BROKER` and hands the
+  command over a socket to the `varde run` outside (`broker.rs`), which
+  runs it there with `VARDE_FENCED` set, from within its checkout, if
+  its first word is allowed: hooks, `note`, `recall`, `new`, reading its
+  own project's. A session cannot set that mark or reach the store
+  another way, so the refusals hold.
+- **Named sandboxes.** `default`; `push`, which also shows git's logins
+  and the ssh agent, for a step whose output is a draft pull request;
+  `off`; and yours under `[sandboxes.NAME]`: `show` a login, `write`
+  more (shown too), set `env`, `pass` variables, and `deny` commands. A
+  task names its sandbox (`task.sandbox`; `new`, `set`, a recipe's
+  `sandbox`). A task made from inside one gets that one, and in its own
+  project; a plan's trail gets the plan's.
+- **The grant.** `Agent::unattended` says, in the agent's terms, what a
+  session may do with nobody to ask: inside the sandbox, every tool;
+  outside one, changing files in its directory, `git add`, `git commit`
+  and its check. `deny` is passed to the agent too (Claude's
+  `--disallowedTools`), a guard against a mistake, not a wall: a script
+  can run what it names. An agent that cannot keep to a grant (pi, which
+  asks before nothing) does not start, unless the task's sandbox is
+  `off`. The user's `background` arguments come first, so the grant
+  wins.
+- **What stays the user's.** From inside, `check`, `loop`, `approve`,
+  `after`, `verify`, `set`, `say`, `trail --start`, `run`, `start` and
+  the tick are refused. A change that must happen outside (an apply, a
+  deploy) is a step's output, a checklist you run (`change-plan`).
+- **Its own repositories.** git varde runs carries
+  `core.fsmonitor=false` (`git::SAFE`), never fetches on demand, stops
+  after two minutes, passes `--ignore-submodules` to `status` and `diff`,
+  and leaves every repository inside the checkout out of its `add -A`.
+  When a sandboxed run ends, and before its check, after it and after a
+  verifier, varde walks the checkout's files, from the top it marked
+  before the session ran, wherever below the session worked (no link followed, nothing
+  skipped for being ignored, an unreadable directory opened) and sets
+  aside, renamed `*.varde-held`, whatever git would take for a
+  repository there: a `.git` below the root (but a submodule's pointer
+  into `modules/`), or a directory with a `HEAD` and objects and refs.
+  A link out of the checkout to where any sandbox writes (a cache,
+  temporary files, an agent's files, a sandbox's `write`) or into any
+  git directory, as written or as the kernel would follow it (through
+  other links), is removed, to a file or a directory, there or not yet: what
+  is there is a session's, and an editor's git, or yours, run where it
+  leads would run it. A link to what no sandbox writes (a venv's python)
+  stays, and so does one into a main checkout's own `.git`, which a
+  session cannot write. Pipes, which git would wait on, are removed from
+  the checkout, and every link too from a worktree's git directory (before
+  its objects are brought in, too), its branch's refs and the
+  quarantine (git makes none there, and would append a reflog through
+  one). A rebase or cherry-pick left in the worktree's git directory,
+  whose `exec` steps your `--continue` would run, is set aside, and so is
+  an index naming a path out of the checkout or into a `.git`, which
+  `git restore` would write (`git reset` makes a new one), or a link
+  that it staged (the index made again from HEAD); one it committed, on
+  HEAD or any branch of varde's, flags the run, since your checkout or
+  merge would write it. A link your own branch has already is yours, and
+  not judged, unless that branch is one a session can move (the main
+  checkout on a branch of varde's). Otherwise its index is made again from its entries
+  alone after each run, and refreshed from the files: a tree it cached
+  there for a commit, or a file's times, would have git trust what it
+  says over what is staged. (Refreshed so, a very large file is hashed
+  again at each, as after any `read-tree`.) A link git
+  will write is judged by what it says, wherever it is checked out: out
+  if absolute, if its `..` climbs above the repository's top or follows
+  a name (which a link there could turn), if it passes a `.git`, or if it
+  is longer than a path. Its objects are brought in as a push is: packed
+  from the quarantine and indexed again (`index-pack --strict`, but for
+  what old repositories hold and git only warns of), each up to 1 GiB
+  and all of them up to 2 million and 8 GiB; what cannot be is said, and
+  kept there. Its branches are read in the repository's own git
+  directory, not through the worktree's HEAD it could break, up to 64
+  trees; one naming a commit not there is said. What hold reads
+  from git it reads within two minutes and 256 MiB, after its walk of the
+  files, which nothing it reads can keep from finishing. A branch of
+  varde's that is not a commit (a `ref:` to `main`) is removed, and a
+  HEAD that names neither a branch (as git would name one, and not the
+  main checkout's, which your next commit would move) nor a commit is
+  flagged. A link is judged at every step of the way it is written, so
+  one that passes through a place a sandbox writes is removed whatever
+  `..` follows. The run is
+  flagged for any of it, since your own git there would read it. Hooks
+  kept in the checkout (`core.hooksPath`, as husky sets it) are read-only
+  from their first directory there, so none between can be renamed; one
+  that is a link stops the sandbox. `varde sandbox -- CMD` holds what the
+  command left too. A checkout a sandboxed session worked in
+  is marked (`git::distrust`). A worktree's submodules, which git keeps
+  in its own git directory (`modules/`), are read-only to it as the
+  repository's are: a session works in those already set up, and sets up
+  none (`git submodule update --init` in the worktree, by you, first). varde runs no git inside its submodules,
+  `done` keeps it rather than look, and it is not run in again without a
+  sandbox. A bare repository committed to the branch is git's own risk,
+  as in any clone: `doctor` asks for `safe.bareRepository = explicit`.
+- **What it reads for one.** A file a session names that varde reads
+  outside (a recipe, its `use`, a rubric, a verifier's ask) is read
+  through the file opened, which must be a regular file in its checkout:
+  never a name checked and then read, nor waited on. A rubric or a
+  verifier's ask is kept as text, a file's read when it is set, so
+  nothing a session writes stands in for it later. Transcripts are
+  opened without following a link; Claude's prompt history is hidden.
+- **What it is not.** It bounds a session's mistakes and what a prompt
+  injected into it can reach. On macOS, `sandbox-exec` with
+  `(allow default)` refuses only what it names: launchd's and the
+  keychain's mach services stay reachable to a determined program. A build cache it writes is what you build
+  from next, the checkout's scripts are yours to read before you run
+  them (what your hooks run among them: the hooks are kept, but a script
+  one calls, a `package.json` script, a `.pre-commit-config.yaml` or
+  `lefthook.yml` are the checkout's), and the network is open. A cloud login it shows can do what that
+  login may: read-only access is a reader's login, not the sandbox's
+  promise. Of what a session committed, varde looks at the tips: a link
+  out in an earlier commit, gone by the tip, is written by a rebase or
+  cherry-pick of that commit, not by a merge. What varde sets aside after a run it checks once, when the
+  run ends: on macOS a process a session detaches (`setsid`) outlives
+  it, which bwrap's own process namespace prevents on Linux; and a link
+  into another task's checkout leads to what that task's run, still
+  going, has left. A tool that links its packages from a cache into the
+  checkout (uv's `link-mode = symlink`, pnpm's global virtual store) has
+  its links removed and the run flagged: use its default, copies or
+  hard links. A repository that keeps its refs in a reftable is not run
+  in a sandbox: what varde checks after a run is the files' refs. On
+  macOS, whether `sandbox-exec` keeps a hard link a session makes to a
+  file of yours from writing through to it is not yet checked (Linux
+  refuses one across its mounts). A `.git` is matched in ASCII, as on Linux and APFS; HFS+,
+  which ignores some Unicode in names, is not covered.
 
 ## 7. Memory
 
@@ -1081,11 +1276,14 @@ The fixtures are real hook payloads and transcripts.
 
 ### 8.1 Installation
 
-The plugin contains only `hooks.json`, and every entry calls
-`varde hook <Event>`. No skill, no shell script. Guidance comes from the
-`SessionStart` output of `varde hook` (§7.3), so it always matches the
-installed binary, and a pinned plugin has nothing that can go stale but
-its list of events. `varde doctor` compares that list with the binary's,
+The plugin contains `hooks.json`, every entry of which calls
+`varde hook <Event>`, and one skill, `varde-loops`: when to make work a
+check, a loop, a trail or a recipe, and which command does it. No shell
+script. Everything else comes from the binary: the `SessionStart` output
+of `varde hook` (§7.3), `varde recipe guide`, which the skill sends the
+agent to first, and `--help`. So guidance matches the installed binary,
+and a pinned plugin has little that can go stale: its list of events,
+and the skill's few command names. `varde doctor` compares that list with the binary's,
 and the plugin's version is raised whenever its events change.
 
 ### 8.2 pi
@@ -1223,3 +1421,7 @@ What looks like a missing feature is often one of these.
 | Q44 | Trails | Tasks wait on others being verified or approved, never done (Q40 would put an upstream's branch away). varde merges nothing; a planner's trail is accepted by you. |
 | Q45 | Profiles | Roles and aliases, not model ids; effort held for a session; the review of another model where you can. |
 | Q46 | Recipes | Data, not code; versioned by content hash; yours run, built-ins ship in the binary. A repository's own recipes would run only once you approve their hash: later. |
+| Q47 | The sandbox | Background sessions and checks run in the system's sandbox, around any agent, on by default where it exists (§6.8); each adapter maps one grant to its agent's flags. Rejected: per-agent permission flags in profiles (Claude's `auto` refuses writes on haiku, and another agent has none), a container runtime (heavy, and the checkout and caches must be shared anyway), a network filter (a proxy to run), and a sandbox for your own sessions, which you watch. |
+| Q48 | Attended loops | Opening a looping task takes the loop over rather than pausing it: your turns that change files are its rounds, a failure comes back into your session, and it carries on in the background when you leave. `follow` watches without taking over. |
+| Q50 | Skills and verification | A skill is the how, and lives with the agent (Claude's skills, pi's templates); varde is when, on which model, in which sandbox, and what the answer means. A check's `verify` runs an agent session that may use any skill, and a step's prompt names one. Rejected: a `skill` key of varde's own, which would only wrap each agent's slash command. |
+| Q49 | A plan's trail | A step can write the trail of tasks that follow it; you approve the plan, and its tasks are made and set going. Large work fans out to worktrees that each loop to green, and a last step merges them. varde still merges nothing itself. |

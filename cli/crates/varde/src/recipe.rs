@@ -24,10 +24,12 @@ use crate::{config, flow, now_ms, Paths};
 const BUSY: Duration = Duration::from_secs(2);
 
 /// The recipes varde ships.
-const BUILT_IN: [(&str, &str); 5] = [
+const BUILT_IN: [(&str, &str); 7] = [
     ("fix-until-green", include_str!("../recipes/fix-until-green.toml")),
     ("bugfix", include_str!("../recipes/bugfix.toml")),
     ("feature", include_str!("../recipes/feature.toml")),
+    ("epic", include_str!("../recipes/epic.toml")),
+    ("change-plan", include_str!("../recipes/change-plan.toml")),
     ("draft-revise", include_str!("../recipes/draft-revise.toml")),
     ("research", include_str!("../recipes/research.toml")),
 ];
@@ -66,7 +68,15 @@ struct Found {
 fn find(name: &str) -> Result<Found> {
     let as_path = Path::new(name);
     if name.ends_with(".toml") || name.contains('/') {
-        let text = std::fs::read_to_string(as_path).with_context(|| format!("reading {name}"))?;
+        let text = if let Some(root) = crate::sandbox::bounded_root() {
+            crate::sandbox::read_beneath(&root, as_path).map_err(|_| {
+                anyhow::anyhow!(
+                    "{name} is not a file in this checkout: a session in a sandbox reads no other"
+                )
+            })?
+        } else {
+            std::fs::read_to_string(as_path).with_context(|| format!("reading {name}"))?
+        };
         let stem = as_path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
         return Ok(Found { name: stem, text, source: Source::File, path: Some(as_path.to_path_buf()) });
     }
@@ -85,6 +95,21 @@ fn find(name: &str) -> Result<Found> {
         }
         None => bail!("there is no recipe {name}: varde recipe list shows them"),
     }
+}
+
+/// A check's rubric or verifier, as kept. It names a file read later,
+/// outside; from a session in a sandbox it is kept as the text of a file
+/// in its checkout, read now, or as the text given, never as a path.
+fn as_text(v: Option<String>) -> Result<Option<String>> {
+    let Some(v) = v.filter(|v| !v.trim().is_empty()) else { return Ok(None) };
+    let Some(root) = crate::sandbox::bounded_root() else { return flow::rubric_arg(&v).map(Some) };
+    let named = Path::new(&v);
+    if root.join(named).exists() || v.starts_with('/') || v.contains("..") || v.starts_with('~') {
+        return crate::sandbox::read_beneath(&root, named).map(Some).map_err(|_| {
+            anyhow::anyhow!("{v} is not a file in this checkout: a session in a sandbox reads no other")
+        });
+    }
+    Ok(Some(v))
 }
 
 /// A content hash that is the same on every machine and release (FNV-1a).
@@ -139,6 +164,9 @@ pub struct Step {
     pub tree: Option<String>,
     /// `branch`, `draft-pr`, `file:<path>` or `report`.
     pub output: Option<String>,
+    /// The sandbox its background sessions and checks run in: `default`,
+    /// `push`, `off` or yours. Default: `push` for a draft-pr, else `default`.
+    pub sandbox: Option<String>,
     /// Read by `resolve`, which merges it before the step is.
     #[serde(rename = "use")]
     #[allow(dead_code)]
@@ -152,6 +180,8 @@ pub struct CheckSpec {
     #[serde(default)]
     pub review: bool,
     pub rubric: Option<String>,
+    /// What an agent session is asked to verify: a file, or the text.
+    pub verify: Option<String>,
     pub reviewer: Option<String>,
     pub again: Option<u32>,
 }
@@ -361,8 +391,9 @@ fn validate(r: &Recipe) -> Result<()> {
             }
         }
         if let Some(o) = &s.output {
-            if !(o == "branch" || o == "draft-pr" || o == "report" || o.starts_with("file:")) {
-                bail!("step {}: output is branch, draft-pr, report or file:<path>, not {o}", s.id);
+            if !(o == "branch" || o == "draft-pr" || o == "report" || o == "trail" || o.starts_with("file:"))
+            {
+                bail!("step {}: output is branch, draft-pr, report, trail or file:<path>, not {o}", s.id);
             }
         }
         let profiles = s
@@ -376,12 +407,18 @@ fn validate(r: &Recipe) -> Result<()> {
                 bail!("step {}: there is no profile {p}", s.id);
             }
         }
+        if let Some(b) = s.sandbox.as_deref().filter(|b| !b.contains("{{")) {
+            crate::sandbox::policy(Some(b)).with_context(|| format!("step {}", s.id))?;
+        }
         if s.repeat.is_some() && s.check.is_none() {
             bail!("step {} loops but has no check to loop until", s.id);
         }
     }
     Ok(())
 }
+
+/// The file a step whose output is a trail writes.
+pub const TRAIL: &str = "trail.toml";
 
 /// What a step's output asks of its session.
 fn output_words(output: &str) -> Option<String> {
@@ -391,6 +428,17 @@ fn output_words(output: &str) -> Option<String> {
                        (gh pr create --draft). If you may not push, end by giving the user the exact commands to run."
             .into(),
         "report" => "Change no files. Your last message is the result: write it as a report for the user.".into(),
+        "trail" => format!(
+            "Write the plan as a varde recipe in {TRAIL} at the root of this checkout: run `varde recipe guide` for \
+             the format, and `varde recipe check {TRAIL}` until it is usable. Make each step one piece of the work \
+             that a fresh session can build and check on its own, with its own check command; steps that do not \
+             depend on each other run at the same time, each in its own worktree. End with a step that needs them \
+             all, merges their branches and runs the whole check. Give steps that run at the same time files of \
+             their own, so the merge does not conflict. Write each command out in full: a trail takes no \
+             variables but {{{{title}}}} and {{{{context}}}}. Two to six steps; a check, not the user's approval, \
+             between them, unless only the user can judge. Commit it. When the user approves this task, \
+             varde makes the tasks from {TRAIL}, after this one, and sets them going."
+        ),
         f => format!(
             "Write the result to {} in this directory, making any folders it needs, and say its path at the end.",
             f.strip_prefix("file:")?
@@ -421,10 +469,22 @@ pub fn new(
     vars: &[String],
     sets: &[String],
     profile: Option<String>,
+    after: (&[String], bool),
     go: bool,
     as_json: bool,
 ) -> Result<()> {
     let store = paths.open(BUSY)?;
+    if project_dir.is_some() {
+        crate::sandbox::not_inside("Making tasks in another project")?;
+    }
+    if go {
+        crate::sandbox::not_inside("Setting a trail going")?;
+    }
+    let (after, approved) = after;
+    let after = after.iter().map(|a| task::resolve(&store, a)).collect::<Result<Vec<_>>>()?;
+    for a in &after {
+        crate::sandbox::own_project(&store, a)?;
+    }
     let title = title.join(" ").trim().to_string();
     if title.is_empty() {
         bail!("a task made from a recipe needs a title");
@@ -442,8 +502,10 @@ pub fn new(
     }
     given.insert("title".into(), title.clone());
     given.insert("context".into(), body.clone());
-    // A check named nowhere falls back on the repository's.
-    if !given.contains_key("check") {
+    // A check named nowhere falls back on the repository's, for a recipe
+    // that takes one.
+    let takes_check = resolve(name, sets, None)?.vars.contains_key("check");
+    if takes_check && !given.contains_key("check") {
         if let Some(c) = &repo.check {
             given.insert("check".into(), c.clone());
         }
@@ -455,7 +517,9 @@ pub fn new(
         }
     }
     for s in &r.steps {
-        if s.check.as_ref().is_some_and(|c| c.cmd.as_deref() == Some("") && !c.review) {
+        // A command the recipe names that came out empty: a review alone
+        // in its place would loop on judgement, which is not what it said.
+        if s.check.as_ref().is_some_and(|c| c.cmd.as_deref().is_some_and(|c| c.trim().is_empty())) {
             bail!(
                 "step {} has no check command: --var check=CMD, or git config varde.check in the repository",
                 s.id
@@ -468,7 +532,7 @@ pub fn new(
     {
         let p = p.split(':').next().unwrap_or(p).to_string();
         if !warned.contains(&p) {
-            if let Some(w) = config::get().background_warning(&p) {
+            if let Some(w) = config::get().profile_warning(&p) {
                 eprintln!("varde: {w}");
             }
             warned.push(p);
@@ -493,13 +557,21 @@ pub fn new(
         let id =
             task::create(&store, &t_title, Some(b.trim()), Some(&root.display().to_string()), None, now)?;
         let prof = s.profile.clone().or_else(|| profile.clone());
+        let sandbox = crate::sandbox::for_new(step_sandbox(s))?;
         store.conn.execute(
-            "UPDATE task SET profile = ?2, recipe = ?3, inbox = 0 WHERE id = ?1",
-            params![id, prof, format!("{}@{}", r.name, r.hash)],
+            "UPDATE task SET profile = ?2, recipe = ?3, inbox = 0, sandbox = ?4, output = ?5 WHERE id = ?1",
+            params![id, prof, format!("{}@{}", r.name, r.hash), sandbox, s.output],
         )?;
+        // What the trail waits on, before its first steps.
+        if s.needs.is_empty() {
+            for a in &after {
+                flow::add_edge(&store, &id, a, approved)?;
+            }
+        }
         if let Some(c) = &s.check {
             let cmd = c.cmd.clone().filter(|c| !c.trim().is_empty());
-            let rubric = c.rubric.clone().filter(|r| !r.trim().is_empty());
+            let rubric = as_text(c.rubric.clone()).with_context(|| format!("step {}", s.id))?;
+            let verify = as_text(c.verify.clone()).with_context(|| format!("step {}", s.id))?;
             flow::set_def(
                 &store,
                 &id,
@@ -508,6 +580,7 @@ pub fn new(
                     cmd,
                     rubric,
                     reviewer: c.reviewer.clone(),
+                    verify,
                     guard: s.guard.clone(),
                     again: c.again.unwrap_or(1),
                     base_tree: None,
@@ -617,6 +690,12 @@ pub fn list(as_json: bool) -> Result<()> {
     Ok(())
 }
 
+/// The sandbox a step names, or the one its output needs: a draft pull
+/// request is pushed, and pushing needs git's logins.
+fn step_sandbox(s: &Step) -> Option<&str> {
+    s.sandbox.as_deref().or((s.output.as_deref() == Some("draft-pr")).then_some("push"))
+}
+
 /// One line for a step, as `show` and `check` draw it.
 fn step_line(s: &Step) -> String {
     let mut parts = vec![s.id.clone()];
@@ -631,6 +710,9 @@ fn step_line(s: &Step) -> String {
                 "review{}",
                 c.reviewer.as_ref().map(|r| format!(" by {r}")).unwrap_or_default()
             ));
+        }
+        if c.verify.as_ref().is_some_and(|v| !v.trim().is_empty()) {
+            what.push("an agent verifies".into());
         }
         if c.again.is_some_and(|a| a > 1) {
             what.push(format!("{} in a row", c.again.unwrap_or(1)));
@@ -647,6 +729,9 @@ fn step_line(s: &Step) -> String {
     }
     if let Some(o) = &s.output {
         parts.push(format!("output {o}"));
+    }
+    if let Some(b) = step_sandbox(s) {
+        parts.push(format!("sandbox {b}"));
     }
     parts.join(" · ")
 }
@@ -813,12 +898,20 @@ The file
   check = { cmd = "cargo test", review = true, rubric = "FILE or text", reviewer = "review", again = 1 }
                                         # cmd: exits 0 to pass; review: another model reads the
                                         #   diff after cmd passes (or alone); again: N passes in a row
+                                        # verify = "FILE or text": then an agent session (the reviewer
+                                        #   profile, its tools and skills, in the sandbox) checks the
+                                        #   work as asked ("run it and use /verify-app"): PASS or FAIL
   loop = { max = 3, minutes = 60, escalate = ["deep", "deep:xhigh"] }
                                         # fresh sessions until the check passes; needs a check
   guard = ["tests/*"]                   # paths a round must not change: it is flagged, the loop stops
   tree = "upstream"                     # own | upstream (its one upstream's worktree)
                                         #   default: upstream when it needs one step nothing else needs
-  output = "branch"                     # branch | draft-pr | file:PATH | report
+  output = "branch"                     # branch | draft-pr | file:PATH | report | trail
+                                        #   trail: it writes trail.toml, a recipe of its own,
+                                        #   whose tasks varde makes after it once you approve it
+  sandbox = "default"                   # what its background sessions reach: default | push |
+                                        #   off | yours ([sandboxes.NAME]); varde sandbox shows them
+                                        #   default: push for a draft-pr, else default
   use = "fix-until-green"               # start from that recipe's first step; keys here win
 
 {{title}} and {{context}} are the title and --context given to varde new.
@@ -826,15 +919,21 @@ The file
 fix.loop.max=5, fix.loop.escalate=deep,deep:xhigh.
 
 Rules of thumb
-- Few steps: 1 to 4. A step is a whole session; parallel steps need separate files.
+- Few steps: 1 to 4 (a trail a plan writes: 2 to 6). A step is a whole session;
+  steps that run at the same time need files of their own.
 - Every step that loops has a check, and a command beats a review: a review
   alone gets two rounds and then the user.
 - Guard what the check reads (tests/*) when a step must not change it.
 - Put the user where only they can judge: gate = "approved" on a spec or a repro.
 - Any logic varde has no word for goes in the check's command or the prompt.
+- Skills are the how: name one in a prompt (`/spec`) or in a check's verify
+  ("use /verify-app"), and every round runs it.
+- What must not happen inside a loop (an apply, a deploy) goes outside it: a
+  step in a sandbox that denies it writes the commands into a file:CHECKLIST.md
+  output, gated approved, and the user runs them.
 
-Built-in: fix-until-green, bugfix, feature, draft-revise, research
-(varde recipe show NAME prints each).
+Built-in: fix-until-green, bugfix, feature, epic, change-plan, draft-revise,
+research (varde recipe show NAME prints each).
 "#;
 
 #[cfg(test)]

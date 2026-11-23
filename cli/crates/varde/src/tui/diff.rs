@@ -23,7 +23,7 @@ pub(super) struct Diff {
 impl Diff {
     pub(super) fn git(&self) -> std::process::Command {
         let mut c = std::process::Command::new("git");
-        c.arg("-C").arg(&self.dir);
+        c.args(crate::git::SAFE).arg("-C").arg(&self.dir);
         if let Some(i) = &self.index {
             c.env("GIT_INDEX_FILE", i.path().join("index"));
         }
@@ -32,14 +32,24 @@ impl Diff {
 
     /// Take a copy of the index, and mark the untracked files in it.
     fn with_untracked(&mut self) -> Result<()> {
-        let out = self.git().args(["rev-parse", "--path-format=absolute", "--git-path", "index"]).output()?;
+        let out = crate::git::bounded(
+            self.git()
+                .args(["rev-parse", "--path-format=absolute", "--git-path", "index"])
+                .stdin(std::process::Stdio::null()),
+        )?;
         let real = String::from_utf8_lossy(&out.stdout).trim().to_string();
         let scratch = tempfile::tempdir()?;
         if std::path::Path::new(&real).is_file() {
             std::fs::copy(&real, scratch.path().join("index"))?;
         }
         self.index = Some(scratch);
-        let out = self.git().args(["add", "--intent-to-add", "--", "."]).output()?;
+        let mut add: Vec<String> = ["add", "--intent-to-add", "--", "."].map(String::from).to_vec();
+        add.extend(
+            crate::git::nested(std::path::Path::new(&self.dir), false)
+                .into_iter()
+                .map(|p| format!(":(exclude){p}")),
+        );
+        let out = crate::git::bounded(self.git().args(&add).stdin(std::process::Stdio::null()))?;
         if !out.status.success() {
             anyhow::bail!("git add --intent-to-add: {}", String::from_utf8_lossy(&out.stderr).trim());
         }
@@ -72,17 +82,17 @@ impl App<'_> {
             let mut diff = Diff { from: None, shared: base.is_none(), dir, index: None };
             diff.with_untracked()?;
             if let Some(b) = base {
-                let out = diff.git().args(["merge-base", &b, "HEAD"]).output()?;
+                let out = crate::git::bounded(
+                    diff.git().args(["merge-base", &b, "HEAD"]).stdin(std::process::Stdio::null()),
+                )?;
                 diff.from =
                     Some(String::from_utf8_lossy(&out.stdout).trim().to_string()).filter(|s| !s.is_empty());
             }
-            let quiet = diff
-                .git()
-                .args(["diff", "--quiet"])
-                .args(&diff.from)
-                .output()
-                .context("running git diff")?
-                .status;
+            let quiet = crate::git::bounded(
+                diff.git().args(["diff", "--quiet"]).args(&diff.from).stdin(std::process::Stdio::null()),
+            )
+            .context("running git diff")?
+            .status;
             Ok((!quiet.success(), diff))
         })();
         match result {
@@ -106,7 +116,11 @@ impl App<'_> {
     /// git's pager quits at once on a diff that fits the screen (`LESS=F`),
     /// so without the wait the board would be drawn straight over it.
     pub(super) fn diff(&self, diff: &Diff) -> Result<String> {
-        diff.git().arg("diff").args(&diff.from).status().context("running git diff")?;
+        diff.git()
+            .args(["diff", "--ignore-submodules=all"])
+            .args(&diff.from)
+            .status()
+            .context("running git diff")?;
         println!("\n{}", diff.footer());
         any_key();
         Ok(if diff.shared {

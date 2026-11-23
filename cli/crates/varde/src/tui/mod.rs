@@ -150,6 +150,8 @@ enum Away {
     /// Edit the cairn of this project.
     EditProject(String),
     Diff(Diff),
+    /// Watch this task's sessions (`varde follow`) in this terminal.
+    Follow(String),
     /// Write the new task in `$EDITOR`, and come back to the form.
     Draft(Draft),
 }
@@ -945,6 +947,7 @@ impl<'a> App<'a> {
                     Some(Act::Edit) => return self.edit(),
                     Some(Act::Editor) => return self.editor(),
                     Some(Act::Diff) => return self.current_id().and_then(|id| self.changes(&id)),
+                    Some(Act::Follow) => return self.current_id().map(Away::Follow),
                     Some(act) => {
                         self.normal(act);
                         None
@@ -1227,6 +1230,7 @@ impl<'a> App<'a> {
             | Act::Profile
             | Act::Recipes
             | Act::Output => self.flow_act(act),
+            Act::Follow => {}
             Act::Start
             | Act::Background
             | Act::Fresh
@@ -1318,6 +1322,14 @@ impl<'a> App<'a> {
                     .map(|s| saved("project cairn", s))
             }
             Away::Diff(diff) => self.diff(&diff),
+            Away::Follow(task) => {
+                let mut cmd = std::process::Command::new(crate::exe());
+                cmd.args(["follow", &task]);
+                // ^C is for it, not the board.
+                crate::run::ignoring_terminal_signals(|| cmd.status())
+                    .map(|_| String::new())
+                    .map_err(anyhow::Error::from)
+            }
             Away::Draft(mut draft) => {
                 let result = crate::memory_cmd::edit_in_editor("task", &draft.text()).map(|text| {
                     draft.set_text(&text);

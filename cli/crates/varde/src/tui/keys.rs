@@ -52,6 +52,7 @@ pub(super) enum Act {
     Profile,
     Recipes,
     Output,
+    Follow,
 }
 
 use Act::*;
@@ -105,6 +106,7 @@ const ACTS: &[(Act, &str, &[KeyCode], &str)] = &[
     (Profile, "profile", &[Char('M')], ""),
     (Recipes, "recipes", &[Char('r')], ""),
     (Output, "check-output", &[Char('O')], ""),
+    (Follow, "follow", &[Char('f')], ""),
 ];
 
 /// Names `[keys]` took before the board's keys were made one with the
@@ -141,6 +143,7 @@ pub(super) const HELP: [HelpGroup; 5] = [
             (&[Loop], "loop till it passes"),
             (&[Check, CheckNow, Output], "check / now / output"),
             (&[Approve, Trail], "approve / its trail"),
+            (&[Follow], "follow: watch it work"),
             (&[Profile, Recipes], "profile / recipes"),
         ],
     ),

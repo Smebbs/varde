@@ -130,6 +130,11 @@ pub enum State {
     Asked {
         rounds: i64,
     },
+    /// A session of yours is open on it: each of its turns is a round,
+    /// checked as it ends, and told how the check failed.
+    Attended {
+        round: i64,
+    },
 }
 
 impl State {
@@ -150,6 +155,7 @@ impl State {
             State::Spent { .. } => "spent",
             State::Stuck { .. } => "stuck",
             State::Asked { .. } => "asked",
+            State::Attended { .. } => "attended",
         }
     }
 }
@@ -346,6 +352,64 @@ pub fn rounds(
     Ok(rows.collect::<rusqlite::Result<_>>()?)
 }
 
+/// The rounds and checks a loop has had since it was set: its background
+/// rounds, and each turn of a session of yours that varde checked, as a
+/// round of its own with its check (`<run>#<check>`), oldest first.
+pub fn with_turns(
+    conn: &Connection,
+    task: &str,
+    def: &LoopDef,
+    now: i64,
+    alive: &dyn Fn(i64, i64) -> bool,
+) -> Result<(Vec<Round>, Vec<Check>)> {
+    let mut rounds = rounds(conn, task, def.started, now, alive)?;
+    let mut checks = checks(conn, task, def.started)?;
+    let of_rounds: Vec<String> = rounds.iter().map(|r| r.run.clone()).collect();
+    // A check of a turn that found the files changing under it is no round:
+    // the next turn's check is.
+    checks
+        .retain(|c| c.verdict != Verdict::Unchecked || c.run.as_ref().is_none_or(|r| of_rounds.contains(r)));
+    for c in checks.iter_mut() {
+        let Some(run) = c.run.clone().filter(|r| !of_rounds.contains(r)) else { continue };
+        let id = format!("{run}#{}", c.id);
+        let profile: Option<String> = conn
+            .query_row("SELECT profile FROM run WHERE id = ?1", [&run], |r| r.get(0))
+            .optional()?
+            .flatten();
+        rounds.push(Round {
+            run: id.clone(),
+            n: 0,
+            started: c.started,
+            ended: Some(c.finished),
+            exit_code: Some(0),
+            live: false,
+            asked: false,
+            profile,
+        });
+        c.run = Some(id);
+    }
+    rounds.sort_by_key(|r| r.started);
+    for (i, r) in rounds.iter_mut().enumerate() {
+        r.n = i as i64 + 1;
+    }
+    Ok((rounds, checks))
+}
+
+/// Whether a session of yours, not a background round, is live on `task`.
+pub fn attending(conn: &Connection, task: &str, now: i64, alive: &dyn Fn(i64, i64) -> bool) -> Result<bool> {
+    let live: Vec<(Option<i64>, i64, i64)> = conn
+        .prepare_cached(
+            "SELECT pid, coalesce(pid_start, 0), started FROM run
+             WHERE task = ?1 AND exit_code IS NULL AND NOT coalesce(background, 0) AND round IS NULL",
+        )?
+        .query_map([task], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(live.into_iter().any(|(pid, start, started)| match pid {
+        Some(p) if p > 0 => alive(p, start),
+        _ => now - started < LAUNCHING_MS,
+    }))
+}
+
 /// A run recorded this long ago and never launched is not coming.
 const LAUNCHING_MS: i64 = 2 * 60 * 1000;
 
@@ -367,9 +431,13 @@ pub fn state(
     let Some(def) = loop_of(conn, task)? else { return Ok(None) };
     let base: Option<String> =
         conn.query_row("SELECT profile FROM task WHERE id = ?1", [task], |r| r.get(0))?;
-    let rounds = rounds(conn, task, def.started, now, alive)?;
-    let checks = checks(conn, task, def.started)?;
-    Ok(Some(derive(&def, base.as_deref(), review_only(conn, task)?, &rounds, &checks)))
+    let (rounds, checks) = with_turns(conn, task, &def, now, alive)?;
+    let st = derive(&def, base.as_deref(), review_only(conn, task)?, &rounds, &checks);
+    // A session of yours on it: the loop goes on there, a turn a round.
+    if attending(conn, task, now, alive)? && matches!(st, State::Due { .. } | State::Checking { .. }) {
+        return Ok(Some(State::Attended { round: rounds.len() as i64 + 1 }));
+    }
+    Ok(Some(st))
 }
 
 /// The tree a task's checkout had when the git refresh or a check last
@@ -591,6 +659,7 @@ pub fn row(
             State::Spent { why, .. } => (format!("■ spent, {why}"), "needs", Some("needs_you")),
             State::Stuck { rounds } => (format!("■ stuck after {rounds}"), "needs", Some("needs_you")),
             State::Asked { .. } => ("? asked you".to_string(), "needs", Some("needs_you")),
+            State::Attended { round } => (format!("↺ {round}/{max} with you"), "working", None),
         };
         return Ok(Some(Flow { label, tone, state: Some(st.name()), group }));
     }

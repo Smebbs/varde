@@ -20,6 +20,7 @@ pub struct Flow {
     pub after: Vec<String>,
     pub approved: bool,
     pub profile: Option<String>,
+    pub sandbox: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -41,7 +42,17 @@ pub fn new(
             bail!("there is no profile {p}: add it under [profiles] in {}", crate::config::path().display());
         }
     }
+    let sandbox = crate::sandbox::for_new(flow.sandbox.as_deref())?;
+    if project_dir.is_some() {
+        crate::sandbox::not_inside("Making a task in another project")?;
+    }
+    if when.is_some() {
+        crate::sandbox::not_inside("Scheduling a task")?;
+    }
     let after = flow.after.iter().map(|a| task::resolve(&store, a)).collect::<Result<Vec<_>>>()?;
+    for a in &after {
+        crate::sandbox::own_project(&store, a)?;
+    }
     let body = crate::arg_or_stdin(body)?.map(|b| b.trim().to_string()).filter(|b| !b.is_empty());
     if body.is_none() && varde_core::title::clean(&title.join(" ")).trim().is_empty() {
         bail!("a task needs a title, or --context TEXT to cut one from");
@@ -56,6 +67,7 @@ pub fn new(
         Some(run) => {
             // By its id, or the six characters a session is told.
             let run = crate::memory_cmd::resolve_run(&store.conn, &run)?;
+            crate::sandbox::own_run(&run)?;
             let root = project_dir.map(|d| crate::start::project_of(&store, &d)).transpose()?;
             let root = root.map(|r| r.display().to_string());
             task::defer(&store, &title.join(" "), body.as_deref(), &run, root.as_deref(), now_ms())?
@@ -88,6 +100,9 @@ pub fn new(
     }
     if let Some(p) = &flow.profile {
         store.conn.execute("UPDATE task SET profile = ?2 WHERE id = ?1", rusqlite::params![id, p])?;
+    }
+    if sandbox.is_some() {
+        store.conn.execute("UPDATE task SET sandbox = ?2 WHERE id = ?1", rusqlite::params![id, sandbox])?;
     }
     for a in &after {
         crate::flow::add_edge(&store, &id, a, flow.approved)?;
@@ -252,6 +267,7 @@ pub fn unlink(paths: &Paths, reference: &str) -> Result<()> {
 pub fn show(paths: &Paths, reference: &str, history: bool, with_git: bool, as_json: bool) -> Result<()> {
     let store = paths.open(BUSY)?;
     let id = task::resolve(&store, reference)?;
+    crate::sandbox::own_project(&store, &id)?;
     let d = task::detail(&store, &id, &crate::process::alive)?;
     let cairn = memory::cairn(&store.conn, &id)?.map(|(c, _)| c);
     let usage = memory::usage(&store.conn, memory::Owner::Task(&id))?;
@@ -408,7 +424,13 @@ impl View {
         let mut out = Vec::new();
         if let Some(b) = d.body.as_deref().filter(|b| !b.trim().is_empty()) {
             out.push((Part::Heading, "Context".into()));
-            out.extend(b.lines().map(|l| (Part::Text, format!("  {l}"))));
+            // As text: a session can write a task's context, and nothing it
+            // writes steers the terminal.
+            out.extend(b.lines().map(|l| {
+                let l: String =
+                    l.chars().map(|c| if c.is_control() && c != '\t' { '?' } else { c }).collect();
+                (Part::Text, format!("  {l}"))
+            }));
         }
         let runs: Vec<&task::RunDetail> = d.runs.iter().rev().collect();
         if !runs.is_empty() {

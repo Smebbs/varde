@@ -4,7 +4,7 @@
 
 ;; Author: Morten Smebye <mortensmeb@gmail.com>
 ;; URL: https://github.com/Smebbs/varde
-;; Version: 1.6.0-beta2
+;; Version: 1.6.0-beta3
 ;; Package-Requires: ((emacs "29.1") (org "9.6") (transient "0.4"))
 ;; Keywords: tools, outlines
 ;; SPDX-License-Identifier: MIT
@@ -2562,6 +2562,7 @@ So the board's keys act on it here."
     ("O" "check output" org-varde-check-output)
     ("A" "approve" org-varde-approve)
     ("t" "trail" org-varde-trail)
+    ("f" "follow" org-varde-follow)
     ("M" "profile" org-varde-set-profile)]
    ;; Evil's keys in columns of their own: transient binds the keys of
    ;; a hidden suffix, but not those of a hidden column, and g cannot be
@@ -2645,6 +2646,7 @@ Under evil, its normal state takes them from here too."
   "O" #'org-varde-check-output
   "A" #'org-varde-approve
   "t" #'org-varde-trail
+  "f" #'org-varde-follow
   "M" #'org-varde-set-profile
   "?" #'org-varde-show-menu)
 
@@ -3250,8 +3252,9 @@ Its next session takes it: one at work keeps the one it started with."
 
 (defun org-varde-check ()
   "Set how varde checks the task here: a command, then perhaps a review
-by another model, and paths a session must not change.  Emptied, it
-offers to remove the check."
+by another model, an agent that verifies it with its tools and skills,
+and paths a session must not change.  Emptied, it offers to remove the
+check."
   (interactive)
   (let* ((row (org-varde--here-row))
          (task (plist-get row :task))
@@ -3261,10 +3264,12 @@ offers to remove the check."
          (review (y-or-n-p "Then a review of the change by another model? "))
          (rubric (and review (read-string "What the review judges by, a file or the text (empty: none): "
                                           (plist-get check :rubric))))
+         (verify (read-string "Then an agent verifies it, asked this, e.g. use /verify-app (empty: none): "
+                              (plist-get check :verify)))
          (guard (read-string "Paths a session must not change, e.g. tests/* (empty: none): "
                              (string-join (plist-get check :guard) " "))))
-    (if (and (string-blank-p cmd) (not review))
-        (when (y-or-n-p "No command and no review: remove its check? ")
+    (if (and (string-blank-p cmd) (not review) (string-blank-p verify))
+        (when (y-or-n-p "No command, review or verifier: remove its check? ")
           (org-varde--flow-done (org-varde--varde "check" task "--off")))
       (condition-case e
           (org-varde--flow-done
@@ -3272,6 +3277,7 @@ offers to remove the check."
                   (append (list "check" task)
                           (and review (list "--review"))
                           (and rubric (not (string-blank-p rubric)) (list "--rubric" rubric))
+                          (and (not (string-blank-p verify)) (list "--verify" verify))
                           (mapcan (lambda (g) (list "--guard" g)) (split-string guard nil t))
                           (and (not (string-blank-p cmd)) (list "--" cmd)))))
         (org-varde-varde-error (user-error "varde: %s" (cadr e)))))))
@@ -3313,7 +3319,7 @@ waits on your approval of it can start."
           (org-varde--flow-done (org-varde--varde "approve" (plist-get row :task)))
         (org-varde-varde-error (user-error "varde: %s" (cadr e)))))))
 
-(defconst org-varde--loop-going '("working" "checking" "due")
+(defconst org-varde--loop-going '("working" "checking" "due" "attended")
   "The states of a loop varde still moves on.")
 
 (defun org-varde-loop ()
@@ -3362,23 +3368,6 @@ run it again or end it."
                         (and escalate (list "--escalate" (string-join escalate ","))))))
       (org-varde-varde-error (user-error "varde: %s" (cadr e))))))
 
-(defun org-varde--loop-words (state)
-  "A loop's STATE, as `varde show --json' has it, in words."
-  (let ((n (lambda (k) (let ((r (plist-get state k))) (format "%d round%s" r (if (eql r 1) "" "s"))))))
-    (pcase (plist-get state :state)
-      ("paused" (format "paused after %s · L resumes it" (funcall n :rounds)))
-      ("working" (format "round %d at work" (plist-get state :round)))
-      ("checking" (format "round %d ended, checking" (plist-get state :round)))
-      ("due" (format "round %d next%s" (plist-get state :round)
-                     (if (plist-get state :profile) (format ", on %s" (plist-get state :profile)) "")))
-      ("verified" (format "verified after %s" (funcall n :rounds)))
-      ("flagged" (format "flagged: %s" (plist-get state :why)))
-      ("error" (format "stopped: %s" (plist-get state :why)))
-      ("spent" (format "spent: %s" (plist-get state :why)))
-      ("stuck" (format "stuck after %s: the same failure with no change" (funcall n :rounds)))
-      ("asked" "a round asked you something: RET on it opens it")
-      (s s))))
-
 (defun org-varde--verdict (check)
   "CHECK's verdict as a mark and its summary."
   (let ((v (plist-get check :verdict)))
@@ -3409,7 +3398,7 @@ line, RET shows it."
          (recipe (plist-get flow :recipe)))
     (when (or check lp after before profile recipe)
       (when (org-varde--view-heading "loop" (cond (lp "Loop") ((or after before) "Trail") (check "Check") (t "Runs on"))
-                                     (and lp (concat "· " (org-varde--loop-words (plist-get lp :state))))
+                                     (and lp (plist-get lp :words) (concat "· " (plist-get lp :words)))
                                      t)
         (when (or profile recipe)
           (org-varde--view-line
@@ -3418,18 +3407,8 @@ line, RET shows it."
                                           " · "))))
         (when check
           (org-varde--view-line
-           (concat (propertize "Check" 'face 'org-varde-heading) "  "
-                   (string-join
-                    (delq nil (list (and (plist-get check :cmd) (format "`%s`" (plist-get check :cmd)))
-                                    (and (plist-get check :review)
-                                         (format "%sa review by %s" (if (plist-get check :cmd) "then " "")
-                                                 (or (plist-get check :reviewer) "the review profile")))
-                                    (and (> (or (plist-get check :again) 1) 1)
-                                         (format "%d passes in a row" (plist-get check :again)))
-                                    (and (plist-get check :guard)
-                                         (concat "guarding " (string-join (plist-get check :guard) " ")))
-                                    (and (plist-get check :running) (org-varde--quiet "checking now…"))))
-                    " · ")))
+           (concat (propertize "Check" 'face 'org-varde-heading) "  " (or (plist-get check :words) "")
+                   (if (plist-get check :running) (org-varde--quiet " · checking now…") "")))
           (when-let* ((last (plist-get flow :last_check)))
             (let ((start (point)))
               (org-varde--view-line (concat "       last " (org-varde--verdict last)
@@ -3440,7 +3419,10 @@ line, RET shows it."
         (let ((checks (plist-get lp :checks)))
           (dolist (r (plist-get lp :rounds))
             (let* ((start (point))
-                   (c (seq-find (lambda (c) (equal (plist-get c :run) (plist-get r :run))) (reverse checks)))
+                   ;; A turn of a session of yours is a round: its check by id.
+                   (c (if (plist-get r :turn)
+                          (seq-find (lambda (c) (eql (plist-get c :id) (plist-get r :turn))) checks)
+                        (seq-find (lambda (c) (equal (plist-get c :run) (plist-get r :run))) (reverse checks))))
                    (mins (if (plist-get r :ended)
                              (format "%dm" (/ (max 0 (- (plist-get r :ended) (plist-get r :started))) 60000))
                            "now")))
@@ -3452,6 +3434,10 @@ line, RET shows it."
                        (if (plist-get r :asked) (propertize "  asked you" 'face 'org-varde-board-waiting) "")))
               (put-text-property start (point) 'org-varde-run (plist-get r :run))
               (when c (put-text-property start (point) 'org-varde-output (plist-get c :output))))))
+        (when-let* ((sandbox (plist-get flow :sandbox)) ((or check lp after)))
+          (org-varde--view-line
+           (concat (propertize "Sandbox" 'face 'org-varde-heading) "  "
+                   (org-varde--quiet (or (plist-get sandbox :words) (plist-get sandbox :name))))))
         (dolist (w after)
           (let ((start (point)))
             (org-varde--view-line
@@ -3466,6 +3452,58 @@ line, RET shows it."
             (org-varde--view-line
              (concat (propertize "then " 'face 'org-varde-heading) (org-varde--title-and-short b)))
             (put-text-property start (point) 'org-varde-flow-task b)))))))
+
+;;; Following a task at work
+
+(defun org-varde-follow ()
+  "Watch the task here at work, read-only, in a buffer of its own: what
+its session says, the tools it calls, each check as it lands, and a
+loop's next round as it starts.  It stands in no session's way;
+\\<org-varde-follow-mode-map>\\[org-varde-follow-quit] closes it."
+  (interactive)
+  (let* ((row (org-varde--here-row))
+         (task (plist-get row :task))
+         (buffer (get-buffer-create (format "*varde follow %s*" (org-varde--short task)))))
+    (with-current-buffer buffer
+      (when-let* ((p (get-buffer-process buffer))) (delete-process p))
+      (org-varde-follow-mode)
+      (let ((inhibit-read-only t)) (erase-buffer))
+      (let ((default-directory org-varde--safe-directory))
+        (make-process
+         :name "varde-follow" :buffer buffer :noquery t :connection-type 'pipe
+         :command (list org-varde-varde-program "follow" task)
+         :filter #'org-varde--follow-filter
+         :sentinel (lambda (proc _)
+                     (when (and (not (process-live-p proc)) (buffer-live-p (process-buffer proc)))
+                       (org-varde--follow-filter proc (org-varde--quiet "\n[no longer following]\n")))))))
+    (pop-to-buffer buffer)))
+
+(defun org-varde--follow-filter (proc text)
+  "Add TEXT from PROC to its buffer, following the end where a window is at it."
+  (when-let* ((buffer (process-buffer proc)) ((buffer-live-p buffer)))
+    (with-current-buffer buffer
+      (let ((inhibit-read-only t)
+            (windows (seq-filter (lambda (w) (= (window-point w) (point-max)))
+                                 (get-buffer-window-list buffer nil t))))
+        (save-excursion (goto-char (point-max)) (insert text))
+        (dolist (w windows) (set-window-point w (point-max)))))))
+
+(defvar-keymap org-varde-follow-mode-map
+  :doc "A followed task's keys."
+  :parent special-mode-map
+  "q" #'org-varde-follow-quit)
+
+(defun org-varde-follow-quit ()
+  "Stop following, and close the buffer."
+  (interactive)
+  (when-let* ((p (get-buffer-process (current-buffer)))) (delete-process p))
+  (quit-window t))
+
+(define-derived-mode org-varde-follow-mode special-mode "varde follow"
+  "A varde task at work, followed read-only.
+\\{org-varde-follow-mode-map}"
+  (setq truncate-lines nil)
+  (setq header-line-format (concat " " (propertize "q" 'face 'help-key-binding) " stop following")))
 
 ;;; The trail
 
@@ -3594,6 +3632,7 @@ waits on is verified."
   "C" #'org-varde-check-now
   "O" #'org-varde-check-output
   "M" #'org-varde-set-profile
+  "f" #'org-varde-follow
   "n" #'org-varde-trail-next
   "p" #'org-varde-trail-previous
   "j" #'org-varde-trail-next

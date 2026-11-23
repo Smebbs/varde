@@ -27,7 +27,7 @@ const HEAD_BYTES: u64 = 16 * 1024;
 fn head(transcript: &Path) -> Option<String> {
     // The cut can fall inside a character.
     let mut buf = Vec::new();
-    std::fs::File::open(transcript).ok()?.take(HEAD_BYTES).read_to_end(&mut buf).ok()?;
+    crate::open_transcript(transcript).ok()?.take(HEAD_BYTES).read_to_end(&mut buf).ok()?;
     Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
@@ -68,6 +68,24 @@ fn unwrap_peer(text: &str) -> &str {
     let text = text.split("\n\nThis came from another Claude session").next().unwrap_or(text);
     text.trim()
 }
+
+/// What every session writes under Claude's directory (seen in 2.1.280),
+/// and whether it then runs it.
+const SESSION_DIRS: &[(&str, bool)] = &[
+    ("projects", false),
+    ("sessions", false),
+    ("file-history", false),
+    ("todos", false),
+    ("debug", false),
+    ("paste-cache", false),
+    ("statsig", false),
+    ("cache", false),
+    ("backups", false),
+    ("plans", false),
+    ("shell-snapshots", true),
+    ("session-env", true),
+    ("history.jsonl", false),
+];
 
 /// How the CLI was started; see `scripted`.
 const ENTRYPOINT: &str = "CLAUDE_CODE_ENTRYPOINT";
@@ -127,6 +145,161 @@ impl Agent for Claude {
     fn new_native_id(&self) -> Option<String> {
         // The CLI accepts only a version-4 UUID.
         Some(uuid::Uuid::new_v4().to_string())
+    }
+
+    /// In print mode Claude refuses whatever would ask. Inside varde's
+    /// sandbox it may run any command and change files here, and its own
+    /// sandbox stays off, as one cannot run inside another on macOS.
+    /// Outside one it may change files here, commit, and run the check.
+    /// `acceptEdits`, not `bypassPermissions`, which a company's managed
+    /// settings may forbid; `auto` refuses every write on haiku.
+    fn unattended(&self, mut argv: Vec<String>, grant: &crate::Grant) -> Result<Vec<String>, String> {
+        let mut flags =
+            vec!["--permission-mode".to_string(), "acceptEdits".to_string(), "--allowedTools".into()];
+        if grant.fenced {
+            flags.extend(["Bash", "WebFetch", "WebSearch"].map(String::from));
+            flags.extend(["--settings".to_string(), r#"{"sandbox":{"enabled":false}}"#.to_string()]);
+        } else {
+            flags.extend(["Bash(git add *)", "Bash(git commit *)"].map(String::from));
+            for c in &grant.commands {
+                flags.extend([format!("Bash({c})"), format!("Bash({c} *)")]);
+            }
+        }
+        if !grant.deny.is_empty() {
+            flags.push("--disallowedTools".into());
+            flags.extend(grant.deny.iter().map(|d| format!("Bash({d})")));
+        }
+        if !argv.is_empty() {
+            // Before `-p`, which ends the lists.
+            argv.splice(1..1, flags);
+        }
+        Ok(argv)
+    }
+
+    /// What a session writes in its directory: its transcripts, state and
+    /// scratch. Never what later sessions run or read as
+    /// orders: settings, hooks, plugins, skills, commands, agents, the
+    /// status line, `CLAUDE.md`. `~/.claude.json` it can do without: a
+    /// session with it read-only runs as one with it writable.
+    fn writes(&self, cwd: &Path) -> Vec<std::path::PathBuf> {
+        let dir = config_dir();
+        // Its transcripts, kept by the directory it runs in, as Claude
+        // names it: each character but a letter or digit as `-`.
+        let name: String = cwd
+            .display()
+            .to_string()
+            .chars()
+            .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
+            .collect();
+        let mut out = vec![dir.join("projects").join(name)];
+        // Its login, refreshed in place, and on macOS its logs.
+        out.push(dir.join(".credentials.json"));
+        if cfg!(target_os = "macos") {
+            out.push(crate::home("Library/Caches/claude-cli-nodejs"));
+        }
+        out
+    }
+
+    /// Its sessions' shared state; the shell snapshot its Bash tool
+    /// sources before each command, and the environment files its hooks
+    /// leave for it, it runs.
+    fn private(&self) -> Vec<(std::path::PathBuf, bool)> {
+        let dir = config_dir();
+        SESSION_DIRS
+            .iter()
+            .map(|(d, runs)| (dir.join(d), *runs))
+            .inspect(|(d, _)| {
+                if d.extension().is_none() {
+                    let _ = std::fs::create_dir_all(d);
+                }
+            })
+            .collect()
+    }
+
+    /// Its provider settings (not one session's, which it sets itself),
+    /// Anthropic's, and the cloud provider's it is set to use.
+    fn env(&self) -> Vec<String> {
+        let mut out: Vec<String> = [
+            "CLAUDE_CODE_USE_",
+            "CLAUDE_CODE_SKIP_",
+            "CLAUDE_CODE_DISABLE_",
+            "CLAUDE_CODE_MAX_",
+            "CLAUDE_CODE_OAUTH_TOKEN",
+            "CLAUDE_CODE_API_KEY_HELPER",
+            "DISABLE_AUTOUPDATER",
+            "DISABLE_TELEMETRY",
+            "CLAUDE_CONFIG_DIR",
+            "ANTHROPIC_",
+            "VERTEX_REGION_",
+            "CLOUD_ML_",
+        ]
+        .map(String::from)
+        .to_vec();
+        if provider_on("VERTEX") {
+            out.extend(["GOOGLE_", "CLOUDSDK_"].map(String::from));
+        }
+        if provider_on("BEDROCK") {
+            out.push("AWS_".into());
+        }
+        out
+    }
+
+    /// How it was started (`scripted`), and that a shell is one of its own.
+    fn hook_env(&self) -> &'static [&'static str] {
+        &[ENTRYPOINT, "CLAUDECODE"]
+    }
+
+    /// Claude's aliases, which follow its releases.
+    fn tier(&self, profile: &str) -> Option<&'static str> {
+        match profile {
+            "quick" => Some("haiku"),
+            "build" => Some("sonnet"),
+            "deep" | "review" => Some("opus"),
+            _ => None,
+        }
+    }
+
+    /// The cloud login a session on Vertex or Bedrock reaches its model with.
+    fn reads(&self) -> Vec<(std::path::PathBuf, bool)> {
+        let mut out = vec![];
+        if provider_on("VERTEX") {
+            match std::env::var_os("GOOGLE_APPLICATION_CREDENTIALS").filter(|p| !p.is_empty()) {
+                Some(p) => out.push((p.into(), false)),
+                None => {
+                    let gcloud = std::env::var_os("CLOUDSDK_CONFIG")
+                        .filter(|p| !p.is_empty())
+                        .map(std::path::PathBuf::from)
+                        .unwrap_or_else(|| crate::home(".config/gcloud"));
+                    out.push((gcloud.join("application_default_credentials.json"), false));
+                    out.push((gcloud.join("configurations"), false));
+                    out.push((gcloud.join("active_config"), false));
+                }
+            }
+        }
+        if provider_on("BEDROCK") {
+            // Its SSO login refreshes into the caches there; its config,
+            // which can name a program to run, stays as it is.
+            out.push((crate::home(".aws"), false));
+            out.push((crate::home(".aws/sso/cache"), true));
+            out.push((crate::home(".aws/cli/cache"), true));
+        }
+        out
+    }
+
+    /// On Vertex and Bedrock an alias resolves to the model Claude Code
+    /// picks for the provider, which a project may not have enabled:
+    /// `ANTHROPIC_DEFAULT_<ALIAS>_MODEL` pins it.
+    fn model_warning(&self, model: &str) -> Option<String> {
+        let provider = ["VERTEX", "BEDROCK"].into_iter().find(|p| provider_on(p))?;
+        let alias = ["opus", "sonnet", "haiku"].into_iter().find(|a| model == *a)?;
+        let pin = format!("ANTHROPIC_DEFAULT_{}_MODEL", alias.to_ascii_uppercase());
+        std::env::var_os(&pin).filter(|v| !v.is_empty()).is_none().then(|| {
+            format!(
+                "on {}, {alias} is whichever model Claude Code picks for it, which your project may not serve: \
+                 set {pin} to one it does, or give the profile a full model id",
+                provider.to_ascii_lowercase()
+            )
+        })
     }
 
     fn program(&self) -> String {
@@ -193,6 +366,16 @@ impl Agent for Claude {
                 crate::tools::when(&v["timestamp"]),
             )
         })
+    }
+
+    fn follow(&self, line: &str) -> Vec<String> {
+        let Ok(v) = serde_json::from_str::<Value>(line) else { return Vec::new() };
+        match v["type"].as_str() {
+            Some(role @ ("user" | "assistant")) if v["isMeta"] != true => {
+                crate::shown(role, &v["message"]["content"], "tool_use", "input")
+            }
+            _ => Vec::new(),
+        }
     }
 
     fn interrupted(&self, line: &str) -> bool {
@@ -415,13 +598,25 @@ impl Agent for Claude {
     }
 }
 
-/// Where Claude keeps its live sessions' entries.
-fn sessions_dir() -> Option<std::path::PathBuf> {
-    let dir = std::env::var_os("CLAUDE_CONFIG_DIR")
+/// Whether Claude is set to reach its model through `provider`
+/// (`CLAUDE_CODE_USE_VERTEX`, `CLAUDE_CODE_USE_BEDROCK`).
+fn provider_on(provider: &str) -> bool {
+    std::env::var(format!("CLAUDE_CODE_USE_{provider}"))
+        .is_ok_and(|v| !v.is_empty() && v != "0" && v != "false")
+}
+
+/// Claude's own directory: `$CLAUDE_CONFIG_DIR`, else `~/.claude`.
+fn config_dir() -> std::path::PathBuf {
+    std::env::var_os("CLAUDE_CONFIG_DIR")
         .filter(|d| !d.is_empty())
         .map(std::path::PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|h| Path::new(&h).join(".claude")))?;
-    Some(dir.join("sessions"))
+        .unwrap_or_else(|| crate::home(".claude"))
+}
+
+/// Where Claude keeps its live sessions' entries.
+fn sessions_dir() -> Option<std::path::PathBuf> {
+    std::env::var_os("HOME").or(std::env::var_os("CLAUDE_CONFIG_DIR"))?;
+    Some(config_dir().join("sessions"))
 }
 
 /// The session process `pid` registered, as Claude keeps it in
@@ -540,6 +735,26 @@ mod tests {
         assert!(Claude.normalize("Stop", &serde_json::json!({"cwd": "/x"})).is_none());
         assert!(Claude.normalize("Stop", &serde_json::json!({"session_id": ""})).is_none());
         assert!(Claude.normalize("Stop", &serde_json::json!([1, 2])).is_none());
+    }
+
+    #[test]
+    fn a_grant_says_what_a_session_with_nobody_at_it_may_do() {
+        let argv = || vec!["claude".to_string(), "-p".to_string(), "--".into(), "go".into()];
+        let fenced = crate::Grant { fenced: true, deny: vec!["az * delete*".into()], ..Default::default() };
+        let a = Claude.unattended(argv(), &fenced).unwrap().join(" ");
+        assert!(
+            a.starts_with("claude --permission-mode acceptEdits --allowedTools Bash WebFetch WebSearch"),
+            "{a}"
+        );
+        assert!(a.contains(r#"--settings {"sandbox":{"enabled":false}}"#), "{a}");
+        assert!(a.ends_with("--disallowedTools Bash(az * delete*) -p -- go"), "{a}");
+        let open = crate::Grant { commands: vec!["cargo test".into()], ..Default::default() };
+        let a = Claude.unattended(argv(), &open).unwrap().join(" ");
+        assert!(
+            a.contains("Bash(git add *) Bash(git commit *) Bash(cargo test) Bash(cargo test *) -p"),
+            "{a}"
+        );
+        assert!(!a.contains("--settings") && !a.contains("--disallowedTools"), "{a}");
     }
 
     #[test]

@@ -27,7 +27,7 @@ pub fn read(
     calls: &dyn Fn(&Value) -> Vec<ToolCall>,
 ) -> std::io::Result<Vec<ToolCall>> {
     let mut out = Vec::new();
-    for line in BufReader::new(std::fs::File::open(transcript)?).lines() {
+    for line in BufReader::new(crate::open_transcript(transcript)?).lines() {
         let line = line?;
         if !line.contains(marker) {
             continue;

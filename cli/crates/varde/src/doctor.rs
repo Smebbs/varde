@@ -44,6 +44,8 @@ pub fn run(paths: &Paths, as_json: bool) -> Result<()> {
     ];
     checks.push(agent());
     checks.push(profiles());
+    checks.push(sandbox(paths));
+    checks.push(bare_repositories());
     checks.extend(agents());
     checks.push(pending(paths));
     if let Ok(s) = &store {
@@ -359,19 +361,13 @@ fn worktrees(conn: &rusqlite::Connection) -> Result<Value> {
 /// Whether every profile can work in the background as it is set up.
 fn profiles() -> Value {
     let c = crate::config::get();
-    // A review is a call with no tools: how a session runs is not its.
-    let warnings: Vec<String> = c
-        .profiles()
-        .into_iter()
-        .filter(|(n, _)| *n != c.roles.review)
-        .filter_map(|(n, _)| c.background_warning(&n))
-        .collect();
+    let warnings: Vec<String> = c.profiles().into_iter().filter_map(|(n, _)| c.profile_warning(&n)).collect();
     match warnings.first() {
         None => ok("profiles", format!("{} profiles; varde profiles lists them", c.profiles().len())),
-        Some(w) => fail(
+        Some(_) => fail(
             "profiles",
-            w.clone(),
-            "give the profile its own background arguments in the config, as said",
+            warnings.join("; "),
+            "do as it says; a variable goes in your shell's profile, then varde schedule --install again so the heartbeat has it",
         ),
     }
 }
@@ -389,8 +385,33 @@ fn schedules(paths: &Paths, conn: &rusqlite::Connection) -> Result<Value> {
         })?
         .filter_map(|r| r.ok())
         .collect();
+    // A trail or loop set going waits on the heartbeat too, for what it
+    // could not start at once.
+    let going: i64 = conn.query_row(
+        "SELECT count(*) FROM task WHERE coalesce(auto, 0) = 1 AND state = 'open'",
+        [],
+        |r| r.get(0),
+    )?;
+    let n = n + going;
     let ticked = crate::schedule::since_tick(paths);
-    Ok(if n == 0 {
+    let missing = crate::schedule::heartbeat_missing();
+    if !missing.is_empty() {
+        let main = schedule_state(n, ticked, &failed);
+        let gap = format!(
+            "the heartbeat starts sessions without your shell's {}: they may reach another account or model",
+            missing.join(", ")
+        );
+        let detail = match main["ok"].as_bool() {
+            Some(true) => format!("{}; but {gap}", main["detail"].as_str().unwrap_or("")),
+            _ => format!("{}; and {gap}", main["detail"].as_str().unwrap_or("")),
+        };
+        return Ok(fail("schedule", detail, "varde schedule --install, from the shell your agent works in"));
+    }
+    Ok(schedule_state(n, ticked, &failed))
+}
+
+fn schedule_state(n: i64, ticked: Option<Duration>, failed: &[String]) -> Value {
+    if n == 0 {
         ok("schedule", "no task is scheduled".into())
     } else if crate::schedule::heartbeat().is_none() {
         fail(
@@ -415,9 +436,126 @@ fn schedules(paths: &Paths, conn: &rusqlite::Connection) -> Result<Value> {
     } else {
         ok(
             "schedule",
-            format!("{n} task(s) scheduled; varde tick ran {}s ago", ticked.map_or(0, |d| d.as_secs())),
+            format!(
+                "{n} task(s) scheduled or going; varde tick ran {}s ago",
+                ticked.map_or(0, |d| d.as_secs())
+            ),
         )
-    })
+    }
+}
+
+/// Whether git would run a bare repository it comes upon: one a
+/// session leaves in a checkout, committed or not, has git run what its
+/// config names when you look there. `explicit` is git's own guard.
+fn bare_repositories() -> Value {
+    let set = std::process::Command::new("git")
+        .args(["config", "safe.bareRepository"])
+        .output()
+        .map(|o| String::from_utf8_lossy(&o.stdout).trim().to_string())
+        .unwrap_or_default();
+    if set == "explicit" {
+        ok("git", "safe.bareRepository = explicit".into())
+    } else {
+        fail(
+            "git",
+            "git runs a bare repository it finds in a checkout, which a session can leave there".into(),
+            "git config --global safe.bareRepository explicit (a bare repository of yours then needs --git-dir)",
+        )
+    }
+}
+
+/// Whether background sessions run in a sandbox here, and whether one
+/// starts and keeps a write out.
+fn sandbox(paths: &Paths) -> Value {
+    use crate::sandbox;
+    let fix = "set sandbox.on = false in the config to run without one, on what each agent is granted";
+    match (sandbox::enabled(), sandbox::backend()) {
+        (Err(e), _) => fail("sandbox", format!("{e:#}"), sandbox::install_hint()),
+        (Ok(false), None) if cfg!(target_os = "macos") && !sandbox::turned_off() => fail(
+            "sandbox",
+            "sandbox-exec does not start here, so background sessions run unsandboxed or not at all".into(),
+            "run varde outside another sandbox (an agent's own, say), or set sandbox.on = false to go without",
+        ),
+        (Ok(false), None) => ok(
+            "sandbox",
+            format!(
+                "none here ({}): background sessions run on what varde grants their agent, \
+                 and not at all on an agent that can keep to no grant",
+                sandbox::install_hint()
+            ),
+        ),
+        (Ok(false), Some(_)) => ok(
+            "sandbox",
+            "off (sandbox.on = false): background sessions run on what their agent is granted".into(),
+        ),
+        (Ok(true), b) => {
+            let name = b.map_or("?", |b| b.name());
+            let probe = std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".varde-sandbox-probe"));
+            let adapter = varde_agent::by_name(&crate::start::default_agent());
+            // A directory of its own to start in, as a checkout is.
+            let probe_dir = std::env::temp_dir().join(format!("varde-doctor-{}", std::process::id()));
+            let _ = std::fs::create_dir_all(&probe_dir);
+            let _cleanup = Cleanup(probe_dir.clone());
+            let run_as =
+                |script: &str, agent: Option<&dyn varde_agent::Agent>| -> Result<std::process::Output> {
+                    let p = sandbox::policy(None)?.ok_or_else(|| anyhow::anyhow!("no default sandbox"))?;
+                    let (mut argv, env) = sandbox::wrap(&p, &probe_dir, agent, &paths.home, None)?;
+                    argv.extend(["sh", "-c", script].map(String::from));
+                    Ok(std::process::Command::new(&argv[0])
+                        .args(&argv[1..])
+                        .env_clear()
+                        .envs(env)
+                        .current_dir(&probe_dir)
+                        .stdin(std::process::Stdio::null())
+                        .output()?)
+                };
+            let run = |script: &str| run_as(script, None);
+            match run("true") {
+                Ok(o) if o.status.success() => {}
+                Ok(o) => {
+                    let why = String::from_utf8_lossy(&o.stderr).trim().to_string();
+                    return fail("sandbox", format!("{name} does not start: {why}"), fix);
+                }
+                Err(e) => return fail("sandbox", format!("{name} does not start: {e:#}"), fix),
+            }
+            if let Some(p) = &probe {
+                let kept_out = run(&format!("touch '{}'", p.display())).is_ok_and(|o| !o.status.success());
+                if !kept_out || p.exists() {
+                    let _ = std::fs::remove_file(p);
+                    return fail(
+                        "sandbox",
+                        format!("{name} starts, but let a write to your home through"),
+                        fix,
+                    );
+                }
+            }
+            // The agent itself, as a round would start it.
+            if let Some(a) = &adapter {
+                let program = crate::start::agent_command(&**a)[0].clone();
+                match run_as(&format!("'{program}' --version"), Some(&**a)) {
+                    Ok(o) if o.status.success() => {}
+                    Ok(o) => {
+                        let why: String =
+                            String::from_utf8_lossy(&o.stderr).trim().chars().take(300).collect();
+                        return fail(
+                            "sandbox",
+                            format!("{name} starts, but {} does not in it: {why}", a.name()),
+                            fix,
+                        );
+                    }
+                    Err(e) => {
+                        return fail("sandbox", format!("{} does not start in {name}: {e:#}", a.name()), fix)
+                    }
+                }
+            }
+            ok(
+                "sandbox",
+                format!(
+                    "{name}: background sessions and checks run in it; varde sandbox shows what it allows"
+                ),
+            )
+        }
+    }
 }
 
 /// The program PATH runs as `name`: as the shell finds it, skipping a
@@ -528,4 +666,13 @@ fn pi_extension() -> Option<PathBuf> {
     files
         .into_iter()
         .find(|p| std::fs::read_to_string(p).is_ok_and(|t| t.contains("\"hook\"") && t.contains("varde")))
+}
+
+/// A directory removed when it goes out of scope.
+struct Cleanup(PathBuf);
+
+impl Drop for Cleanup {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
 }
