@@ -13,6 +13,7 @@ mod deliver;
 mod doctor;
 mod done;
 mod eval;
+mod flow;
 mod git;
 mod hook;
 mod job;
@@ -22,6 +23,7 @@ mod memory_cmd;
 mod naming;
 mod pending;
 mod process;
+mod recipe;
 mod run;
 mod schedule;
 mod stale;
@@ -93,6 +95,30 @@ enum Cmd {
         /// With --when: whether its first start gets a worktree.
         #[arg(long, value_enum, requires = "when")]
         worktree: Option<WorktreeArg>,
+        /// Wait on these tasks: it starts once each is verified (see
+        /// `varde after`).
+        #[arg(long, value_delimiter = ',', value_name = "TASKS")]
+        after: Vec<String>,
+        /// With --after: wait until you approve each.
+        #[arg(long, requires = "after")]
+        approved: bool,
+        /// The profile its sessions run on: quick, build, deep, review, or yours.
+        #[arg(long)]
+        profile: Option<String>,
+        /// Make a trail of tasks from a recipe (see `varde recipe`), the
+        /// title and context given to each step.
+        #[arg(long, conflicts_with_all = ["from", "when", "after", "external"])]
+        recipe: Option<String>,
+        /// A recipe's variable: `issue=gh:123`. Again for more.
+        #[arg(long = "var", value_name = "NAME=VALUE", requires = "recipe")]
+        vars: Vec<String>,
+        /// Change one key of a recipe's step for this task only:
+        /// `review.output=draft-pr`. Again for more.
+        #[arg(long = "set", value_name = "STEP.KEY=VALUE", requires = "recipe")]
+        sets: Vec<String>,
+        /// With --recipe: set the trail going at once.
+        #[arg(long, requires = "recipe")]
+        start: bool,
         /// Print the new task's id and short id as JSON.
         #[arg(long)]
         json: bool,
@@ -142,6 +168,138 @@ enum Cmd {
     /// heartbeat, and by a board).
     #[command(hide = true)]
     Tick,
+    /// Say how varde knows a task's work is good: a command, a review by
+    /// another model, or both.
+    ///
+    /// varde runs the check itself, in the task's checkout, when a session
+    /// of the task ends, and on --now. `varde check <task> -- cargo test`
+    /// sets the command. --review adds a review by the review profile (or
+    /// PROFILE) after the command passes, reading the diff and your
+    /// --rubric. --guard keeps paths a session must not change: a session
+    /// that does is flagged, and a loop stops. With nothing else, shows the
+    /// check and its last result.
+    #[command(display_order = 9)]
+    Check {
+        /// The task: the six characters the board shows, or their first four.
+        task: String,
+        /// The command, after `--`: it passes when it exits 0.
+        #[arg(last = true)]
+        cmd: Vec<String>,
+        /// Have a model review the change once the command passes.
+        #[arg(long, value_name = "PROFILE", num_args = 0..=1, default_missing_value = "")]
+        review: Option<String>,
+        /// What the review judges by: a file, or the text itself.
+        #[arg(long, value_name = "FILE|TEXT")]
+        rubric: Option<String>,
+        /// A path a session must not change, `*` for any characters
+        /// (`tests/*`); again for more.
+        #[arg(long, value_name = "GLOB")]
+        guard: Vec<String>,
+        /// Pass only after N passes in a row, for flaky work.
+        #[arg(long, value_name = "N")]
+        again: Option<u32>,
+        /// Run it now, here, and print what it found.
+        #[arg(long)]
+        now: bool,
+        /// Remove the check.
+        #[arg(long, conflicts_with_all = ["cmd", "review", "rubric", "guard", "again", "now"])]
+        off: bool,
+    },
+    /// Run a task's check and record it (started by varde itself).
+    #[command(hide = true)]
+    Verify {
+        task: String,
+        #[arg(long)]
+        run: Option<String>,
+    },
+    /// Say a task's work is good, for the files it has now: what waits on
+    /// your approval can start.
+    #[command(display_order = 9)]
+    Approve {
+        /// The task: the six characters the board shows, or their first four.
+        task: String,
+    },
+    /// Run a task in fresh sessions, in the background, until its check passes.
+    ///
+    /// Each round is a new session of the task, told its cairn and how the
+    /// last check failed. It stops when the check passes, after --max
+    /// rounds (3) or --minutes, when two rounds fail the same way with no
+    /// change (after moving up --escalate's profiles), when a round asks
+    /// you something, or when a session touches the check's guard. Opening
+    /// the task takes it over and pauses the loop; `varde loop <task>`
+    /// resumes it.
+    #[command(display_order = 9)]
+    Loop {
+        /// The task: the six characters the board shows, or their first four.
+        task: String,
+        /// The check's command, if the task has none yet; else git config varde.check.
+        #[arg(long, value_name = "CMD")]
+        check: Option<String>,
+        /// The most rounds (default 3).
+        #[arg(long, value_name = "N")]
+        max: Option<i64>,
+        /// The most minutes its rounds may take, all told.
+        #[arg(long, value_name = "N")]
+        minutes: Option<i64>,
+        /// Profiles to move up to, in order, when it is stuck: `deep,max`.
+        #[arg(long, value_name = "PROFILES")]
+        escalate: Option<String>,
+        /// Pause it; `varde loop <task>` resumes it.
+        #[arg(long)]
+        pause: bool,
+        /// End the loop.
+        #[arg(long, conflicts_with_all = ["check", "max", "minutes", "escalate", "pause"])]
+        off: bool,
+    },
+    /// Make a task wait on others: it starts once each is verified.
+    #[command(display_order = 9)]
+    After {
+        /// The task that waits.
+        task: String,
+        /// What it waits on; none shows what it waits on now.
+        after: Vec<String>,
+        /// Wait until you `varde approve` each, rather than until its check passes.
+        #[arg(long)]
+        approved: bool,
+        /// Stop waiting on them.
+        #[arg(long)]
+        off: bool,
+    },
+    /// Loops and trails written down once: list, show, check and edit them.
+    ///
+    /// `varde new "TITLE" --recipe NAME` makes one task per step; `varde
+    /// recipe guide` says how to write one (and is what to show an agent).
+    #[command(display_order = 9)]
+    Recipe {
+        #[command(subcommand)]
+        what: RecipeCmd,
+    },
+    /// The profiles there are (agent, model and effort), and which each role uses.
+    ///
+    /// varde ships quick, build, deep and review on Claude's aliases; yours
+    /// go under [profiles] in the config: `deep = { model = "opus", effort
+    /// = "xhigh" }`. [roles] says which a task's sessions (`work`) and a
+    /// check's review (`review`) use unless told otherwise.
+    #[command(display_order = 14)]
+    Profiles {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show a task's trail: the tasks joined to it by `after`, as a tree.
+    #[command(display_order = 9)]
+    Trail {
+        /// The task: the six characters the board shows, or their first four.
+        task: String,
+        /// Set the trail going: each task starts in the background once
+        /// what it waits on is verified.
+        #[arg(long)]
+        start: bool,
+        /// `text` (the default) or `mermaid`.
+        #[arg(long, default_value = "text")]
+        format: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Change a task's title, context or project.
     #[command(display_order = 10)]
     Set {
@@ -157,6 +315,9 @@ enum Cmd {
         /// active worktree or a live session, which belong to the old checkout.
         #[arg(long, value_name = "DIR")]
         project: Option<PathBuf>,
+        /// The profile its new sessions run on; empty for the work role's.
+        #[arg(long)]
+        profile: Option<String>,
     },
     /// Move Inbox tasks into Open.
     #[command(display_order = 9)]
@@ -537,6 +698,38 @@ struct StartArgs {
     /// Continue this run's conversation rather than the newest.
     #[arg(long, conflicts_with = "fresh")]
     run: Option<String>,
+    /// The profile a new conversation runs on (agent, model and effort):
+    /// quick, build, deep, review, or one of yours.
+    #[arg(long)]
+    profile: Option<String>,
+}
+
+#[derive(Subcommand)]
+enum RecipeCmd {
+    /// Every recipe, built-in and yours.
+    List {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Draw a recipe's steps, before anything runs.
+    Show {
+        name: String,
+        /// Say where each step's keys came from: built-in, yours, a recipe it uses, --set.
+        #[arg(long)]
+        origin: bool,
+        /// Change a step's key, as `varde new --set` would: `fix.output=draft-pr`.
+        #[arg(long = "set", value_name = "STEP.KEY=VALUE")]
+        sets: Vec<String>,
+        /// `text` (the default) or `mermaid`.
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
+    /// Whether a recipe file is usable; draws it if it is.
+    Check { file: String },
+    /// Edit your copy of a recipe in $EDITOR, made from the built-in the first time.
+    Edit { name: String },
+    /// How to write a recipe: every key and its default. For you, and for an agent.
+    Guide,
 }
 
 #[derive(Subcommand)]
@@ -575,6 +768,10 @@ impl StartArgs {
             project: self.project,
             take_over: self.take_over,
             run: self.run,
+            profile: self.profile,
+            round: None,
+            base: None,
+            share: None,
         })
     }
 }
@@ -798,9 +995,26 @@ fn dispatch(paths: &Paths, cmd: Option<Cmd>, popup: bool) -> Result<i32> {
         Cmd::Agent { json } => start::agent(json),
         Cmd::Projects { json } => start::list_projects(paths, json),
         Cmd::Eval { all, since, json } => eval::run(paths, all, since.as_deref(), json),
-        Cmd::New { title, project, body, external, from, when, worktree, json } => {
+        Cmd::New { title, project, body, recipe: Some(name), vars, sets, start, json, profile, .. } => {
+            recipe::new(paths, &name, &title, project, body, &vars, &sets, profile, start, json)
+        }
+        Cmd::New {
+            title,
+            project,
+            body,
+            external,
+            from,
+            when,
+            worktree,
+            json,
+            after,
+            approved,
+            profile,
+            ..
+        } => {
             let when = when.map(|w| (w, worktree.map(|w| matches!(w, WorktreeArg::Always))));
-            tasks::new(paths, &title, project, body, external, from, when, json)
+            let flow = tasks::Flow { after, approved, profile };
+            tasks::new(paths, &title, project, body, external, from, when, flow, json)
         }
         Cmd::Schedule { install: true, .. } => schedule::install(paths, true),
         Cmd::Schedule { uninstall: true, .. } => schedule::install(paths, false),
@@ -811,6 +1025,34 @@ fn dispatch(paths: &Paths, cmd: Option<Cmd>, popup: bool) -> Result<i32> {
             schedule::set(paths, &task.unwrap_or_default(), rule, off, worktree)
         }
         Cmd::Tick => schedule::tick(paths),
+        Cmd::Check { task, cmd, review, rubric, guard, again, now, off } => flow::check(
+            paths,
+            &task,
+            flow::CheckArgs {
+                cmd,
+                review: review.map(|r| (!r.is_empty()).then_some(r)),
+                rubric,
+                guard,
+                again,
+                now,
+                off,
+            },
+        ),
+        Cmd::Verify { task, run } => flow::verify(paths, &task, run, false),
+        Cmd::Approve { task } => flow::approve(paths, &task),
+        Cmd::Loop { task, check, max, minutes, escalate, pause, off } => {
+            flow::set_loop(paths, &task, flow::LoopArgs { check, max, minutes, escalate, off, pause })
+        }
+        Cmd::After { task, after, approved, off } => flow::after(paths, &task, &after, approved, off),
+        Cmd::Profiles { json } => flow::profiles(json),
+        Cmd::Recipe { what: RecipeCmd::List { json } } => recipe::list(json),
+        Cmd::Recipe { what: RecipeCmd::Show { name, origin, sets, format } } => {
+            recipe::show(&name, &sets, origin, &format)
+        }
+        Cmd::Recipe { what: RecipeCmd::Check { file } } => recipe::check(&file),
+        Cmd::Recipe { what: RecipeCmd::Edit { name } } => recipe::edit(&name),
+        Cmd::Recipe { what: RecipeCmd::Guide } => recipe::guide(),
+        Cmd::Trail { task, start, format, json } => flow::trail(paths, &task, start, &format, json),
         Cmd::Accept { tasks } => tasks::accept(paths, &tasks),
         Cmd::Link { task, external } => tasks::link(paths, &task, &external),
         Cmd::Unlink { task } => tasks::unlink(paths, &task),
@@ -835,7 +1077,19 @@ fn dispatch(paths: &Paths, cmd: Option<Cmd>, popup: bool) -> Result<i32> {
         Cmd::Edit { task, stdin, print, .. } => {
             memory_cmd::edit(paths, &task.unwrap_or_default(), stdin, print).map(drop)
         }
-        Cmd::Set { task, title, body, project } => tasks::set(paths, &task, title, body, project),
+        Cmd::Set { task, title, body, project, profile } => {
+            let only = title.is_none() && body.is_none() && project.is_none();
+            match profile {
+                Some(p) => flow::set_profile(paths, &task, &p).and_then(|()| {
+                    if only {
+                        Ok(())
+                    } else {
+                        tasks::set(paths, &task, title, body, project)
+                    }
+                }),
+                None => tasks::set(paths, &task, title, body, project),
+            }
+        }
         Cmd::Job { id } => job::run(paths, &id),
         Cmd::Start { task, how, json } => how.options().and_then(|o| start::start(paths, &task, o, json)),
         Cmd::Attach { task, how } => return how.options().and_then(|o| start::attach(paths, &task, o)),

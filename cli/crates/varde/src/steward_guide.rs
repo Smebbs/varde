@@ -15,6 +15,7 @@ Playbooks, read when a request needs one: varde steward guide <topic>
   route   something forwarded to you: which task it belongs to, or a new one
   answer  answer for the user on tasks they handed you (varde trust)
   control reach any task in any state: see it, tell it, stop it, start it
+  loops   set up loops and trails for the user, watch them, report
 
 Rules:
 - Do as little of the work yourself as you can. Work on a task is that \
@@ -33,6 +34,33 @@ sends from their own terminal.
   task (varde note) so the next session knows.";
 
 pub const TOPICS: &[(&str, &str)] = &[
+    (
+        "loops",
+        "\
+Loops and trails
+- A loop runs a task in fresh background sessions until its check passes: \
+varde loop <task> --check '<cmd>' --max 3 --escalate deep. A trail is tasks \
+joined by after (varde new ... --after <task>, --approved to wait on the \
+user). A recipe makes one from a file: varde recipe list, varde new \
+\"<title>\" --recipe <name> --project <repo dir> --var k=v.
+- Starting one starts agents that cost the user: say what you will set up \
+(task, check, rounds, profiles) and start it after a yes. A check is a \
+command that exits 0 to pass; prefer the repository's tests to a review.
+- Watch: varde list --json; a row's flow says where it stands (label, \
+tone, state: working, verified, stuck, spent, asked, flagged). varde show \
+<task> --json --no-git has flow.loop.rounds, each round's run and check, and \
+flow.last_check.output, the file a check printed to.
+- Report what ended: verified ones for the user to look at and land; stuck, \
+spent or flagged ones with the last check's failure, read from its output. \
+A flagged round changed what its check guards: never wave that through.
+- varde approve <task> is the user's gate: approve only when they say so.
+- So a loop's rounds do not wait on the user's permission, they may hand \
+the task to you (varde trust <task>, theirs to run): then answer its asks \
+as the answer playbook says.
+- Write a recipe the user asks for with varde recipe guide, save it in the \
+directory varde recipe list --json gives, and check it with varde recipe \
+check <file>.",
+    ),
     (
         "file",
         "\

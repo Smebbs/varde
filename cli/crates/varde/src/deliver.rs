@@ -333,6 +333,9 @@ fn guidance(run: &str, task: Option<&Task>, held: bool, updates: bool) -> String
         " To ask or tell another task something (varde list shows them): varde say <task> \"...\"; \
          its answer comes back to you as a message when its turn ends.",
     );
+    // Asked for a loop or a trail, an agent writes a recipe: the manual
+    // comes from the binary, as the steward's does (Q12).
+    out.push_str(" To write a loop or a trail of tasks for varde: varde recipe guide.");
     // Agents cut branches and worktrees of their own, and the work then
     // missed the worktree the user looks at (magit) and varde follows.
     if let Some(b) = task.and_then(|t| t.branch.as_deref()) {

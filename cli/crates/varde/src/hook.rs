@@ -311,7 +311,7 @@ fn defer(
 }
 
 /// Best effort: a log that cannot be written must not fail the hook.
-fn log(paths: &Paths, line: &str) {
+pub(crate) fn log(paths: &Paths, line: &str) {
     let path = paths.log();
     // The very first hook may come before anything made the store.
     let _ = paths.make_home();

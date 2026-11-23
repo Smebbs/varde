@@ -286,10 +286,11 @@ fn now_starts_the_next_run_to_try_a_schedule_out() {
     assert!(!e.run(&["schedule", &t, "--now"]).status.success(), "no schedule");
     e.ok(&["schedule", &t, "every", "mon", "09:00", "--worktree", "never"]);
     let said = e.ok(&["schedule", &t, "--now"]);
-    // On a Monday before 09:00 the next start is today's, said without its day.
+    // On a Monday before 09:00 the next start is today's, said without its
+    // day; on one after, a week on, said by its date.
     let next =
         said.strip_prefix(&format!("{t} started in the background; every mon 09:00; next ")).unwrap_or("");
-    assert!(next.starts_with("Mon 09:00") || next.starts_with("09:00"), "{said}");
+    assert!(next.starts_with("Mon 09:00") || next.starts_with("09:00") || next.ends_with(" 09:00"), "{said}");
     poll(100, || runs(&e, &t).first().is_some_and(|r| r["status"] == "exited"));
     assert_eq!(runs(&e, &t)[0]["background"], true);
     assert_eq!(group(&e.board(), "needs_you").len(), 1);

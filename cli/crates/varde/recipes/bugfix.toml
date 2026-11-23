@@ -1,0 +1,36 @@
+# A bug, shown by a failing test you confirm, then fixed in a loop that
+# may not touch that test, then reviewed by another model.
+label = "bugfix"
+description = "Reproduce with a failing test (you approve it), fix until green without touching tests, review."
+
+[vars.check]
+description = "The command that runs the tests; git config varde.check when left out."
+default = ""
+
+[vars.tests]
+description = "What the fix may not change."
+default = "tests/*"
+
+[[steps]]
+id = "repro"
+title = "Reproduce: {{title}}"
+profile = "build"
+gate = "approved"
+prompt = """
+Write a test that fails because of this bug, and nothing else: do not fix
+the bug. Run it and show that it fails, and why. Commit the test.
+
+{{context}}"""
+
+[[steps]]
+id = "fix"
+needs = ["repro"]
+use = "fix-until-green"
+title = "Fix: {{title}}"
+prompt = """
+Make the failing test the step before wrote pass, by fixing the bug. Do not
+change any test.
+
+{{context}}"""
+check = { cmd = "{{check}}", review = true }
+guard = ["{{tests}}"]

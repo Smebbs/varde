@@ -136,6 +136,14 @@ task it came from: put it next to that one if you can.
   since `done` then ends its run, not the task.
 - `origin` is `{"task", "short", "title"}` of the task deferred work
   came from, or `null`.
+- `flow`, present only for a task with a check, a loop or a trail edge,
+  is `{"label", "tone", "state"}`: `label` is what to show after the
+  status word (`↺ 2/3 ✗ exit 1`, `✓ verified in 2`, `⧗ abc123`, `⚑
+  touched tests/a.rs`), `tone` one of `working`, `needs`, `failing`,
+  `good` and `quiet` for its colour, and `state` the loop's (`working`,
+  `checking`, `due`, `verified`, `flagged`, `error`, `spent`, `stuck`,
+  `asked`, `paused`) when it has one. A loop between rounds is in
+  `working`, though its last round ended.
 - `inbox` holds tasks that arrived without the user creating them:
   sessions started outside any client, and work deferred from a
   session. They stay until the user acts on them. Offer `accept`.
@@ -146,6 +154,19 @@ task it came from: put it next to that one if you can.
   to it) and `asks` (what waits on its answer). Show it on a line of
   its own below the groups; `S` goes to it with `varde attach` on its
   `task`, as for any row.
+
+## Loops, checks and trails
+
+`varde show --json` has `flow`: `check` (`{cmd, review, reviewer,
+rubric, guard, again, running}` or `null`), `last_check`, `loop` (`{def,
+state, rounds, checks}` or `null`; each round is `{run, n, started,
+ended, exit_code, live, asked, profile}`), `after` (`[{after, kind,
+met}]`), `verified` and `approved`. `varde trail <task> --json` gives
+`{"v": 1, "tasks": [{task, short, title, profile, label, after}]}` in
+the order they were made. Each round is a run of the task, so a client
+opens one as any run (`start --run`). The commands are plain: `check`,
+`approve`, `loop`, `after`, `trail`, `recipe`, `profiles`; a start of
+the user's pauses a task's loop, and `varde loop <task>` resumes it.
 
 ## Starting a task
 

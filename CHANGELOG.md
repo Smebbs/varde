@@ -4,6 +4,62 @@ Notable changes to varde and org-varde.
 
 ## Unreleased
 
+## 1.6.0-beta2 - 2026-11-23
+
+A beta: loops and trails are new, and with the steward they may change
+or go before 1.6.0. Nothing else depends on them.
+
+### Added
+
+- Checks: `varde check <task> -- CMD` says how varde knows a task's work
+  is good. varde runs it itself, in the task's checkout, after each of
+  its sessions and on `--now`; `--review` adds a review of the diff by
+  another model, `--rubric` what it judges by, `--again N` passes in a
+  row, and `--guard` paths a session must not change. `varde approve`
+  is you saying it is good.
+- Loops: `varde loop <task>` runs a task in fresh background sessions
+  until its check passes, each told its cairn and how the last check
+  failed. It stops when the check passes, after `--max` rounds or
+  `--minutes`, when two rounds fail the same way with no change (after
+  moving up `--escalate`'s profiles), when a round asks you something,
+  or when a round touches the guard. Opening the task pauses it.
+- Trails: `varde new --after <task> [--approved]` and `varde after` make a
+  task wait on others; `varde trail <task> [--start]` draws them and sets
+  them going. A step starts in the background once what it waits on is
+  verified, or approved.
+- Profiles: an agent, a model and an effort, by name (`quick`, `build`,
+  `deep`, `review` ship; yours under `[profiles]`), with `--profile` on
+  `new`, `start` and `attach`, and `varde set --profile`. `varde
+  profiles` lists them.
+- Recipes: loops and trails written down once, in TOML. Five are built
+  in (`fix-until-green`, `bugfix`, `feature`, `draft-revise`,
+  `research`); yours go in `~/.config/varde/recipes/`. `varde recipe
+  list|show|check|edit|guide`, and `varde new "…" --recipe NAME --var
+  k=v --set step.key=value --start`. `varde recipe guide` is written for
+  agents too, and every session is pointed to it.
+- Both boards: `L` loop, `c`/`C` set or run the check, `O` its output,
+  `A` approve, `t` the trail, `M` the profile, `r` recipes. Rows say
+  where a loop or trail stands (`↺ 2/3 ✗ 1 failed`, `✓ verified in 2`,
+  `⧗ your approval of abc123`).
+- Emacs: a Loop section in the view, a round a line (RET opens it, `O`
+  what its check printed); a trail buffer; a recipes buffer; and
+  Profile, After, Recipe and Vars in the new-task form.
+- The steward has a playbook for loops and trails (`varde steward guide
+  loops`).
+
+### Changed
+
+- The store moves to schema 11. Earlier versions refuse it: keep a copy
+  of `~/.local/state/varde/varde.db` if you may go back to 1.6.0-beta1.
+- `varde tick` also starts loops' rounds and trails' steps, is woken
+  when a session, a check or a cairn update ends, and runs at most
+  `loops.parallel` (3) background sessions at once. Loops need the
+  heartbeat: `varde schedule --install`.
+- A profile may carry its own `background` arguments. Claude's `auto`
+  permission mode refuses every write on haiku: `varde doctor` says when
+  a haiku profile would run under it.
+- A task's own session may not `varde approve`.
+
 ## 1.6.0-beta1 - 2026-10-31
 
 A beta: the steward is new, opt-in, and may change or go before 1.6.0.

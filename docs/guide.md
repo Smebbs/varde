@@ -40,6 +40,10 @@ cargo install --locked --git https://github.com/Smebbs/varde varde
 
 Or grab a binary from the
 [latest release](https://github.com/Smebbs/varde/releases/latest).
+A beta is a pre-release, which Homebrew and "latest" leave out: take its
+binary from its [release page](https://github.com/Smebbs/varde/releases),
+or `cargo install --locked --git https://github.com/Smebbs/varde --tag
+v1.6.0-beta2 varde`.
 `varde` must be on your PATH, since the hooks call it by name.
 
 Claude Code: install the plugin (it's just hooks calling `varde hook`).
@@ -155,6 +159,77 @@ To end the series, take the schedule off (`varde schedule <task>
 --off`, or `e` and clear `When:`), then `done`. `park` and `drop` pause
 the schedule; `reopen` resumes it.
 
+### Loops, checks and trails (beta)
+
+A **check** is how varde knows a task's work is good rather than being
+told: a command it runs itself in the task's checkout, a review by
+another model, or both.
+
+```sh
+varde check fix1 -- cargo test -p parser    # passes when it exits 0
+varde check fix1 --review --rubric review.md  # then another model reads the diff
+varde check fix1 --guard 'tests/*'            # a session that changes these is flagged
+varde check fix1 --now                        # run it here and see
+varde approve fix1                            # you say it is good
+```
+
+A **loop** runs a task in fresh background sessions until its check
+passes. Each round gets the task's cairn and how the last check failed.
+
+```sh
+varde loop fix1 --check 'cargo test' --max 3 --escalate deep
+```
+
+It stops when the check passes (`✓ verified in 2`, in Needs you), after
+`--max` rounds or `--minutes`, when two rounds fail the same way with no
+change and no profile is left to escalate to (`■ stuck`), when a round
+asks you something (`? asked you`), or when a round touches the guard
+(`⚑ touched tests/a.rs`). Opening the task (RET, `attach`) takes over
+the round under way and pauses the loop; `varde loop fix1` resumes it.
+`varde show fix1` lists every round. Each is an ordinary session of the
+task, so RET in the view opens any of them.
+
+A **trail** is tasks joined by `after`: a task starts once what it
+waits on is verified, or approved with `--approved`.
+
+```sh
+varde new "Store layer" --after spec --approved
+varde trail spec                 # draw it
+varde trail spec --start         # set it going: each starts in the background when ready
+```
+
+A step with one upstream that nothing else follows works in its
+upstream's worktree; others get a worktree cut from their upstream's
+branch. varde merges nothing and lands nothing.
+
+**Profiles** are an agent, a model and an effort: `quick` (haiku),
+`build` (sonnet), `deep` (opus, high) and `review` ship with varde, and
+yours go in the config. `varde profiles` lists them. `--profile` on
+`new`, `start` and `attach` picks one.
+
+**Recipes** are loops and trails written down once. `varde recipe list`
+shows them (`fix-until-green`, `bugfix`, `feature`, `draft-revise` and
+`research` are built in), `varde recipe show bugfix --origin` draws one
+and says where each value came from, and `varde recipe edit bugfix`
+gives you your own copy. To use one:
+
+```sh
+varde new "Parser crashes on empty input" --recipe bugfix --start
+varde new "Login race" --recipe bugfix --set fix.output=draft-pr
+```
+
+`varde recipe guide` prints every key with its default. It is written
+for agents too: ask any session to "write a varde recipe that…" and it
+finds the guide by itself. `varde recipe check FILE` says whether a
+recipe is usable.
+
+Loops need the heartbeat (`varde schedule --install`) to be sure the
+next round starts; varde also wakes itself when a round, a check or a
+cairn update ends. At most `loops.parallel` (3) background sessions run
+at once. Nobody approves tools in the background, so give the agent's
+flags in `background` (see [Configure](#configure)), or hand the task to
+the steward.
+
 ## The board
 
 `varde` opens the board, kept to the project you're in (`.` shows
@@ -183,6 +258,12 @@ shows them all.
 | `.` | This project, or every project. |
 | C-l | Redraw and read the board again. |
 | `q` / Esc | Close the pane, else quit (`q` only, unless configured). |
+| `L` | Loop the task until a command passes; on a loop at work it pauses, paused it resumes. |
+| `c` / `C` / `O` | Set its check / run it now / show what it last printed. |
+| `A` | Approve its work. |
+| `t` | Its loop, check and trail. |
+| `M` | The profile it runs on. |
+| `r` | New tasks from a recipe, set going. |
 
 **The new-task form.** `n` opens it in the context, since most tasks
 are just that; leave the title empty and a model names the task. Above
@@ -321,6 +402,21 @@ branch_prefix = "varde/"
 [board]
 scope = "project"                 # or "all"
 
+[profiles]                        # an agent, a model and an effort, by name
+# deep = { model = "opus", effort = "xhigh" }
+# review = { agent = "pi", model = "openai/gpt-5", effort = "high" }
+# Claude's `auto` permission mode does not run on haiku: a haiku profile
+# that works in the background needs its own permission flags.
+# quick = { model = "haiku", effort = "medium", background = ["--permission-mode", "acceptEdits", "--allowedTools", "Bash(git add *) Bash(git commit *)"] }
+
+[roles]
+# work = "build"                  # what a task's sessions run on; default: the agent's own
+review = "review"                 # what a check's review runs on
+
+[loops]
+parallel = 3                      # background rounds and checks at once
+check_minutes = 30                # a check that takes longer is an error
+
 [keys]                            # rebind a board key by action
 # park = "p"
 # quit = "esc"
@@ -330,7 +426,8 @@ The actions are `start`, `background`, `fresh`, `fork`, `next-needs`,
 `prev-needs`, `new`, `edit`, `done`, `park`, `drop`, `reopen`, `accept`, `move`,
 `mark`, `view`, `cairn`, `editor`, `diff`, `recall`, `down`, `up`,
 `first`, `last`, `next-group`, `prev-group`, `half-down`, `half-up`,
-`fold`, `scope`, `refresh`, `quit` and `help`.
+`fold`, `scope`, `refresh`, `quit`, `help`, `loop`, `check`, `check-now`,
+`check-output`, `approve`, `trail`, `profile` and `recipes`.
 
 Per-repo settings live in git config, so nothing committed ever runs:
 
@@ -338,10 +435,13 @@ Per-repo settings live in git config, so nothing committed ever runs:
 git config varde.worktree always       # its first runs get a worktree
 git config varde.base develop          # the branch worktrees start from and land in
 git config varde.setup "pnpm install"  # run in each new worktree
+git config varde.check "cargo test"    # what a loop or recipe checks with, unless told
 ```
 
 **What varde trusts.** It only runs what you set: the agent `command`
-in your config and `varde.setup` in a repo's local git config. Memory
+in your config, checks you set with `varde check`, `varde loop` or your
+recipes, and `varde.setup` and `varde.check` in a repo's local git
+config. Memory
 is written by agents, so treat it as agent output; model-written lines
 are filtered for secrets, URLs, piped commands and orders to sessions.
 Your own lines aren't filtered.

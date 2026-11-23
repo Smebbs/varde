@@ -99,6 +99,10 @@ pub fn go(paths: &Paths) -> Result<i32> {
         project: None,
         take_over: false,
         run: None,
+        profile: None,
+        round: None,
+        base: None,
+        share: None,
     };
     start::attach(paths, &id, opts)
 }
@@ -398,6 +402,10 @@ pub fn say(
         project: None,
         take_over: false,
         run: None,
+        profile: None,
+        round: None,
+        base: None,
+        share: None,
     };
     let (run, cwd) = match start::prepare(&mut store, &id, opts, false)? {
         start::Outcome::Ready { run, cwd, .. } => (run, cwd),
@@ -694,7 +702,7 @@ fn caller(store: &Store) -> Result<Caller> {
 
 /// Refuse `what` from another task's session: handing tasks over, rules
 /// and answers in the user's name are the user's, and the steward's.
-fn yours(store: &Store, what: &str) -> Result<()> {
+pub(crate) fn yours(store: &Store, what: &str) -> Result<()> {
     if let Caller::Task(short, _) = caller(store)? {
         bail!("{what} is the user's to do, or the steward's, not a task's session ({short})");
     }

@@ -310,7 +310,24 @@ pub fn kick(board: &Board, now: i64, paths: &Paths) -> Result<()> {
 
 /// `varde tick`: start every open task whose schedule is due.
 pub fn tick(paths: &Paths) -> Result<()> {
-    let Some(_lock) = lock(paths)? else { return Ok(()) };
+    let again = paths.home.join("tick.again");
+    let Some(_lock) = lock(paths)? else {
+        // Another tick runs: it looks once more before it lets go, so
+        // what woke this one is not lost.
+        let _ = File::create(&again);
+        return Ok(());
+    };
+    for _ in 0..5 {
+        let _ = std::fs::remove_file(&again);
+        once(paths)?;
+        if !again.exists() {
+            break;
+        }
+    }
+    Ok(())
+}
+
+fn once(paths: &Paths) -> Result<()> {
     let mut store = paths.open(BUSY)?;
     let now = now_ms();
     let due: Vec<(String, String, Option<bool>)> = {
@@ -330,7 +347,8 @@ pub fn tick(paths: &Paths) -> Result<()> {
             )?;
         }
     }
-    Ok(())
+    // Then what loops and trails have ready.
+    crate::flow::tick(paths, &mut store)
 }
 
 /// Start `task` for its schedule, unless it must wait: for a cairn update
@@ -364,6 +382,10 @@ fn fire(store: &mut Store, task: &str, rule: &str, worktree: Option<bool>, now: 
         project: None,
         take_over: false,
         run: None,
+        profile: None,
+        round: None,
+        base: None,
+        share: None,
     };
     let (run, cwd) = match start::prepare(store, task, opts, false)? {
         start::Outcome::Ready { run, cwd, .. } => (run, cwd),

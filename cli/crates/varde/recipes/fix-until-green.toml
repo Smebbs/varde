@@ -1,0 +1,14 @@
+# Work on the task in fresh sessions until a command passes.
+label = "fix-until-green"
+description = "Fresh sessions until a command passes: Ralph's loop, with a stop."
+
+[vars.check]
+description = "The command that must pass; git config varde.check when left out."
+default = ""
+
+[[steps]]
+id = "fix"
+title = "{{title}}"
+prompt = "{{context}}"
+check = { cmd = "{{check}}" }
+loop = { max = 3, escalate = ["deep"] }

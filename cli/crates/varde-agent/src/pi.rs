@@ -51,6 +51,10 @@ fn line_text(line: &str) -> Option<(String, String)> {
 }
 
 impl Agent for Pi {
+    fn effort_flag(&self) -> &'static str {
+        "--thinking"
+    }
+
     fn name(&self) -> &'static str {
         "pi"
     }

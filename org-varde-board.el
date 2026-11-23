@@ -873,10 +873,15 @@ and what is typed after it is the field's.  FIRST: nothing goes before it."
               'front-sticky (and first '(read-only))
               'font-lock-face (if (eq field 'body) 'org-varde-quiet 'org-varde-form-label)))
 
-(defun org-varde--form-fill (title project body &optional rule)
+(defvar-local org-varde--new-flow nil
+  "What the task this buffer edits ran on and waited on when the form
+opened: (:profile NAME :after SHORTS).")
+
+(defun org-varde--form-fill (title project body &optional rule extra)
   "Fill this buffer with the form: its TITLE, its PROJECT unless that is
-:none, the RULE of when varde starts it, and its context BODY.  Point is
-at the end of the title."
+:none, the RULE of when varde starts it, and its context BODY.  EXTRA,
+a plist, fills :profile, :after (short ids, space-separated) and, for a
+new task, :recipe and :vars.  Point is at the end of the title."
   (let ((inhibit-read-only t)
         (inhibit-modification-hooks t))
     ;; The mode forgot them, so they are found by their mark.
@@ -888,6 +893,12 @@ at the end of the title."
       (insert (org-varde--form-label 'project "\nProject: ")
               (if project (abbreviate-file-name (directory-file-name project)) "")))
     (insert (org-varde--form-label 'when "\nWhen:    ") (or rule ""))
+    (insert (org-varde--form-label 'profile "\nProfile: ") (or (plist-get extra :profile) ""))
+    (insert (org-varde--form-label 'after "\nAfter:   ") (or (plist-get extra :after) ""))
+    ;; A task made from a recipe is a trail of them: only for a new one.
+    (unless org-varde--new-task
+      (insert (org-varde--form-label 'recipe "\nRecipe:  ") (or (plist-get extra :recipe) ""))
+      (insert (org-varde--form-label 'vars "\nVars:    ") (or (plist-get extra :vars) "")))
     ;; The line's newline is not its own, so evil's dd can take the
     ;; context's last line; `org-varde--form-keep-line' puts it back.
     (insert (org-varde--form-label 'body (concat "\n── context " (make-string 30 ?─))) "\n" body))
@@ -910,7 +921,7 @@ at the end of the title."
 
 (defun org-varde--form-fields ()
   "The fields of this form, in order."
-  (seq-filter #'org-varde--form-bounds '(title project when body)))
+  (seq-filter #'org-varde--form-bounds '(title project when profile after recipe vars body)))
 
 (defun org-varde--form-at ()
   "The field point is in: on a name, the field before it."
@@ -944,7 +955,11 @@ line's newline, as evil's dd on the context's last line does."
                    `((title . ,(unless org-varde--new-task "left empty, varde names it from the context"))
                      (project . ,(if org-varde--new-task "none yet · RET picks it"
                                    "asked for on create · RET picks it"))
-                     (when . "not scheduled: at mon 09:00, every weekday 09:00, every 4h")))
+                     (when . "not scheduled: at mon 09:00, every weekday 09:00, every 4h")
+                     (profile . "the work role's · RET picks one")
+                     (after . "waits on nothing · RET picks a task it waits on")
+                     (recipe . "none · RET picks one: a task per step, a loop or a trail")
+                     (vars . "the recipe's: name=value name=value")))
       (let ((b (org-varde--form-bounds field))
             (o (alist-get field org-varde--form-hints)))
         (if (and hint b (string-blank-p (buffer-substring-no-properties (car b) (cdr b))))
@@ -971,6 +986,7 @@ next; in the context, org's RET."
   (pcase (org-varde--form-at)
     ('body (call-interactively #'org-return))
     ('project (org-varde-new-pick-project))
+    ((or 'profile 'after 'recipe) (org-varde-new-pick))
     (_ (org-varde-new-next-field))))
 
 (defun org-varde-new-tab ()
@@ -997,9 +1013,50 @@ when negative."
 (defun org-varde-new-complete ()
   "On the Project, pick its directory; elsewhere, complete at point."
   (interactive)
-  (if (eq (org-varde--form-at) 'project)
-      (org-varde-new-pick-project)
-    (completion-at-point)))
+  (pcase (org-varde--form-at)
+    ('project (org-varde-new-pick-project))
+    ((or 'profile 'after 'recipe) (org-varde-new-pick))
+    (_ (completion-at-point))))
+
+(defun org-varde--form-set (field value)
+  "Make VALUE the value of FIELD in this form."
+  (let ((b (or (org-varde--form-bounds field) (user-error "Not a form with that field"))))
+    (goto-char (car b))
+    (delete-region (car b) (cdr b))
+    (insert value)))
+
+(defun org-varde-new-pick ()
+  "Pick the value of the field here: a profile, a task it waits on (added
+to those there), or a recipe, whose variables it then offers."
+  (interactive)
+  (pcase (org-varde--form-at)
+    ('profile (org-varde--form-set 'profile (org-varde--read-profile "Profile (empty: the work role's): "
+                                                                     (org-varde--form-value 'profile))))
+    ('after
+     (let* ((rows (org-varde--known-rows))
+            (pick (completing-read "Waits on: "
+                                   (mapcar (lambda (r) (format "%s  %s" (plist-get r :short) (plist-get r :title)))
+                                           rows)
+                                   nil t))
+            (short (car (split-string pick)))
+            (now (split-string (org-varde--form-value 'after))))
+       (org-varde--form-set 'after (string-join (append (delete short now) (list short)) " "))))
+    ('recipe
+     (let* ((recipes (plist-get (org-varde--recipes) :recipes))
+            (completion-extra-properties
+             (list :annotation-function
+                   (lambda (name)
+                     (when-let* ((r (seq-find (lambda (r) (equal (plist-get r :name) name)) recipes)))
+                       (org-varde--quiet (format "  %s · %s" (plist-get r :source)
+                                                 (or (plist-get r :description) "")))))))
+            (name (completing-read "Recipe (empty: none): " (cons "" (mapcar (lambda (r) (plist-get r :name)) recipes))
+                                   nil t))
+            (r (seq-find (lambda (r) (equal (plist-get r :name) name)) recipes)))
+       (org-varde--form-set 'recipe name)
+       ;; Its variables, with their defaults, ready to change.
+       (when (and r (string-empty-p (org-varde--form-value 'vars)))
+         (org-varde--form-set 'vars (mapconcat (lambda (v) (format "%s=%s" (plist-get v :name) (or (plist-get v :default) "")))
+                                               (plist-get r :vars) " ")))))))
 
 (defun org-varde-new-pick-project ()
   "Pick the directory of the task's project, for its Project field.
@@ -1024,9 +1081,14 @@ It offers the one there, or else the one offered for the task."
         (org-varde-new-mode)
         (setq org-varde--new-task (plist-get row :task)
               org-varde--new-when (or (plist-get (plist-get d :schedule) :rule) "")
-              org-varde--new-project (plist-get d :project))
+              org-varde--new-project (plist-get d :project)
+              org-varde--new-flow
+              (let ((flow (plist-get d :flow)))
+                (list :profile (or (plist-get flow :profile) "")
+                      :after (mapconcat (lambda (w) (org-varde--short (plist-get w :after)))
+                                        (plist-get flow :after) " "))))
         (org-varde--form-fill (or (plist-get d :title) "") org-varde--new-project (or (plist-get d :body) "")
-                              org-varde--new-when))
+                              org-varde--new-when org-varde--new-flow))
       (setq org-varde--new-task (plist-get row :task)
             header-line-format (concat " " (org-varde--edit-keys "save" "cancel"))))
     (pop-to-buffer buffer)))
@@ -1141,13 +1203,14 @@ text when it ends on the heading or among its planning and drawers."
       (unless (bolp) (insert "\n"))
       (insert (org-varde--link-text (concat "varde:" short) title) "\n"))))
 
-(defun org-varde--new (offer here &optional text then rule)
+(defun org-varde--new (offer here &optional text then rule extra)
   "Open the buffer that writes a new task.  OFFER is the project offered
 when it is asked for, and HERE the one its Project starts as, which it
 goes to without asking.  TEXT, when given, is what it starts with: its
 first line the title, and the rest the context; a draft there goes to
 the kill ring.  THEN is as `org-varde--new-then'.  RULE is what its When
-starts as.  Point starts in the context."
+starts as, and EXTRA as for `org-varde--form-fill'.  Point starts in the
+context."
   (let ((buffer (get-buffer-create "*varde new*")))
     (with-current-buffer buffer
       (cond ((and (buffer-modified-p) (not text))
@@ -1160,7 +1223,7 @@ starts as.  Point starts in the context."
                       (nl (string-search "\n" text)))
                  ;; Unchanged, C-c C-k drops it.
                  (org-varde--form-fill (string-trim (substring text 0 nl)) here
-                                       (if nl (string-trim (substring text nl)) "") rule))
+                                       (if nl (string-trim (substring text nl)) "") rule extra))
                ;; Most tasks are only their context: varde names them.
                (org-varde--form-goto 'body)
                (setq org-varde--new-then then)))
@@ -1217,6 +1280,19 @@ to its task.  A move varde refuses saves nothing, and says why."
         (org-varde--call body (append (list "set" org-varde--new-task (concat "--title=" title) "--body" "-")
                                       move))
       (org-varde-varde-error (user-error "varde: %s" (cadr e))))
+    ;; What it runs on and waits on, where those changed.
+    (let ((profile (or (org-varde--form-value 'profile) ""))
+          (after (split-string (or (org-varde--form-value 'after) "")))
+          (was (split-string (or (plist-get org-varde--new-flow :after) ""))))
+      (condition-case e
+          (progn
+            (unless (equal profile (or (plist-get org-varde--new-flow :profile) ""))
+              (org-varde--varde "set" org-varde--new-task "--profile" profile))
+            (when-let* ((gone (seq-difference was after)))
+              (apply #'org-varde--varde "after" org-varde--new-task (append gone (list "--off"))))
+            (when-let* ((new (seq-difference after was)))
+              (apply #'org-varde--varde "after" org-varde--new-task new)))
+        (org-varde-varde-error (user-error "varde: %s" (cadr e)))))
     ;; What its schedule does now, as the terminal's form says it.
     (let ((said (cond ((equal rule org-varde--new-when) nil)
                       ((string-empty-p rule)
@@ -1248,9 +1324,62 @@ the answer."
          (let ((at (or (seq-position args "--") (length args))))
            (org-varde--call input (append (seq-take args at) (list "--worktree" tree) (seq-drop args at)))))))))
 
-(defun org-varde--create-task (directory)
-  "Create the task written in this buffer in the project DIRECTORY is in."
+(defun org-varde--split-vars (text)
+  "The name=value pairs of TEXT, apart by spaces; a value with spaces is
+quoted, wholly or after its =: check=\"cargo test\"."
+  (let ((pos 0) out)
+    (while (string-match "\\(?:[^ \t\n\"]\\|\"[^\"]*\"\\)+" text pos)
+      (push (string-replace "\"" "" (match-string 0 text)) out)
+      (setq pos (match-end 0)))
+    (nreverse out)))
+
+(defun org-varde--create-from-recipe (directory recipe)
+  "Make the tasks of RECIPE from what this buffer says, in the project
+DIRECTORY is in, and set them going once you say so."
   (pcase-let* ((`(,title . ,body) (org-varde--new-text))
+               (project (expand-file-name directory))
+               (body (and (not (string-blank-p body)) body))
+               (profile (org-varde--form-value 'profile))
+               (vars (org-varde--split-vars (or (org-varde--form-value 'vars) "")))
+               (_ (when (string-blank-p title) (user-error "A task made from a recipe needs a title")))
+               (_ (unless (string-empty-p (or (org-varde--form-value 'when) ""))
+                    (user-error "A recipe's tasks start when its trail is set going, not at a time: clear When")))
+               (go (y-or-n-p (format "Set the %s trail going now? " recipe)))
+               (out (condition-case e
+                        (org-varde--call body
+                                         (append (list "new" "--json" "--project" project "--recipe" recipe)
+                                                 (mapcan (lambda (v) (list "--var" v)) vars)
+                                                 (and (not (string-empty-p profile)) (list "--profile" profile))
+                                                 (and go (list "--start"))
+                                                 (and body (list "--context" "-"))
+                                                 (list "--" title)))
+                      (org-varde-varde-error (user-error "varde: %s" (cadr e)))))
+               (made (org-varde--json (car (split-string out "\n" t))))
+               (tasks (plist-get made :tasks)))
+    (set-buffer-modified-p nil)
+    (org-varde--close-edit)
+    (when-let* ((board (get-buffer org-varde-board-buffer)))
+      (with-current-buffer board (setq org-varde-board--select (plist-get (car tasks) :id))))
+    (org-varde-board--reveal project)
+    (message "Made %d task%s from %s in %s; %s"
+             (length tasks) (if (cdr tasks) "s" "") recipe (org-varde--project-name project)
+             (if go "it is going: t on the board draws its trail"
+               "t on the board draws its trail, S there sets it going")))
+  (org-varde-refresh))
+
+(defun org-varde--create-task (directory)
+  "Create the task written in this buffer in the project DIRECTORY is in.
+From a recipe, its tasks."
+  (let ((recipe (org-varde--form-value 'recipe)))
+    (if (and recipe (not (string-empty-p recipe)))
+        (org-varde--create-from-recipe directory recipe)
+      (org-varde--create-one directory))))
+
+(defun org-varde--create-one (directory)
+  "Create the one task written in this buffer in the project DIRECTORY is in."
+  (pcase-let* ((`(,title . ,body) (org-varde--new-text))
+               (profile (or (org-varde--form-value 'profile) ""))
+               (after (split-string (or (org-varde--form-value 'after) "")))
                (project (expand-file-name directory))
                (body (and (not (string-blank-p body)) body))
                (rule (or (org-varde--form-value 'when) ""))
@@ -1258,6 +1387,8 @@ the answer."
          (new (org-varde--json
                      (condition-case e
                          (org-varde--scheduled (append (list "new" "--json" "--project" project)
+                                                       (and (not (string-empty-p profile)) (list "--profile" profile))
+                                                       (and after (list "--after" (string-join after ",")))
                                                        (and body (list "--context" "-"))
                                                        (and (not (string-empty-p rule)) (list "--when" rule))
                                                        ;; None: varde makes one from the context.
@@ -1364,7 +1495,16 @@ task in the region."
     ("P" "park" org-varde-board-park :if org-varde--can-park-p)
     ("x" "drop" org-varde-board-drop)
     ("u" "reopen last" org-varde-board-reopen)
-    ("a" "accept (Inbox)" org-varde-board-accept)]]
+    ("a" "accept (Inbox)" org-varde-board-accept)]
+   ["Loop"
+    ("L" "loop" org-varde-loop)
+    ("c" "check" org-varde-check)
+    ("C" "check now" org-varde-check-now)
+    ("O" "check output" org-varde-check-output)
+    ("A" "approve" org-varde-approve)
+    ("t" "trail" org-varde-trail)
+    ("M" "profile" org-varde-set-profile)
+    ("r" "recipes" org-varde-recipes)]]
   [["Look"
     ("v" "view, cairns" org-varde-show :if-not org-varde--evil-p)
     ("K" "view, cairns" org-varde-show :if org-varde--evil-p)
@@ -1427,6 +1567,14 @@ Rebind them here; under evil, its normal state takes them from here too."
   "K" #'org-varde-show
   "E" #'org-varde-edit-cairn
   "y" #'org-varde-copy-link
+  "L" #'org-varde-loop
+  "c" #'org-varde-check
+  "C" #'org-varde-check-now
+  "O" #'org-varde-check-output
+  "A" #'org-varde-approve
+  "t" #'org-varde-trail
+  "M" #'org-varde-set-profile
+  "r" #'org-varde-recipes
   "=" #'org-varde-board-diff
   "/" #'org-varde-recall
   "." #'org-varde-board-toggle-project

@@ -4,6 +4,7 @@
 pub mod board;
 pub mod cairn;
 pub mod event;
+pub mod flow;
 pub mod memory;
 pub mod message;
 pub mod plan;

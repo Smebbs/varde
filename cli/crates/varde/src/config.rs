@@ -25,6 +25,58 @@ pub struct Config {
     pub board: BoardConfig,
     /// The board's keys, by action: `park = "P"`.
     pub keys: BTreeMap<String, String>,
+    /// Named agent + model + effort, for a task, a loop's rounds and a
+    /// check's review: `deep = { model = "opus", effort = "high" }`.
+    pub profiles: BTreeMap<String, Profile>,
+    /// The profile each role uses unless told otherwise.
+    pub roles: Roles,
+    pub loops: Loops,
+}
+
+/// Who does the work, and how hard.
+#[derive(Debug, Default, Clone, PartialEq, Eq, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Profile {
+    /// `claude` or `pi`; the default agent when unset.
+    pub agent: Option<String>,
+    /// An alias or id the agent takes: `opus`, `sonnet`, `haiku`.
+    pub model: Option<String>,
+    /// `low`, `medium`, `high`, `xhigh` or `max`.
+    pub effort: Option<String>,
+    /// In place of the agent's `background` arguments, for a session on
+    /// this profile that nobody is at: e.g. `["--permission-mode",
+    /// "acceptEdits"]`, since Claude's `auto` mode does not run on haiku.
+    pub background: Option<Vec<String>>,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Roles {
+    /// A task's sessions and a loop's rounds.
+    pub work: Option<String>,
+    /// A check's review: best another model than the work's.
+    pub review: String,
+}
+
+impl Default for Roles {
+    fn default() -> Self {
+        Roles { work: None, review: "review".into() }
+    }
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct Loops {
+    /// How many background rounds and checks run at once, schedules included.
+    pub parallel: usize,
+    /// A check that takes longer than this many minutes is an error.
+    pub check_minutes: u64,
+}
+
+impl Default for Loops {
+    fn default() -> Self {
+        Loops { parallel: 3, check_minutes: 30 }
+    }
 }
 
 #[derive(Debug, Default, Deserialize)]
@@ -236,6 +288,16 @@ fn check(c: &Config) -> std::result::Result<(), String> {
         return Err(format!("agents.{name}.command is empty: name the program, or leave the key out"));
     }
     crate::tui::check_keys(&c.keys)?;
+    let efforts = ["minimal", "low", "medium", "high", "xhigh", "max", "off"];
+    if let Some((name, p)) =
+        c.profiles.iter().find(|(_, p)| p.effort.as_deref().is_some_and(|e| !efforts.contains(&e)))
+    {
+        return Err(format!(
+            "profiles.{name}.effort {:?} is not one of {}",
+            p.effort.as_deref().unwrap_or(""),
+            efforts.join(", ")
+        ));
+    }
     if !(0.0..=1.0).contains(&c.memory.holdout) {
         return Err(format!("memory.holdout is a share of sessions, from 0 to 1, not {}", c.memory.holdout));
     }
@@ -267,6 +329,40 @@ impl Config {
         argv
     }
 
+    /// The same for a session on `profile`: its own arguments when it has
+    /// them, else the agent's.
+    pub fn background_on(&self, agent: &str, profile: Option<&str>, mut argv: Vec<String>) -> Vec<String> {
+        match profile.and_then(|p| self.profile(p)).and_then(|p| p.background) {
+            Some(args) if !argv.is_empty() => {
+                argv.splice(1..1, args);
+                argv
+            }
+            _ => self.background(agent, argv),
+        }
+    }
+
+    /// What is wrong with how a background session on `profile` would
+    /// run: Claude's `auto` permission mode does not run on haiku, so such
+    /// a session can change no file.
+    pub fn background_warning(&self, profile: &str) -> Option<String> {
+        let p = self.profile(profile)?;
+        let agent = p.agent.clone().unwrap_or_else(|| "claude".into());
+        if agent != "claude" || !p.model.as_deref().is_some_and(|m| m.contains("haiku")) {
+            return None;
+        }
+        let args = p
+            .background
+            .clone()
+            .unwrap_or_else(|| self.agents.get(&agent).map(|a| a.background.clone()).unwrap_or_default());
+        let auto = args.windows(2).any(|w| w[0] == "--permission-mode" && w[1] == "auto")
+            || args.iter().any(|a| a == "--permission-mode=auto");
+        auto.then(|| {
+            format!(
+                "profile {profile} runs haiku, and Claude's auto permission mode does not run on haiku: in the background it can change no file. Give it its own, e.g. {profile} = {{ model = \"haiku\", background = [\"--permission-mode\", \"acceptEdits\", \"--allowedTools\", \"Bash(git add *) Bash(git commit *)\"] }}"
+            )
+        })
+    }
+
     /// Where `repo`'s worktrees go, without `..`: a session's directory is
     /// matched against it, and hooks report that one resolved.
     pub fn worktree_dir(&self, repo: &Path) -> PathBuf {
@@ -280,6 +376,34 @@ impl Config {
         varde_core::project::normalize(&repo.join(dir))
     }
 
+    /// The profile `name`: yours, else one varde ships (`quick`, `build`,
+    /// `deep`, `review`), on Claude's aliases so a release never breaks it.
+    pub fn profile(&self, name: &str) -> Option<Profile> {
+        if let Some(p) = self.profiles.get(name) {
+            return Some(p.clone());
+        }
+        let (model, effort) = match name {
+            "quick" => ("haiku", "medium"),
+            "build" => ("sonnet", "medium"),
+            "deep" => ("opus", "high"),
+            "review" => ("opus", "high"),
+            _ => return None,
+        };
+        Some(Profile {
+            agent: Some("claude".into()),
+            model: Some(model.into()),
+            effort: Some(effort.into()),
+            background: None,
+        })
+    }
+
+    /// Every profile there is, yours and the shipped ones, by name.
+    pub fn profiles(&self) -> Vec<(String, Profile)> {
+        let mut names: Vec<String> = ["quick", "build", "deep", "review"].map(String::from).to_vec();
+        names.extend(self.profiles.keys().filter(|k| !names.contains(k)).cloned().collect::<Vec<_>>());
+        names.into_iter().filter_map(|n| self.profile(&n).map(|p| (n, p))).collect()
+    }
+
     pub fn branch_prefix(&self) -> &str {
         self.worktree.branch_prefix.as_deref().unwrap_or("varde/")
     }
@@ -291,6 +415,9 @@ pub struct Repo {
     pub worktree: Option<Policy>,
     pub base: Option<String>,
     pub setup: Option<String>,
+    /// The command that checks a task's work here (`varde.check`), for a
+    /// loop or check that names none.
+    pub check: Option<String>,
     /// A value that made no sense, which is then treated as unset: a typo
     /// never stops a session.
     pub warning: Option<String>,
@@ -320,6 +447,7 @@ impl Repo {
                 },
                 "varde.base" if !value.is_empty() => r.base = Some(value.to_string()),
                 "varde.setup" if !value.is_empty() => r.setup = Some(value.to_string()),
+                "varde.check" if !value.is_empty() => r.check = Some(value.to_string()),
                 _ => {}
             }
         }
@@ -330,6 +458,31 @@ impl Repo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn haiku_in_the_background_under_auto_is_warned_of_and_a_profile_can_say_its_own() {
+        let c: Config = toml::from_str(
+            r#"
+            [agents.claude]
+            background = ["--permission-mode", "auto"]
+            [profiles]
+            mine = { model = "haiku", background = ["--permission-mode", "acceptEdits"] }
+            "#,
+        )
+        .unwrap();
+        assert!(c.background_warning("quick").is_some_and(|w| w.contains("acceptEdits")));
+        assert!(c.background_warning("mine").is_none());
+        assert!(c.background_warning("deep").is_none(), "opus runs under auto");
+        let argv = || vec!["claude".to_string(), "-p".to_string()];
+        assert_eq!(
+            c.background_on("claude", Some("mine"), argv()),
+            ["claude", "--permission-mode", "acceptEdits", "-p"]
+        );
+        assert_eq!(
+            c.background_on("claude", Some("deep"), argv()),
+            ["claude", "--permission-mode", "auto", "-p"]
+        );
+    }
 
     #[test]
     fn every_key_is_optional_and_unknown_ones_are_refused() {

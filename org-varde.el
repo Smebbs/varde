@@ -4,7 +4,7 @@
 
 ;; Author: Morten Smebye <mortensmeb@gmail.com>
 ;; URL: https://github.com/Smebbs/varde
-;; Version: 1.6.0-beta1
+;; Version: 1.6.0-beta2
 ;; Package-Requires: ((emacs "29.1") (org "9.6") (transient "0.4"))
 ;; Keywords: tools, outlines
 ;; SPDX-License-Identifier: MIT
@@ -30,6 +30,7 @@
 
 ;;; Code:
 
+(require 'cl-lib)
 (require 'filenotify)
 (require 'json)
 (require 'org)
@@ -1841,7 +1842,8 @@ this session, late once that has gone on a day."
 (defun org-varde--row-parts (row face)
   "What ROW says after its session's status, as the board and a view say
 it: what its last turn left running, whether the steward holds it,
-where it was deferred from, and where its git work stands, in FACE
+where it was deferred from, its check, loop or trail, and where its
+git work stands, in FACE
 when that is nowhere in particular."
   (let* ((git (plist-get row :git))
          (label (plist-get git :label))
@@ -1853,6 +1855,15 @@ when that is nowhere in particular."
           (and (plist-get row :steward_until) (propertize "steward's" 'face 'org-varde-board-working))
           (let ((origin (plist-get row :origin)))
             (and origin (concat "← " (plist-get origin :short))))
+          ;; Its check, loop or trail: `↺ 2/3 ✗ exit 1', `⧗ abc123'.
+          (let ((flow (plist-get row :flow)))
+            (and flow
+                 (propertize (plist-get flow :label) 'face
+                             (pcase (plist-get flow :tone)
+                               ("working" 'org-varde-board-working)
+                               ("needs" 'org-varde-board-waiting)
+                               ("failing" 'org-varde-board-blocked)
+                               (_ face)))))
           (and label (not (string-empty-p label))
                (propertize label 'face
                            (cond ((equal (plist-get git :checks) "failing") 'org-varde-board-blocked)
@@ -1944,6 +1955,7 @@ where it fits."
                                             (propertize (or (match-string 2 l) (match-string 1 l)) 'face 'org-link)))
               (put-text-property start (point) 'org-varde-from (substring l 6)))
           (org-varde--view-line l)))))
+  (org-varde--view-flow data)
   (org-varde--view-sessions data)
   (org-varde--view-git data))
 
@@ -2055,7 +2067,9 @@ or where the task came from."
   (or (get-text-property (point) 'org-varde-section)
       (get-text-property (point) 'org-varde-item)
       (get-text-property (point) 'org-varde-from)
-      (get-text-property (point) 'org-varde-run)))
+      (get-text-property (point) 'org-varde-run)
+      (get-text-property (point) 'org-varde-flow-task)
+      (get-text-property (point) 'org-varde-output)))
 
 (defun org-varde--next-stop (stop-p n what)
   "Move to the Nth line after this one where STOP-P holds; negative N
@@ -2457,9 +2471,12 @@ on a session, open that one."
   (unless org-varde--task (user-error "A project cairn has no session; RET on a task goes to it"))
   (let ((title (plist-get org-varde--task-data :title))
         (from (get-text-property (point) 'org-varde-from))
-        (run (get-text-property (point) 'org-varde-run)))
+        (run (get-text-property (point) 'org-varde-run))
+        (other (get-text-property (point) 'org-varde-flow-task)))
     (cond
      (from (org-link-open-from-string from))
+     ;; A task before or after it in its trail: show that one.
+     (other (org-varde-show other))
      ;; On a session, open that one, not the newest.
      (run (org-varde--confirm-reopen org-varde--task title (plist-get org-varde--task-data :state))
           (let ((org-varde--background nil))
@@ -2537,6 +2554,15 @@ So the board's keys act on it here."
     ("X" "drop" org-varde-board-drop)
     ("m" "move" org-varde-board-move)
     ("y" "copy a link" org-varde-copy-link)]
+   ["Loop"
+    :if org-varde--task-view-p
+    ("L" "loop" org-varde-loop)
+    ("c" "check" org-varde-check)
+    ("C" "check now" org-varde-check-now)
+    ("O" "check output" org-varde-check-output)
+    ("A" "approve" org-varde-approve)
+    ("t" "trail" org-varde-trail)
+    ("M" "profile" org-varde-set-profile)]
    ;; Evil's keys in columns of their own: transient binds the keys of
    ;; a hidden suffix, but not those of a hidden column, and g cannot be
    ;; both a key and the start of gr.
@@ -2613,6 +2639,13 @@ Under evil, its normal state takes them from here too."
   "=" #'org-varde-board-diff
   "v" #'quit-window
   "y" #'org-varde-copy-link
+  "L" #'org-varde-loop
+  "c" #'org-varde-check
+  "C" #'org-varde-check-now
+  "O" #'org-varde-check-output
+  "A" #'org-varde-approve
+  "t" #'org-varde-trail
+  "M" #'org-varde-set-profile
   "?" #'org-varde-show-menu)
 
 (defun org-varde--evil-keys (map &rest bindings)
@@ -3145,6 +3178,551 @@ marked done offer to close the tasks it links."
   "Nothing: tasks are no longer headings.  See the varde: links' statuses."
   (declare (obsolete "a varde: link in the heading shows its task's status." "1.1"))
   "")
+
+;;; --- Loops, checks and trails -------------------------------------------------
+;;
+;; What varde knows of a task's check, loop and trail (design §6.7), and
+;; the keys that set them: the board's, the view's and the trail's are
+;; the same.  Everything here asks varde; nothing is decided here.
+
+(defun org-varde--here-row ()
+  "The task here, as a board row: the board's line, a trail's line, or
+the task a view shows."
+  (or (get-text-property (point) 'org-varde-row)
+      (when-let* ((task (or (get-text-property (point) 'org-varde-trail-task)
+                            (get-text-property (point) 'org-varde-flow-task))))
+        (or (org-varde--row task)
+            (list :task task :short (org-varde--short task) :title (org-varde--short task))))
+      (org-varde--view-row)
+      (user-error "No task on this line")))
+
+(defun org-varde--flow-of (task)
+  "TASK's check, loop and trail, as `varde show --json' has them."
+  (plist-get (org-varde--details task) :flow))
+
+(defun org-varde--profiles ()
+  "The profiles there are, as `varde profiles --json' lists them."
+  (plist-get (org-varde--varde-json "profiles" "--json") :profiles))
+
+(defun org-varde--profile-annotation (profiles)
+  "A completion annotation that says what each of PROFILES runs."
+  (lambda (name)
+    (when-let* ((p (seq-find (lambda (p) (equal (plist-get p :name) name)) profiles)))
+      (org-varde--quiet (format "  %s · %s · %s%s"
+                                (or (plist-get p :model) "default model")
+                                (or (plist-get p :effort) "default effort")
+                                (or (plist-get p :agent) "the default agent")
+                                (if (plist-get p :yours) " · yours" ""))))))
+
+(defun org-varde--read-profile (prompt &optional current)
+  "Read a profile's name with PROMPT, offering CURRENT first.
+Empty is the work role's."
+  (let* ((profiles (org-varde--profiles))
+         (names (mapcar (lambda (p) (plist-get p :name)) profiles))
+         (completion-extra-properties
+          (list :annotation-function (org-varde--profile-annotation profiles))))
+    (completing-read prompt (cons "" names) nil t nil nil (or current ""))))
+
+(defun org-varde--read-profiles (prompt &optional initial)
+  "Read profile names, comma-separated, with PROMPT; INITIAL as typed."
+  (let* ((profiles (org-varde--profiles))
+         (completion-extra-properties
+          (list :annotation-function (org-varde--profile-annotation profiles))))
+    (completing-read-multiple prompt (mapcar (lambda (p) (plist-get p :name)) profiles) nil nil initial)))
+
+(defun org-varde--flow-done (said)
+  "Say what varde SAID, its last lines, and bring every buffer up to date."
+  (message "%s" (string-trim said))
+  (org-varde-refresh))
+
+(defun org-varde-set-profile ()
+  "Pick the profile, the agent, model and effort, the task here runs on.
+Its next session takes it: one at work keeps the one it started with."
+  (interactive)
+  (let* ((row (org-varde--here-row))
+         (flow (org-varde--flow-of (plist-get row :task)))
+         (p (org-varde--read-profile (format "Profile for %s (empty: the work role's): "
+                                             (org-varde--named (plist-get row :task) (plist-get row :title)))
+                                     (plist-get flow :profile))))
+    (condition-case e
+        (org-varde--flow-done (org-varde--varde "set" (plist-get row :task) "--profile" p))
+      (org-varde-varde-error (user-error "varde: %s" (cadr e))))))
+
+(defun org-varde-check ()
+  "Set how varde checks the task here: a command, then perhaps a review
+by another model, and paths a session must not change.  Emptied, it
+offers to remove the check."
+  (interactive)
+  (let* ((row (org-varde--here-row))
+         (task (plist-get row :task))
+         (check (plist-get (org-varde--flow-of task) :check))
+         (cmd (read-string "Check command, passing when it exits 0 (empty: none): "
+                           (plist-get check :cmd)))
+         (review (y-or-n-p "Then a review of the change by another model? "))
+         (rubric (and review (read-string "What the review judges by, a file or the text (empty: none): "
+                                          (plist-get check :rubric))))
+         (guard (read-string "Paths a session must not change, e.g. tests/* (empty: none): "
+                             (string-join (plist-get check :guard) " "))))
+    (if (and (string-blank-p cmd) (not review))
+        (when (y-or-n-p "No command and no review: remove its check? ")
+          (org-varde--flow-done (org-varde--varde "check" task "--off")))
+      (condition-case e
+          (org-varde--flow-done
+           (apply #'org-varde--varde
+                  (append (list "check" task)
+                          (and review (list "--review"))
+                          (and rubric (not (string-blank-p rubric)) (list "--rubric" rubric))
+                          (mapcan (lambda (g) (list "--guard" g)) (split-string guard nil t))
+                          (and (not (string-blank-p cmd)) (list "--" cmd)))))
+        (org-varde-varde-error (user-error "varde: %s" (cadr e)))))))
+
+(defun org-varde-check-now ()
+  "Run the task's check now, in its checkout, and say what it found.
+\\<org-varde-show-mode-map>\\[org-varde-check-output] opens its output."
+  (interactive)
+  (let* ((row (org-varde--here-row))
+         (name (org-varde--named (plist-get row :task) (plist-get row :title))))
+    (message "Checking %s…" name)
+    (org-varde--varde-async
+     (list "check" (plist-get row :task) "--now")
+     (lambda (out)
+       (let ((lines (seq-remove (lambda (l) (string-prefix-p "output: " l)) (split-string out "\n" t))))
+         (message "%s: %s; O opens its output" name (string-join lines "; ")))
+       (org-varde-refresh)))))
+
+(defun org-varde-check-output ()
+  "Open what a check printed: the round's on a round's line, else the
+task's last check's."
+  (interactive)
+  (let* ((file (or (get-text-property (point) 'org-varde-output)
+                   (plist-get (plist-get (org-varde--flow-of (plist-get (org-varde--here-row) :task)) :last_check)
+                              :output)
+                   (user-error "No check has run for this task yet"))))
+    (unless (file-readable-p file) (user-error "Its output is gone: %s" file))
+    (view-file-other-window file)
+    (goto-char (point-max))))
+
+(defun org-varde-approve ()
+  "Approve the task here: you looked at its work and it is good.  What
+waits on your approval of it can start."
+  (interactive)
+  (let ((row (org-varde--here-row)))
+    (when (y-or-n-p (format "Approve %s, as its files are now? "
+                            (org-varde--named (plist-get row :task) (plist-get row :title))))
+      (condition-case e
+          (org-varde--flow-done (org-varde--varde "approve" (plist-get row :task)))
+        (org-varde-varde-error (user-error "varde: %s" (cadr e)))))))
+
+(defconst org-varde--loop-going '("working" "checking" "due")
+  "The states of a loop varde still moves on.")
+
+(defun org-varde-loop ()
+  "Loop the task here: fresh sessions in the background until its check
+passes.  On a loop at work, pause or end it; paused, resume it; stopped,
+run it again or end it."
+  (interactive)
+  (let* ((row (org-varde--here-row))
+         (task (plist-get row :task))
+         (flow (org-varde--flow-of task))
+         (state (plist-get (plist-get (plist-get flow :loop) :state) :state))
+         (run (lambda (&rest args)
+                (condition-case e
+                    (org-varde--flow-done (apply #'org-varde--varde "loop" task args))
+                  (org-varde-varde-error (user-error "varde: %s" (cadr e)))))))
+    (cond
+     ((equal state "paused") (funcall run))
+     ((member state org-varde--loop-going)
+      (pcase (car (read-multiple-choice "Its loop is at work: "
+                                        '((?p "pause") (?x "end the loop") (?q "leave it"))))
+        (?p (funcall run "--pause"))
+        (?x (funcall run "--off"))))
+     (state
+      (pcase (car (read-multiple-choice (format "Its loop stopped, %s: " state)
+                                        '((?r "run it again") (?x "end the loop") (?q "leave it"))))
+        (?r (org-varde--loop-setup task flow))
+        (?x (funcall run "--off"))))
+     (t (org-varde--loop-setup task flow)))))
+
+(defun org-varde--loop-setup (task flow)
+  "Ask how TASK loops, as FLOW has it so far, and set it going."
+  (let* ((check (plist-get flow :check))
+         (def (plist-get (plist-get flow :loop) :def))
+         (cmd (read-string (if check "Loop until this passes (empty: its check as it is): "
+                             "Loop until this command passes (empty: git config varde.check): ")
+                           (plist-get check :cmd)))
+         (max (read-number "At most how many rounds? " (or (plist-get def :max) 3)))
+         (escalate (org-varde--read-profiles "When stuck, move up to (empty: none): "
+                                             (string-join (or (plist-get def :escalate) '("deep")) ","))))
+    (condition-case e
+        (org-varde--flow-done
+         (apply #'org-varde--varde
+                (append (list "loop" task "--max" (number-to-string max))
+                        (and (not (string-blank-p cmd)) (not (equal cmd (plist-get check :cmd)))
+                             (list "--check" cmd))
+                        (and escalate (list "--escalate" (string-join escalate ","))))))
+      (org-varde-varde-error (user-error "varde: %s" (cadr e))))))
+
+(defun org-varde--loop-words (state)
+  "A loop's STATE, as `varde show --json' has it, in words."
+  (let ((n (lambda (k) (let ((r (plist-get state k))) (format "%d round%s" r (if (eql r 1) "" "s"))))))
+    (pcase (plist-get state :state)
+      ("paused" (format "paused after %s · L resumes it" (funcall n :rounds)))
+      ("working" (format "round %d at work" (plist-get state :round)))
+      ("checking" (format "round %d ended, checking" (plist-get state :round)))
+      ("due" (format "round %d next%s" (plist-get state :round)
+                     (if (plist-get state :profile) (format ", on %s" (plist-get state :profile)) "")))
+      ("verified" (format "verified after %s" (funcall n :rounds)))
+      ("flagged" (format "flagged: %s" (plist-get state :why)))
+      ("error" (format "stopped: %s" (plist-get state :why)))
+      ("spent" (format "spent: %s" (plist-get state :why)))
+      ("stuck" (format "stuck after %s: the same failure with no change" (funcall n :rounds)))
+      ("asked" "a round asked you something: RET on it opens it")
+      (s s))))
+
+(defun org-varde--verdict (check)
+  "CHECK's verdict as a mark and its summary."
+  (let ((v (plist-get check :verdict)))
+    (concat (propertize (pcase v ("pass" "✓") ("flagged" "⚑") ("unchecked" "…") (_ "✗"))
+                        'face (pcase v ("pass" 'org-varde-board-working) ("unchecked" 'org-varde-quiet)
+                                    (_ 'org-varde-board-blocked)))
+            " " (or (plist-get check :summary) v))))
+
+(defun org-varde--title-of (task)
+  "TASK's title as the board last had it, else its short id."
+  (or (plist-get (org-varde--row task) :title) (org-varde--short task)))
+
+(defun org-varde--title-and-short (task)
+  "TASK's title and, quietly, its short id; the id once when no title is known."
+  (let ((title (org-varde--title-of task)) (short (org-varde--short task)))
+    (if (equal title short) short (concat title (org-varde--quiet (concat "  " short))))))
+
+(defun org-varde--view-flow (data)
+  "Insert DATA's check, loop and trail: each round a line, RET opens its
+session and O what its check printed; each task before or after it a
+line, RET shows it."
+  (let* ((flow (plist-get data :flow))
+         (check (plist-get flow :check))
+         (lp (plist-get flow :loop))
+         (after (plist-get flow :after))
+         (before (plist-get flow :before))
+         (profile (plist-get flow :profile))
+         (recipe (plist-get flow :recipe)))
+    (when (or check lp after before profile recipe)
+      (when (org-varde--view-heading "loop" (cond (lp "Loop") ((or after before) "Trail") (check "Check") (t "Runs on"))
+                                     (and lp (concat "· " (org-varde--loop-words (plist-get lp :state))))
+                                     t)
+        (when (or profile recipe)
+          (org-varde--view-line
+           (org-varde--quiet (string-join (delq nil (list (and profile (concat "runs on " profile))
+                                                          (and recipe (concat "made from recipe " recipe))))
+                                          " · "))))
+        (when check
+          (org-varde--view-line
+           (concat (propertize "Check" 'face 'org-varde-heading) "  "
+                   (string-join
+                    (delq nil (list (and (plist-get check :cmd) (format "`%s`" (plist-get check :cmd)))
+                                    (and (plist-get check :review)
+                                         (format "%sa review by %s" (if (plist-get check :cmd) "then " "")
+                                                 (or (plist-get check :reviewer) "the review profile")))
+                                    (and (> (or (plist-get check :again) 1) 1)
+                                         (format "%d passes in a row" (plist-get check :again)))
+                                    (and (plist-get check :guard)
+                                         (concat "guarding " (string-join (plist-get check :guard) " ")))
+                                    (and (plist-get check :running) (org-varde--quiet "checking now…"))))
+                    " · ")))
+          (when-let* ((last (plist-get flow :last_check)))
+            (let ((start (point)))
+              (org-varde--view-line (concat "       last " (org-varde--verdict last)
+                                            (org-varde--quiet
+                                             (format " · %s ago" (org-varde--age (- (truncate (* 1000 (float-time)))
+                                                                                    (plist-get last :finished)))))))
+              (put-text-property start (point) 'org-varde-output (plist-get last :output)))))
+        (let ((checks (plist-get lp :checks)))
+          (dolist (r (plist-get lp :rounds))
+            (let* ((start (point))
+                   (c (seq-find (lambda (c) (equal (plist-get c :run) (plist-get r :run))) (reverse checks)))
+                   (mins (if (plist-get r :ended)
+                             (format "%dm" (/ (max 0 (- (plist-get r :ended) (plist-get r :started))) 60000))
+                           "now")))
+              (org-varde--view-line
+               (concat (format "#%-2d %-7s %4s  " (plist-get r :n) (or (plist-get r :profile) "-") mins)
+                       (cond (c (org-varde--verdict c))
+                             ((plist-get r :live) (propertize "at work" 'face 'org-varde-board-working))
+                             (t (org-varde--quiet "not checked yet")))
+                       (if (plist-get r :asked) (propertize "  asked you" 'face 'org-varde-board-waiting) "")))
+              (put-text-property start (point) 'org-varde-run (plist-get r :run))
+              (when c (put-text-property start (point) 'org-varde-output (plist-get c :output))))))
+        (dolist (w after)
+          (let ((start (point)))
+            (org-varde--view-line
+             (concat (propertize "after " 'face 'org-varde-heading)
+                     (if (plist-get w :met) (propertize "✓" 'face 'org-varde-board-working)
+                       (propertize "⧗" 'face 'org-varde-board-waiting))
+                     " " (org-varde--title-and-short (plist-get w :after))
+                     (if (equal (plist-get w :kind) "approved") (org-varde--quiet " · your approval") "")))
+            (put-text-property start (point) 'org-varde-flow-task (plist-get w :after))))
+        (dolist (b before)
+          (let ((start (point)))
+            (org-varde--view-line
+             (concat (propertize "then " 'face 'org-varde-heading) (org-varde--title-and-short b)))
+            (put-text-property start (point) 'org-varde-flow-task b)))))))
+
+;;; The trail
+
+(defconst org-varde-trail-buffer "*varde trail*"
+  "The buffer that draws a trail.")
+
+(defvar-local org-varde--trail-task nil
+  "The task whose trail this buffer draws.")
+
+(defun org-varde-trail ()
+  "Draw the trail of the task here: the tasks joined to it by `after',
+each under the first it waits on.  RET shows a task; the board's keys
+for loops and checks work on its lines."
+  (interactive)
+  (let ((task (plist-get (org-varde--here-row) :task)))
+    (with-current-buffer (get-buffer-create org-varde-trail-buffer)
+      (org-varde-trail-mode)
+      (setq org-varde--trail-task task)
+      (org-varde--trail-render (org-varde--varde-json "trail" task "--json")))
+    (pop-to-buffer org-varde-trail-buffer)))
+
+(defun org-varde--trail-render (data)
+  "Draw the trail DATA, `varde trail --json', keeping point on its task."
+  (let* ((inhibit-read-only t)
+         (here (get-text-property (point) 'org-varde-trail-task))
+         (nodes (plist-get data :tasks))
+         (first-up (lambda (n) (plist-get (car (plist-get n :after)) :task)))
+         (placed nil))
+    (erase-buffer)
+    (insert (propertize (format "Trail of %s\n" (org-varde--title-of org-varde--trail-task)) 'face 'org-varde-heading)
+            (org-varde--quiet "Each task starts in the background once what it waits on is verified, or approved (T).\n\n"))
+    (cl-labels
+        ((walk (n prefix last root)
+           (let* ((id (plist-get n :task))
+                  (row (org-varde--row id))
+                  (tone (plist-get (plist-get row :flow) :tone))
+                  (others (mapcar (lambda (a) (concat (org-varde--short (plist-get a :task))
+                                                      (if (equal (plist-get a :kind) "approved") " (approved)" "")))
+                                  (cdr (plist-get n :after))))
+                  (gate (if (equal (plist-get (car (plist-get n :after)) :kind) "approved")
+                            (propertize "T " 'face 'org-varde-board-blocked) ""))
+                  (start (point)))
+             (insert prefix (cond (root "") (last "└─ ") (t "├─ ")) gate
+                     (plist-get n :title)
+                     (org-varde--quiet (if (plist-get n :profile) (concat " · " (plist-get n :profile)) ""))
+                     (org-varde--quiet " · ")
+                     (propertize (plist-get n :label) 'face
+                                 (pcase tone ("working" 'org-varde-board-working) ("needs" 'org-varde-board-waiting)
+                                        ("failing" 'org-varde-board-blocked) (_ 'org-varde-quiet)))
+                     (org-varde--quiet (concat "  " (plist-get n :short)))
+                     (if others (org-varde--quiet (format "  (also after %s)" (string-join others ", "))) "")
+                     "\n")
+             (put-text-property start (point) 'org-varde-trail-task id)
+             (push id placed)
+             (let* ((kids (seq-filter (lambda (k) (and (equal (funcall first-up k) id)
+                                                      (not (member (plist-get k :task) placed))))
+                                      nodes))
+                    (next (if root "" (concat prefix (if last "   " "│  ")))))
+               (while kids
+                 (walk (car kids) next (null (cdr kids)) nil)
+                 (setq kids (cdr kids)))))))
+      (dolist (n nodes)
+        (unless (or (plist-get n :after) (member (plist-get n :task) placed))
+          (walk n "" t t))))
+    (goto-char (point-min))
+    (if-let* ((m (and here (text-property-search-forward 'org-varde-trail-task here t))))
+        (goto-char (prop-match-beginning m))
+      (when-let* ((m (text-property-search-forward 'org-varde-trail-task nil (lambda (_ v) v))))
+        (goto-char (prop-match-beginning m))))))
+
+(defun org-varde--trail-refresh ()
+  "Bring the trail, when in sight, up to date with varde."
+  (when-let* ((b (get-buffer org-varde-trail-buffer))
+              ((get-buffer-window b t))
+              (task (buffer-local-value 'org-varde--trail-task b)))
+    (org-varde--varde-async
+     (list "trail" task "--json")
+     (lambda (out)
+       (when (buffer-live-p b)
+         (with-current-buffer b
+           (let ((window (get-buffer-window b t)))
+             (when window (goto-char (window-point window)))
+             (org-varde--trail-render (org-varde--json out))
+             (when window (set-window-point window (point))))))))))
+
+(add-hook 'org-varde-after-refresh-hook #'org-varde--trail-refresh)
+
+(defun org-varde-trail-show ()
+  "Show the task on this line in the view."
+  (interactive)
+  (org-varde-show (plist-get (org-varde--here-row) :task)))
+
+(defun org-varde-trail-start ()
+  "Set the trail going: each task starts in the background once what it
+waits on is verified."
+  (interactive)
+  (condition-case e
+      (let ((said (org-varde--varde "trail" org-varde--trail-task "--start")))
+        (org-varde--flow-done (car (split-string said "\n" t))))
+    (org-varde-varde-error (user-error "varde: %s" (cadr e)))))
+
+(defun org-varde-trail-next (&optional n)
+  "Go to the next task of the trail; N back when negative."
+  (interactive "p")
+  (let ((step (if (< (or n 1) 0) -1 1)))
+    (dotimes (_ (abs (or n 1)))
+      (forward-line step)
+      (while (and (not (get-text-property (point) 'org-varde-trail-task))
+                  (not (if (> step 0) (eobp) (bobp))))
+        (forward-line step)))))
+
+(defun org-varde-trail-previous ()
+  "Go to the task of the trail before."
+  (interactive)
+  (org-varde-trail-next -1))
+
+(defvar-keymap org-varde-trail-mode-map
+  :doc "A trail's keys: the board's for loops and checks, on the line's task."
+  :parent special-mode-map
+  "RET" #'org-varde-trail-show
+  "v" #'org-varde-trail-show
+  "S" #'org-varde-trail-start
+  "A" #'org-varde-approve
+  "L" #'org-varde-loop
+  "c" #'org-varde-check
+  "C" #'org-varde-check-now
+  "O" #'org-varde-check-output
+  "M" #'org-varde-set-profile
+  "n" #'org-varde-trail-next
+  "p" #'org-varde-trail-previous
+  "j" #'org-varde-trail-next
+  "k" #'org-varde-trail-previous
+  "g" #'org-varde-refresh)
+
+(define-derived-mode org-varde-trail-mode special-mode "varde trail"
+  "A trail of varde tasks.
+\\{org-varde-trail-mode-map}"
+  (setq truncate-lines t)
+  (setq header-line-format
+        (concat " " (mapconcat (lambda (p) (concat (propertize (car p) 'face 'help-key-binding) " " (cdr p)))
+                               '(("RET" . "view") ("S" . "set going") ("A" . "approve") ("L" . "loop")
+                                 ("c/C" . "check") ("M" . "profile") ("g" . "refresh"))
+                               "  ")))
+  (org-varde--evil-keys org-varde-trail-mode-map "gr" #'org-varde-refresh))
+
+;;; Recipes
+
+(defconst org-varde-recipes-buffer "*varde recipes*"
+  "The buffer that lists the recipes.")
+
+(defun org-varde--recipes ()
+  "The recipes there are, as `varde recipe list --json' has them."
+  (org-varde--varde-json "recipe" "list" "--json"))
+
+(defun org-varde-recipes ()
+  "List the recipes: loops and trails written down once.  RET shows one,
+n makes a task from it, e edits your copy, ? says how to write one."
+  (interactive)
+  (with-current-buffer (get-buffer-create org-varde-recipes-buffer)
+    (org-varde-recipes-mode)
+    (org-varde--recipes-render))
+  (pop-to-buffer org-varde-recipes-buffer))
+
+(defun org-varde--recipes-render ()
+  "Draw the recipes."
+  (let* ((inhibit-read-only t)
+         (data (org-varde--recipes))
+         (here (get-text-property (point) 'org-varde-recipe)))
+    (erase-buffer)
+    (insert (propertize "Recipes" 'face 'org-varde-heading)
+            (org-varde--quiet (format "  yours in %s\n\n" (abbreviate-file-name (plist-get data :dir)))))
+    (dolist (r (plist-get data :recipes))
+      (let ((start (point)))
+        (insert (format "%-16s " (plist-get r :name))
+                (org-varde--quiet (format "%-9s " (plist-get r :source)))
+                (or (plist-get r :description) (plist-get r :error) "")
+                "\n")
+        (put-text-property start (point) 'org-varde-recipe r)))
+    (goto-char (point-min))
+    (let ((m (text-property-search-forward 'org-varde-recipe nil
+                                           (lambda (_ v) (and v (or (not here) (equal (plist-get v :name)
+                                                                                      (plist-get here :name))))))))
+      (when m (goto-char (prop-match-beginning m))))))
+
+(defvar-local org-varde--recipe nil
+  "The recipe this buffer shows.")
+
+(defun org-varde--recipe-here ()
+  "The recipe on this line, or that a recipe's buffer shows."
+  (or (get-text-property (point) 'org-varde-recipe)
+      org-varde--recipe
+      (user-error "No recipe on this line")))
+
+(defun org-varde-recipe-show ()
+  "Draw the recipe here, and where each of its values came from."
+  (interactive)
+  (let ((r (org-varde--recipe-here)))
+    (with-current-buffer (get-buffer-create (format "*varde recipe %s*" (plist-get r :name)))
+      (org-varde-recipes-mode)
+      (setq org-varde--recipe r)
+      (let ((inhibit-read-only t))
+        (erase-buffer)
+        (insert (org-varde--varde "recipe" "show" (plist-get r :name) "--origin"))
+        (insert "\n" (org-varde--quiet "n makes a task from it · e edits your copy · ? how recipes are written\n"))
+        (goto-char (point-min)))
+      (pop-to-buffer (current-buffer)))))
+
+(defun org-varde-recipe-edit ()
+  "Edit your copy of the recipe here, made from the built-in the first time."
+  (interactive)
+  (let* ((r (org-varde--recipe-here))
+         (out (org-varde--varde "recipe" "edit" (plist-get r :name)))
+         (path (car (last (split-string out "\n" t)))))
+    (find-file (string-trim path))
+    (message "Saved here, it is yours: varde recipe check %s says whether it is usable"
+             (abbreviate-file-name buffer-file-name))))
+
+(defun org-varde-recipe-guide ()
+  "How a recipe is written: every key and its default."
+  (interactive)
+  (with-current-buffer (get-buffer-create "*varde recipe guide*")
+    (let ((inhibit-read-only t))
+      (erase-buffer)
+      (insert (org-varde--varde "recipe" "guide"))
+      (goto-char (point-min)))
+    (special-mode)
+    (pop-to-buffer (current-buffer))))
+
+(declare-function org-varde--new "org-varde-board" (offer here &optional text then rule extra))
+
+(defun org-varde-recipe-new ()
+  "Write a new task made from the recipe here, in the new-task form."
+  (interactive)
+  (let ((r (org-varde--recipe-here)))
+    (org-varde--new nil nil nil nil nil (list :recipe (plist-get r :name)))))
+
+(defvar-keymap org-varde-recipes-mode-map
+  :doc "The recipes' keys."
+  :parent special-mode-map
+  "RET" #'org-varde-recipe-show
+  "n" #'org-varde-recipe-new
+  "e" #'org-varde-recipe-edit
+  "?" #'org-varde-recipe-guide
+  "g" #'org-varde-recipes
+  "j" #'next-line
+  "k" #'previous-line)
+
+(define-derived-mode org-varde-recipes-mode special-mode "varde recipes"
+  "varde's recipes.
+\\{org-varde-recipes-mode-map}"
+  (setq truncate-lines t)
+  (setq header-line-format
+        (concat " " (mapconcat (lambda (p) (concat (propertize (car p) 'face 'help-key-binding) " " (cdr p)))
+                               '(("RET" . "show") ("n" . "new task from it") ("e" . "edit yours")
+                                 ("?" . "how to write one"))
+                               "  ")))
+  (org-varde--evil-keys org-varde-recipes-mode-map))
 
 (provide 'org-varde)
 ;;; org-varde.el ends here

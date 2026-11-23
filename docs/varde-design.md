@@ -21,6 +21,7 @@ The CLI is in `cli/`, and the Emacs client is `org-varde.el` and
 | **Standalone UI** | Plain commands with `--json`, plus a TUI board (`varde` with no arguments). |
 | **Emacs** | A thin client. It renders a board varde has already grouped, and adds terminals, workspaces and the task view. Org meets varde through `varde:` links, which show where their tasks stand; nothing is synced, and org-varde writes nothing to org but the links you ask for (Q31). |
 | **Steward** | Opt-in: one task whose agent files, reviews, reports, routes and answers for you on tasks you hand it (§6.6). |
+| **Loops and trails** | Beta: checks varde runs itself, loops of fresh sessions until a check passes, tasks joined by `after`, profiles of agent, model and effort, and recipes that write them down (§6.7). |
 | **Clients** | The elisp is the reference integration, and `docs/clients.md` is the contract for others. |
 
 ## 1. Principles
@@ -59,11 +60,12 @@ The CLI is in `cli/`, and the Emacs client is `org-varde.el` and
    can be passed in, and clients get the board pre-grouped.
 5. **Emacs first-class.** org-varde is a full client, not a viewer.
 
-Non-goals: MCP, orchestration, a daemon, LLM calls in any interactive
-path, attaching a second front end to a live session, cross-machine
-sync (§5), and embeddings (§7.4). The steward (§6.6) is no
-orchestrator: it acts on a task only when you file it, ask it, or hand
-the task to it.
+Non-goals: MCP, an orchestrator agent or process, a daemon, LLM calls
+in any interactive path, attaching a second front end to a live
+session, cross-machine sync (§5), and embeddings (§7.4). The steward
+(§6.6) is no orchestrator: it acts on a task only when you file it, ask
+it, or hand the task to it. Loops and trails (§6.7) are data that
+`varde tick` runs; no model decides what starts.
 
 ## 3. Architecture
 
@@ -634,6 +636,72 @@ opt-in, and with it off varde behaves as if it did not exist.
   matches. The steward proposes rules from what you confirm; `--allow`
   alone adds them to the hand-over there is.
 
+### 6.7 Loops and trails (beta)
+
+A beta since 1.6.0-beta2, with the steward: it may change, or go, before
+1.6.0. Nothing else depends on it, and a task with no check, loop or
+edge behaves as before.
+
+The design and its research are in `docs/proposal-loops-and-graphs.md`;
+this is what was built. Inner loops (`/goal`, Stop hooks) and in-session
+graphs (subagents, Workflows) stay the agent's. varde runs the loop of
+sessions and the graph of tasks, where its store, worktrees and cairns
+are what those lack.
+
+- **Profiles.** An agent, a model and an effort, by name: `quick`,
+  `build`, `deep` and `review` ship on Claude's aliases; yours are in
+  `[profiles]`. A run records the profile, model and effort it launched
+  with (`Agent::tuned`: Claude's `--model`/`--effort`, pi's
+  `--model`/`--thinking`). A resume keeps its conversation's. A profile
+  may carry its own `background` arguments, in place of the agent's:
+  Claude's `auto` permission mode refuses every write on haiku, which
+  `doctor`, `loop` and `new --recipe` say.
+- **Checks** (`check_def`, `check_result`). A command, a review by the
+  review profile, or both (the review only after the command passes).
+  `varde verify` runs it detached, in the task's checkout, when a
+  session of the task ends and on `check --now`, one at a time per task.
+  It records the verdict, a summary line, the output's file, a
+  fingerprint of the failure, and the **tree**: `git add -A` into a
+  scratch index, then `write-tree`, taken before and after; a change
+  meanwhile makes it `unchecked`. A guard's paths changed since the
+  check was set (or the loop started) make it `flagged`. The review is
+  a headless call like a memory update, never a run, and answers PASS
+  or FAIL on its first line.
+- **Verified is derived**: the newest check passed for the tree there
+  now (cached in `git_state.tree` by `verify` and the git refresh, so
+  the board runs no git), or, outside git, no run has started since; or
+  you approved the task (`approval`, which lapses when the tree moves).
+- **Loops** (`loop`). Rounds are runs with `round` set. Their state is
+  `varde_core::flow::derive`, a pure function of the rounds and checks:
+  flagged, error, verified, spent, stuck (the same fingerprint on the
+  same tree twice, after the escalation list runs out), asked (a round's
+  last words a question), then working, checking or due. A review-only
+  check gets 2 rounds. A start of yours pauses the loop.
+- **Trails** (`edge`). A task waits on others being verified, or
+  approved (`--approved`); waits are derived. `task.auto` sets a task
+  going: the tick starts it, or its loop's next round, when its waits
+  are met and nothing of it is live or folding. A step shares its one
+  upstream's worktree (`task.share`), or is cut from its branch. An
+  upstream's worktree is kept while a task that needs it is open.
+- **The tick** is the one engine: schedules, then `flow::tick`'s
+  rounds, checks and trail starts, at most `loops.parallel` background
+  sessions at once. A run's end, a check's end and a cairn update's end
+  wake it; a tick that finds the lock held leaves `tick.again`, so no
+  wake is lost.
+- **Recipes** are TOML: `[[steps]]` with `id`, `needs`, `profile`,
+  `prompt`, `gate`, `check`, `loop`, `guard`, `tree`, `output` and
+  `use`. Built-ins come from the binary; yours in
+  `~/.config/varde/recipes/` shadow them. A task records the recipe and
+  its content hash. `varde recipe guide` is the manual, for agents too,
+  and every session is pointed to it in one line (Q12).
+- **Clients.** Both boards bind the same keys: `L` loop, `c`/`C` set or
+  run the check, `O` its output, `A` approve, `t` the trail, `M` the
+  profile, `r` recipes. Each runs the CLI's command and shows what it
+  said; rows carry the state in `flow.label`. Emacs adds a Loop section
+  to the view (a round a line, RET opens it), a trail buffer and a
+  recipes buffer, and Profile, After, Recipe and Vars to the new-task
+  form.
+
 ## 7. Memory
 
 Memory is varde's reason to exist beside an agent's own session list,
@@ -978,8 +1046,8 @@ Claude details, all inside the adapter (checked against 2.1.280):
   `blocked` and a failed turn left it `working`.
 - **Goals.** `/goal` starts each next turn itself, after a `Stop`, with
   no `UserPromptSubmit`, so the first `PostToolUse` after a turn end
-  makes the run `working` again (not after an interrupt). varde has no
-  loop of its own.
+  makes the run `working` again (not after an interrupt). That loop is
+  the agent's; varde's runs between sessions (§6.7).
 - **Idle.** `Notification`/`idle_prompt`, only after a finished turn. A
   session that has just started or resumed is `waiting`, except after a
   compaction, which leaves the status as it was.
@@ -1106,6 +1174,11 @@ What looks like a missing feature is often one of these.
 - Whole-document cairn rewrites, fuzzy dedupe, and memory in the first
   prompt (§7).
 - Promotion into the project's cairn (Q38).
+- Landing by itself: no auto-merge, no PR varde opens; a recipe's
+  `draft-pr` asks the session, on your permissions. varde merges no
+  branches for a fan-in either (§6.7).
+- A scripting language in recipes: logic goes in a check's command or a
+  step's prompt.
 
 ## 12. Decisions
 
@@ -1145,3 +1218,8 @@ What looks like a missing feature is often one of these.
 | Q39 | Repeating tasks reviewed by whole flows | `tests/schedule_flows.rs` walks weeks of a series and checks after every step that the right runs are unread and every surface agrees. A session's own `done` ends only its run; an agent never stops a session of yours; a run at work keeps its row in Working. Open: a notification for a finding, pruning `cairn_history` for frequent series, refreshing a series' worktree once its work lands, and letting background runs call `varde done`/`note` unprompted. |
 | Q40 | Done leaves the board | A done task leaves the board the day after it closed, landed or not, and a day after closing an unlanded worktree is put away under its discarded ref. Done held every task whose work had not landed as a reminder, but most such work was notes and experiments never meant to land, and work squashed by hand after an edit cannot be told from it: Done filled with tasks you had to drop by hand. Saying done is saying you are finished, and the ref loses nothing. Rejected: matching edited squashes loosely, since whether work can be lost is a question git answers exactly; keeping an open PR on the board. |
 | Q41 | The steward (beta) | One opt-in task that manages varde with you and answers for you on tasks you hand it (§6.6). Its playbooks come from the binary, so Q12 stands. Asks go through the two channels Claude trusts, a `PermissionRequest` decision and `AskUserQuestion`'s answers, both tested on 2.1.280; a `Stop` hook's reply was refused as injection even when announced. `say` reaches an open session through the agent's own inbox (Claude's session socket) or its next hook, so the steward reaches tasks working or waiting, and hands them work rather than doing it. The hook decides what is never delegated, every failure falls back to asking you, and only an ask's hook waits. Rejected: the steward judging in the hook (an LLM on the hook's path), typing into terminals (§11), and a daemon to host it. |
+| Q42 | Checks | Yours, never the repository's (`varde check`, your recipes, git config `varde.check`). Verified is derived per tree; the command comes before a review, and the review is an internal call, not a session. A guard flags, it never fails. |
+| Q43 | Loops | Rounds are fresh background sessions given the cairn and the last failure; their state is derived with a fixed precedence; progress is the tree, not commits; stuck escalates the profile, then stops. Reverses the "no loop runner" of zvqhsm and 4zx2jt for the loop of sessions only: no `start --goal`, no inner loop. |
+| Q44 | Trails | Tasks wait on others being verified or approved, never done (Q40 would put an upstream's branch away). varde merges nothing; a planner's trail is accepted by you. |
+| Q45 | Profiles | Roles and aliases, not model ids; effort held for a session; the review of another model where you can. |
+| Q46 | Recipes | Data, not code; versioned by content hash; yours run, built-ins ship in the binary. A repository's own recipes would run only once you approve their hash: later. |

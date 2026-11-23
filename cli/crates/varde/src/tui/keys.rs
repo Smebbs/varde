@@ -44,6 +44,14 @@ pub(super) enum Act {
     Refresh,
     Quit,
     Help,
+    Loop,
+    Check,
+    CheckNow,
+    Approve,
+    Trail,
+    Profile,
+    Recipes,
+    Output,
 }
 
 use Act::*;
@@ -89,6 +97,14 @@ const ACTS: &[(Act, &str, &[KeyCode], &str)] = &[
     (Refresh, "refresh", &[], "C-l"),
     (Quit, "quit", &[Char('q')], ""),
     (Help, "help", &[Char('?')], ""),
+    (Loop, "loop", &[Char('L')], ""),
+    (Check, "check", &[Char('c')], ""),
+    (CheckNow, "check-now", &[Char('C')], ""),
+    (Approve, "approve", &[Char('A')], ""),
+    (Trail, "trail", &[Char('t')], ""),
+    (Profile, "profile", &[Char('M')], ""),
+    (Recipes, "recipes", &[Char('r')], ""),
+    (Output, "check-output", &[Char('O')], ""),
 ];
 
 /// Names `[keys]` took before the board's keys were made one with the
@@ -100,7 +116,7 @@ const OLD: &[(&str, &str)] =
 /// actions and what they do.
 pub(super) type HelpGroup = (&'static str, &'static [(&'static [Act], &'static str)]);
 
-pub(super) const HELP: [HelpGroup; 4] = [
+pub(super) const HELP: [HelpGroup; 5] = [
     (
         "Go",
         &[
@@ -117,6 +133,15 @@ pub(super) const HELP: [HelpGroup; 4] = [
             (&[Editor], "whole cairn in $EDITOR"),
             (&[Recall], "recall: search cairns"),
             (&[Diff], "diff of its work"),
+        ],
+    ),
+    (
+        "Loops",
+        &[
+            (&[Loop], "loop till it passes"),
+            (&[Check, CheckNow, Output], "check / now / output"),
+            (&[Approve, Trail], "approve / its trail"),
+            (&[Profile, Recipes], "profile / recipes"),
         ],
     ),
     (

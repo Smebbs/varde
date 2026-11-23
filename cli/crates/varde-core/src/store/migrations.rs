@@ -345,4 +345,80 @@ ALTER TABLE message ADD COLUMN reply_to TEXT;
 ALTER TABLE message ADD COLUMN replied INTEGER;
 CREATE INDEX message_owed ON message(run) WHERE reply_to IS NOT NULL AND replied IS NULL;
 "#,
+    // 11: loops and trails (docs/proposal-loops-and-graphs.md).
+    //
+    // A run records the profile, model and effort it was launched with,
+    // and `round`: the loop round it is (from 1), or 0 for a trail's start
+    // with no loop; NULL for any other run. `asked` is whether a
+    // background run's last words were a question to you.
+    //
+    // A task may carry a profile, the recipe it was made from, and `auto`:
+    // a trail set going starts it in the background once it is ready.
+    // `tree` beside `share`: a task whose sessions run in its upstream's
+    // worktree.
+    //
+    // `check_def` is a task's check, as you set it; `check_result` every
+    // check varde ran, append-only. `approval` is each time you said a
+    // task's work is good, for the tree it had. `loop` is a task's loop,
+    // as set; its round and state are derived. `edge` is what a task
+    // waits on.
+    r#"
+ALTER TABLE run ADD COLUMN profile TEXT;
+ALTER TABLE run ADD COLUMN model TEXT;
+ALTER TABLE run ADD COLUMN effort TEXT;
+ALTER TABLE run ADD COLUMN round INTEGER;
+ALTER TABLE run ADD COLUMN asked INTEGER;
+ALTER TABLE task ADD COLUMN profile TEXT;
+ALTER TABLE task ADD COLUMN recipe TEXT;
+ALTER TABLE task ADD COLUMN auto INTEGER;
+ALTER TABLE task ADD COLUMN share TEXT;
+ALTER TABLE git_state ADD COLUMN tree TEXT;
+CREATE TABLE check_def (
+  task      TEXT PRIMARY KEY REFERENCES task(id),
+  cmd       TEXT,
+  review    INTEGER NOT NULL DEFAULT 0,
+  rubric    TEXT,
+  reviewer  TEXT,
+  guard     TEXT,
+  again     INTEGER NOT NULL DEFAULT 1,
+  base_tree TEXT,
+  created   INTEGER NOT NULL
+);
+CREATE TABLE check_result (
+  id          INTEGER PRIMARY KEY,
+  task        TEXT NOT NULL REFERENCES task(id),
+  run         TEXT,
+  started     INTEGER NOT NULL,
+  finished    INTEGER NOT NULL,
+  verdict     TEXT NOT NULL CHECK (verdict IN ('pass','fail','error','unchecked','flagged')),
+  exit_code   INTEGER,
+  tree        TEXT,
+  fingerprint TEXT,
+  output      TEXT,
+  summary     TEXT
+);
+CREATE INDEX check_result_task ON check_result(task, id);
+CREATE TABLE approval (
+  id    INTEGER PRIMARY KEY,
+  task  TEXT NOT NULL REFERENCES task(id),
+  tree  TEXT,
+  ts    INTEGER NOT NULL
+);
+CREATE INDEX approval_task ON approval(task, id);
+CREATE TABLE loop (
+  task      TEXT PRIMARY KEY REFERENCES task(id),
+  max       INTEGER NOT NULL,
+  minutes   INTEGER,
+  escalate  TEXT,
+  started   INTEGER NOT NULL,
+  paused    INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE edge (
+  task  TEXT NOT NULL REFERENCES task(id),
+  after TEXT NOT NULL REFERENCES task(id),
+  kind  TEXT NOT NULL CHECK (kind IN ('verified','approved')),
+  PRIMARY KEY (task, after)
+);
+CREATE INDEX edge_after ON edge(after);
+"#,
 ];

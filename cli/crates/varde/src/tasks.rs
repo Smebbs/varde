@@ -14,6 +14,15 @@ use crate::{cairn_view, git, now_ms, Paths};
 const BUSY: Duration = Duration::from_secs(2);
 
 #[allow(clippy::too_many_arguments)]
+/// What `varde new` was told of loops and trails.
+#[derive(Default)]
+pub struct Flow {
+    pub after: Vec<String>,
+    pub approved: bool,
+    pub profile: Option<String>,
+}
+
+#[allow(clippy::too_many_arguments)]
 pub fn new(
     paths: &Paths,
     title: &[String],
@@ -22,9 +31,17 @@ pub fn new(
     external: Option<String>,
     from: Option<String>,
     when: Option<(String, Option<bool>)>,
+    flow: Flow,
     as_json: bool,
 ) -> Result<()> {
     let store = paths.open(BUSY)?;
+    // Checked before anything is made, so a bad name leaves nothing behind.
+    if let Some(p) = &flow.profile {
+        if crate::config::get().profile(p).is_none() {
+            bail!("there is no profile {p}: add it under [profiles] in {}", crate::config::path().display());
+        }
+    }
+    let after = flow.after.iter().map(|a| task::resolve(&store, a)).collect::<Result<Vec<_>>>()?;
     let body = crate::arg_or_stdin(body)?.map(|b| b.trim().to_string()).filter(|b| !b.is_empty());
     if body.is_none() && varde_core::title::clean(&title.join(" ")).trim().is_empty() {
         bail!("a task needs a title, or --context TEXT to cut one from");
@@ -68,6 +85,12 @@ pub fn new(
     };
     if by_steward {
         store.conn.execute("UPDATE task SET inbox = 1 WHERE id = ?1", [&id])?;
+    }
+    if let Some(p) = &flow.profile {
+        store.conn.execute("UPDATE task SET profile = ?2 WHERE id = ?1", rusqlite::params![id, p])?;
+    }
+    for a in &after {
+        crate::flow::add_edge(&store, &id, a, flow.approved)?;
     }
     crate::naming::start(&store, &id);
     if let Some(said) = scheduled.filter(|_| !as_json) {
@@ -235,6 +258,8 @@ pub fn show(paths: &Paths, reference: &str, history: bool, with_git: bool, as_js
     let notes: Vec<String> = memory::pending_notes(&store.conn, &id)?.into_iter().map(|(_, t)| t).collect();
     let versions = if history { memory::history(&store.conn, &id)? } else { Vec::new() };
     let schedule = crate::schedule::of(&store, &id)?;
+    let flow = if as_json { vec![] } else { crate::flow::show(paths, &store, &id)? };
+    let flow_json = if as_json { Some(crate::flow::json(paths, &store, &id)?) } else { None };
     let said = match &schedule {
         Some(s) if !as_json => Some(s.text(&store, paths, &id)?),
         _ => None,
@@ -270,6 +295,7 @@ pub fn show(paths: &Paths, reference: &str, history: bool, with_git: bool, as_js
         v["notes"] = json!(notes);
         v["limits"] = varde_core::cairn::Shape::Task.limits();
         v["schedule"] = schedule.as_ref().map_or(Value::Null, crate::schedule::Shown::json);
+        v["flow"] = flow_json.unwrap_or(Value::Null);
         if with_git {
             v["git"] = facts.as_ref().map_or(Value::Null, git::Facts::to_json);
         }
@@ -285,7 +311,7 @@ pub fn show(paths: &Paths, reference: &str, history: bool, with_git: bool, as_js
         let checks = p.checks.map(|c| format!(", checks {c}")).unwrap_or_default();
         format!("#{} {}{draft}{checks}  {}", p.number, p.state, p.url)
     });
-    let view = View { git, pr, moved, sessions: usize::MAX, schedule: said, home: paths.home.clone() };
+    let view = View { git, pr, moved, sessions: usize::MAX, schedule: said, home: paths.home.clone(), flow };
     let add = format!("varde edit {} --add findings TEXT adds a line now", d.short);
     let block =
         cairn_view::lines(cairn_view::Whose::Task, cairn.as_ref(), &usage, &notes, &add, false, now_ms());
@@ -323,6 +349,8 @@ pub struct View {
     pub schedule: Option<String>,
     /// The store's directory, under which a background run's log is.
     pub home: PathBuf,
+    /// Its profile, check, loop and trail, a line each (`flow::show`).
+    pub flow: Vec<String>,
 }
 
 impl View {
@@ -370,6 +398,7 @@ impl View {
         if let Some(p) = &self.pr {
             out.push((Part::Fact, format!("PR {p}")));
         }
+        out.extend(self.flow.iter().map(|l| (Part::Fact, l.clone())));
         out
     }
 

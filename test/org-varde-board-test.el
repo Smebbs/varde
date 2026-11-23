@@ -107,6 +107,14 @@ test's, else one of its own."
     (org-varde-board-test--with data
       (should (string-match-p "^ ○ Fix login +steward's · proj · " (buffer-string))))))
 
+(ert-deftest org-varde-board-a-loop-says-where-it-stands ()
+  (let ((data (org-varde-board-test--data
+               '(("open" "Open" ("T0000000000000000000AAA111" "Fix login" "open" nil))))))
+    (plist-put (car (plist-get (car (plist-get data :groups)) :rows))
+               :flow '(:label "↺ 2/3 ✗ exit 1" :tone "working"))
+    (org-varde-board-test--with data
+      (should (string-match-p "^ ○ Fix login +↺ 2/3 ✗ exit 1 · proj · " (buffer-string))))))
+
 (ert-deftest org-varde-board-renders-what-varde-grouped ()
   (org-varde-board-test--with
       (org-varde-board-test--inbox
@@ -506,7 +514,7 @@ searches FROM and TO, and return the text with its link."
         ;; Round to the context, and back.
         (execute-kbd-macro (kbd "<backtab>"))
         (should (eq (org-varde--form-at) 'body))
-        (execute-kbd-macro (kbd "<backtab> <backtab>"))
+        (execute-kbd-macro (kbd "<backtab> <backtab> <backtab> <backtab> <backtab> <backtab>"))
         (should (eq (org-varde--form-at) 'project))
         (execute-kbd-macro (kbd "TAB"))
         ;; When varde starts it: empty, never; the hint says how.
@@ -514,7 +522,9 @@ searches FROM and TO, and return the text with its link."
         (should (alist-get 'when org-varde--form-hints))
         (insert "every weekday 09:00")
         (org-varde-new-return)
-        (should (eq (org-varde--form-at) 'body))
+        ;; On to what it runs on, waits on, and is made from.
+        (should (eq (org-varde--form-at) 'profile))
+        (org-varde--form-goto 'body)
         (insert "Line one")
         (org-varde-new-return)
         (insert "two")
@@ -575,7 +585,7 @@ searches FROM and TO, and return the text with its link."
             (narrow-to-region (car b) (cdr b))
             (goto-char (point-max))
             (insert "\n")))
-        (should (equal (mapcar #'car org-varde--form-hints) '(when project title)))
+        (should (equal (mapcar #'car org-varde--form-hints) '(vars recipe after profile when project title)))
         (set-buffer-modified-p nil)
         (kill-buffer)))))
 
@@ -1485,8 +1495,11 @@ where a new task goes unasked."
     (should (eq (key-binding "m") #'org-varde-board-move))
     (should (eq (key-binding "s") #'org-varde-board-start-background))
     (should (eq (key-binding "v") #'org-varde-show))
-    ;; The project's cairn is the view's other tab: ] there.
-    (should (eq (key-binding "C") #'undefined))
+    ;; C runs a task's check now; the project's cairn is the view's other tab, ] there.
+    (should (eq (key-binding "C") #'org-varde-check-now))
+    (should (eq (key-binding "L") #'org-varde-loop))
+    (should (eq (key-binding "A") #'org-varde-approve))
+    (should (eq (key-binding "t") #'org-varde-trail))
     (should (eq (key-binding "e") #'org-varde-board-edit))
     (should (eq (key-binding "g") #'org-varde-refresh))))
 
@@ -1621,3 +1634,22 @@ where a new task goes unasked."
 
 (provide 'org-varde-board-test)
 ;;; org-varde-board-test.el ends here
+
+(ert-deftest org-varde-new-from-a-recipe-makes-its-trail ()
+  (org-varde-test-with-varde
+    (org-varde-test-reply "recipe" "{\"v\":1,\"recipes\":[{\"name\":\"bugfix\",\"source\":\"built-in\",\"vars\":[{\"name\":\"check\",\"default\":\"\"}]}]}")
+    (org-varde-test-reply "new" "{\"v\":1,\"recipe\":\"bugfix\",\"tasks\":[{\"step\":\"repro\",\"id\":\"T0000000000000000000NEW111\",\"short\":\"new111\"}]}")
+    (save-window-excursion
+      (org-varde--new "/tmp/offered" "/tmp/proj")
+      (with-current-buffer "*varde new*"
+        (org-varde--form-goto 'title)
+        (insert "Parser crash")
+        (org-varde--form-goto 'recipe)
+        (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "bugfix")))
+          (org-varde-new-pick))
+        (should (equal (org-varde--form-value 'vars) "check="))
+        (org-varde--form-set 'vars "check=\"cargo test\"")
+        (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+          (call-interactively #'org-varde-new-create))))
+    (should (member "new --json --project /tmp/proj --recipe bugfix --var check=cargo test --start -- Parser crash"
+                    (org-varde-test-calls)))))

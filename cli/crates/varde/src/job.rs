@@ -90,6 +90,19 @@ pub fn run(paths: &Paths, job: &str) -> Result<()> {
     // Detached and off every interactive path: the place to keep the
     // store from growing. A failure here changes nothing a job did.
     let _ = varde_core::store::tidy(&store.conn, now_ms());
+    // A loop's next round waits for this update: wake the tick once it is in.
+    let moves: bool = store
+        .conn
+        .query_row(
+            "SELECT EXISTS (SELECT 1 FROM job j JOIN run r ON r.id = j.run JOIN task t ON t.id = r.task
+                            WHERE j.id = ?1 AND coalesce(t.auto, 0) = 1)",
+            [job],
+            |r| r.get(0),
+        )
+        .unwrap_or(false);
+    if moves {
+        let _ = crate::detach(&["tick"], "the tick");
+    }
     result
 }
 
@@ -322,8 +335,19 @@ pub(crate) fn ask(
     system: &str,
     prompt: &str,
 ) -> Result<varde_agent::Answer> {
+    ask_model(home, agent, crate::config::get().memory.model.as_deref(), system, prompt)
+}
+
+/// The same on `model`: a check's review asks the review profile's.
+pub(crate) fn ask_model(
+    home: &Path,
+    agent: &dyn varde_agent::Agent,
+    model: Option<&str>,
+    system: &str,
+    prompt: &str,
+) -> Result<varde_agent::Answer> {
     let config = crate::config::get();
-    let (argv, env) = agent.headless(config.memory.model.as_deref(), system);
+    let (argv, env) = agent.headless(model, system);
     let argv = config.launch(agent.name(), argv);
     let mut child = Command::new(&argv[0]);
     for (k, v) in env {

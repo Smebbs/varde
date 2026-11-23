@@ -1,0 +1,32 @@
+# A feature: a short spec you approve, then built in a loop until its tests
+# pass, then reviewed by another model.
+label = "feature"
+description = "A spec you approve, then built until its tests pass, then reviewed."
+
+[vars.check]
+description = "The command that runs the tests; git config varde.check when left out."
+default = ""
+
+[[steps]]
+id = "spec"
+title = "Spec: {{title}}"
+profile = "deep"
+gate = "approved"
+output = "file:SPEC.md"
+prompt = """
+Write a short spec in SPEC.md for this feature: what it does, what it does
+not, the pieces, and how it will be tested. No code yet. End with what you
+are unsure of, as questions.
+
+{{context}}"""
+
+[[steps]]
+id = "build"
+needs = ["spec"]
+use = "fix-until-green"
+title = "Build: {{title}}"
+prompt = """
+Build what SPEC.md describes, with tests for it.
+
+{{context}}"""
+check = { cmd = "{{check}}", review = true }

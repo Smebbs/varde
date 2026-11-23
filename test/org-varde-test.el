@@ -2152,3 +2152,106 @@ the question, or nil."
 
 (provide 'org-varde-test)
 ;;; org-varde-test.el ends here
+
+;;; --- Loops, checks and trails -----------------------------------------------
+
+(defconst org-varde-test--flow
+  (concat ",\"flow\":{\"profile\":\"fast\",\"recipe\":\"bugfix@abc\",\"before\":[\"T0000000000000000000NEXT11\"],"
+          "\"check\":{\"cmd\":\"cargo test\",\"review\":false,\"guard\":[\"tests/*\"],\"again\":1,\"running\":false},"
+          "\"last_check\":{\"verdict\":\"fail\",\"summary\":\"1 failed\",\"finished\":1760000000000,\"output\":\"/tmp/out.log\"},"
+          "\"loop\":{\"def\":{\"max\":3,\"escalate\":[\"deep\"]},"
+          "\"state\":{\"state\":\"due\",\"round\":2,\"profile\":\"deep\"},"
+          "\"rounds\":[{\"run\":\"RUN1\",\"n\":1,\"started\":1760000000000,\"ended\":1760000180000,"
+          "\"live\":false,\"asked\":false,\"profile\":\"fast\"}],"
+          "\"checks\":[{\"run\":\"RUN1\",\"verdict\":\"fail\",\"summary\":\"1 failed\",\"output\":\"/tmp/r1.log\"}]},"
+          "\"after\":[{\"after\":\"T0000000000000000000PREV11\",\"kind\":\"approved\",\"met\":true}]}")
+  "A task's check, loop and trail, as `varde show --json' has them.")
+
+(ert-deftest org-varde-view-shows-a-loop-round-by-round ()
+  (org-varde-test-with-varde
+    (let ((org-varde-test--shown (concat (string-remove-suffix "}" org-varde-test--shown) org-varde-test--flow "}")))
+      (org-varde-test--viewing
+        (should (string-match-p "^Loop · round 2 next, on deep$" (buffer-string)))
+        (should (string-match-p "runs on fast · made from recipe bugfix@abc" (buffer-string)))
+        (should (string-match-p "Check  `cargo test` · guarding tests/\\*" (buffer-string)))
+        (should (string-match-p "#1  fast      3m  ✗ 1 failed" (buffer-string)))
+        (should (string-match-p "after ✓ prev11 · your approval" (buffer-string)))
+        (should (string-match-p "then next11" (buffer-string)))
+        ;; RET on a round opens that session; O what its check printed.
+        (goto-char (point-min))
+        (search-forward "#1")
+        (should (equal (get-text-property (point) 'org-varde-output) "/tmp/r1.log"))
+        (save-window-excursion (org-varde-show-go))
+        (should (member (format "start %s --json --run RUN1" org-varde-test--id) (org-varde-test-calls)))
+        ;; RET on a task of its trail shows that one.
+        (goto-char (point-min))
+        (search-forward "then ")
+        (should (equal (get-text-property (point) 'org-varde-flow-task) "T0000000000000000000NEXT11"))))))
+
+(ert-deftest org-varde-loop-asks-how-and-sets-it-going ()
+  (org-varde-test-with-varde
+    (org-varde-test-reply "show" org-varde-test--shown)
+    (org-varde-test-reply "profiles" "{\"v\":1,\"profiles\":[{\"name\":\"deep\",\"model\":\"opus\"}]}")
+    (org-varde-test-reply "loop" "loops until `make test` passes")
+    (setq org-varde-board-data `(:groups ((:key "open" :rows ((:task ,org-varde-test--id :short "aaa111" :title "Fix"))))))
+    (with-temp-buffer
+      (insert (propertize "row" 'org-varde-row (list :task org-varde-test--id :short "aaa111" :title "Fix")))
+      (goto-char (point-min))
+      (cl-letf (((symbol-function 'read-string) (lambda (&rest _) "make test"))
+                ((symbol-function 'read-number) (lambda (&rest _) 4))
+                ((symbol-function 'completing-read-multiple) (lambda (&rest _) '("deep"))))
+        (org-varde-loop)))
+    (should (member (format "loop %s --max 4 --check make test --escalate deep" org-varde-test--id)
+                    (org-varde-test-calls)))))
+
+(ert-deftest org-varde-a-paused-loop-resumes-and-a-running-one-pauses ()
+  (org-varde-test-with-varde
+    (let ((org-varde-test--shown
+           (concat (string-remove-suffix "}" org-varde-test--shown)
+                   ",\"flow\":{\"loop\":{\"state\":{\"state\":\"paused\",\"rounds\":1}}}}")))
+      (org-varde-test-reply "show" org-varde-test--shown)
+      (with-temp-buffer
+        (insert (propertize "row" 'org-varde-row (list :task org-varde-test--id :short "aaa111")))
+        (goto-char (point-min))
+        (org-varde-loop))
+      (should (member (format "loop %s" org-varde-test--id) (org-varde-test-calls))))))
+
+(ert-deftest org-varde-approve-check-and-profile-call-varde ()
+  (org-varde-test-with-varde
+    (org-varde-test-reply "show" org-varde-test--shown)
+    (org-varde-test-reply "profiles" "{\"v\":1,\"profiles\":[{\"name\":\"fast\",\"model\":\"haiku\"}]}")
+    (with-temp-buffer
+      (insert (propertize "row" 'org-varde-row (list :task org-varde-test--id :short "aaa111" :title "Fix")))
+      (goto-char (point-min))
+      (cl-letf (((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+        (org-varde-approve))
+      (cl-letf (((symbol-function 'completing-read) (lambda (&rest _) "fast")))
+        (org-varde-set-profile))
+      (let ((answers '("cargo test" "" "tests/*")))
+        (cl-letf (((symbol-function 'read-string) (lambda (&rest _) (pop answers)))
+                  ((symbol-function 'y-or-n-p) (lambda (&rest _) t)))
+          (org-varde-check))))
+    (let ((calls (org-varde-test-calls)))
+      (should (member (format "approve %s" org-varde-test--id) calls))
+      (should (member (format "set %s --profile fast" org-varde-test--id) calls))
+      (should (member (format "check %s --review --guard tests/* -- cargo test" org-varde-test--id) calls)))))
+
+(ert-deftest org-varde-trail-draws-a-tree-and-shows-its-tasks ()
+  (org-varde-test-with-varde
+    (org-varde-test-reply
+     "trail" (concat "{\"v\":1,\"tasks\":["
+                     "{\"task\":\"T0000000000000000000AAA111\",\"short\":\"aaa111\",\"title\":\"Spec\",\"label\":\"✓ approved\",\"after\":[]},"
+                     "{\"task\":\"T0000000000000000000BBB222\",\"short\":\"bbb222\",\"title\":\"Store\",\"profile\":\"fast\",\"label\":\"↺ 1/3\",\"after\":[{\"task\":\"T0000000000000000000AAA111\",\"kind\":\"approved\"}]},"
+                     "{\"task\":\"T0000000000000000000CCC333\",\"short\":\"ccc333\",\"title\":\"API\",\"label\":\"⧗ aaa111\",\"after\":[{\"task\":\"T0000000000000000000AAA111\",\"kind\":\"verified\"}]}]}"))
+    (with-temp-buffer
+      (insert (propertize "row" 'org-varde-row (list :task "T0000000000000000000AAA111" :short "aaa111")))
+      (goto-char (point-min))
+      (save-window-excursion (org-varde-trail)))
+    (with-current-buffer org-varde-trail-buffer
+      (should (string-match-p "^Spec · ✓ approved  aaa111$" (buffer-string)))
+      (should (string-match-p "^├─ T Store · fast · ↺ 1/3  bbb222$" (buffer-string)))
+      (should (string-match-p "^└─ API · ⧗ aaa111  ccc333$" (buffer-string)))
+      (goto-char (point-min))
+      (search-forward "Store")
+      (should (equal (plist-get (org-varde--here-row) :task) "T0000000000000000000BBB222"))
+      (should (eq (key-binding "A") #'org-varde-approve)))))

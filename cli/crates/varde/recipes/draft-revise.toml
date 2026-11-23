@@ -1,0 +1,24 @@
+# Writing, not code: a draft, critiqued by another model against your
+# rubric, revised once. Only judgement decides, so it gets two rounds.
+label = "draft-revise"
+description = "A draft, critiqued by another model against your rubric, revised once."
+
+[vars.file]
+description = "Where the draft goes, in the task's directory."
+default = "draft.md"
+
+[vars.rubric]
+description = "What makes it good: a file, or the text."
+default = "Clear, correct, and as short as it can be."
+
+[[steps]]
+id = "draft"
+title = "{{title}}"
+profile = "build"
+output = "file:{{file}}"
+prompt = """
+Write {{file}}.
+
+{{context}}"""
+check = { review = true, rubric = "{{rubric}}" }
+loop = { max = 2 }

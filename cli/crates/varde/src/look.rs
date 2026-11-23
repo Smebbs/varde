@@ -71,6 +71,16 @@ pub fn meta(r: &Row, now: i64, project: bool) -> Vec<(String, Tone)> {
     if r.steward_until.is_some() {
         out.push(("steward's".to_string(), Tone::Working));
     }
+    if let Some(f) = &r.flow {
+        let tone = match f.tone {
+            "working" => Tone::Working,
+            "needs" => Tone::YourTurn,
+            "failing" => Tone::Failing,
+            "good" => Tone::Landed,
+            _ => Tone::Quiet,
+        };
+        out.push((f.label.clone(), tone));
+    }
     if let Some(o) = &r.origin {
         out.push((format!("← {}", o.short), Tone::Quiet));
     }

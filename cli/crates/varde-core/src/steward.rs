@@ -172,7 +172,7 @@ pub fn allowed(rules: &[String], tool: &str, input: &serde_json::Value, root: &s
 
 /// `pattern` against all of `text`, `*` standing in for any run of
 /// characters.
-fn glob(pattern: &str, text: &str) -> bool {
+pub fn glob(pattern: &str, text: &str) -> bool {
     let parts: Vec<&str> = pattern.split('*').collect();
     let (first, last) = (parts[0], parts[parts.len() - 1]);
     if parts.len() == 1 {

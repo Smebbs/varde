@@ -72,7 +72,7 @@ impl App<'_> {
         let projects = self.elsewhere.is_none();
         // A pane open has the keys: the board dims under it, its selection
         // still marked; so it does under the form and the help.
-        let dim = detail_area.is_some() || matches!(self.mode, Mode::New(_) | Mode::Help);
+        let dim = detail_area.is_some() || matches!(self.mode, Mode::New(_) | Mode::Help | Mode::Text(_));
         let items: Vec<ListItem> = self
             .items
             .iter()
@@ -156,6 +156,7 @@ impl App<'_> {
                 p.draw(f, if above.height >= 6 { above } else { main });
             }
             Mode::Move(_, p) | Mode::Project(.., p) | Mode::Scope(p) => p.draw(f, main),
+            Mode::Text(t) => draw_text(f, t, main),
             Mode::Help => {
                 self.help_most = draw_help(f, &self.keys, main, &mut self.help_scroll);
                 // Its keys under it, now it is known whether it scrolls.
@@ -256,7 +257,16 @@ impl App<'_> {
             Mode::Help if self.help_most > 0 => {
                 one(Line::from("j/k C-d/C-u scroll · any other key closes this".dark_gray()))
             }
-            Mode::Help => one(Line::from("any key closes this".dark_gray())),
+            Mode::Help | Mode::Text(_) => one(Line::from("any key closes this".dark_gray())),
+            Mode::Ask(p) => {
+                let keys = key_spans(&[("RET", "ok"), ("Esc", "cancel")]);
+                let room =
+                    width.saturating_sub(p.label.width() + keys.iter().map(Span::width).sum::<usize>());
+                let mut line = vec![p.label.clone().bold()];
+                line.extend(p.field.line_spans(room));
+                line.extend(keys);
+                one(Line::from(line))
+            }
             Mode::Recall(q) => {
                 let keys = key_spans(&[("RET", "search"), ("Esc", "cancel")]);
                 let room = width.saturating_sub(8 + keys.iter().map(Span::width).sum::<usize>());
@@ -463,6 +473,16 @@ fn running(r: &Row) -> String {
 /// lines are marked. Blank lines split them where there is room; too
 /// narrow for two columns, it is one. Taller than `area`, it scrolls from
 /// `scroll`, kept within what it has; how far it can is returned.
+/// Text over the board: its title, then its lines, the last that fit.
+fn draw_text(f: &mut Frame, t: &super::flow::Text, area: Rect) {
+    let room = area.height.saturating_sub(2) as usize;
+    let skip = t.lines.len().saturating_sub(room);
+    let mut lines = vec![Line::from(t.title.clone().bold())];
+    lines.extend(t.lines.iter().skip(skip).map(|l| Line::from(l.clone())));
+    f.render_widget(ratatui::widgets::Clear, area);
+    f.render_widget(Paragraph::new(lines), area);
+}
+
 fn draw_help(f: &mut Frame, keys: &Keys, area: Rect, scroll: &mut u16) -> u16 {
     // Rows of a column: a heading, or a key and what it does.
     let heading = |name: &str| Span::raw(name.to_string()).bold().underlined();
@@ -512,8 +532,8 @@ fn draw_help(f: &mut Frame, keys: &Keys, area: Rect, scroll: &mut u16) -> u16 {
         ])),
     );
     let columns = |gap: bool| {
-        let mut left = column(&HELP[..2], gap);
-        let right = column(&HELP[2..], gap);
+        let mut left = column(&HELP[..3], gap);
+        let right = column(&HELP[3..], gap);
         // The view's own keys, which no `[keys]` binds.
         if gap {
             left.push((String::new(), String::new()));

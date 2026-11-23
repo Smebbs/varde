@@ -77,6 +77,27 @@ pub trait Agent {
         argv
     }
 
+    /// `argv`, a launch's, on `model` at `effort`, as a profile asks:
+    /// Claude's `--model` and `--effort`, pi's `--model` and `--thinking`.
+    fn tuned(&self, mut argv: Vec<String>, model: Option<&str>, effort: Option<&str>) -> Vec<String> {
+        let mut flags = vec![];
+        if let Some(m) = model {
+            flags.extend(["--model".to_string(), m.to_string()]);
+        }
+        if let Some(e) = effort {
+            flags.extend([self.effort_flag().to_string(), e.to_string()]);
+        }
+        if !argv.is_empty() {
+            argv.splice(1..1, flags);
+        }
+        argv
+    }
+
+    /// The flag that sets how hard the agent thinks.
+    fn effort_flag(&self) -> &'static str {
+        "--effort"
+    }
+
     /// What identifies the conversation a transcript belongs to: a key
     /// every fork of it copies. `None` if the transcript cannot say.
     fn family_key(&self, transcript: &Path) -> Option<String>;

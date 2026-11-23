@@ -149,6 +149,13 @@ every key.
 | `N` | A session of your own. |
 | `z` | Fold the group. |
 | `g` / `q` | Refresh / quit. |
+| `L` | Loop the task: asks what to loop until, how many rounds, and which profiles to move up to when stuck. On a loop at work, pause or end it; paused, resume it; stopped, run it again. |
+| `c` / `C` | Set the task's check (command, a review by another model, paths it must not change) / run it now. |
+| `O` | What its last check printed. |
+| `A` | Approve its work: what waits on your approval can start. |
+| `t` | Its trail, drawn as a tree: `RET` shows a task, `S` sets the trail going, and `L` `c` `C` `A` `M` work on the line's task. |
+| `M` | The profile (agent, model, effort) it runs on. |
+| `r` | The recipes: `RET` shows one, `n` makes tasks from it, `e` edits your copy, `?` how to write one. |
 
 In the form, an empty Title has a model name the task, `When:` takes
 a [schedule rule](guide.md#scheduled-and-repeating-tasks) (empty:
@@ -192,10 +199,33 @@ you wrote (updates keep it); a yellow `?` one about code that's gone.
 | `J` / `K` | The next / previous task. |
 | `RET` | Go to the session. |
 | `d`, `P`, `X`, `s`, `/` | As on the board (`X` drops). |
+| `L` `c` `C` `O` `A` `t` `M` | Loops, checks and trails, as on the board. |
 | `q` | Close. |
 
 Lines are typed in the minibuffer. `C-g` keeps a draft, and the same
 key on the same line picks it up again.
+
+## Loops, checks and trails
+
+A task with a check, a loop or a trail says where it stands on its row:
+`↺ 2/3 ✗ 1 failed` while a loop works, `✓ verified in 2` once its check
+passes, `⧗ abc123` while it waits on another, `⚑ touched tests/a.rs`
+when a round changed what its check guards. The view has a **Loop**
+section: its profile and recipe, its check and the last result, then one
+line per round with the profile it ran on, how long it took and what its
+check found. `RET` on a round opens that session, `O` what its check
+printed, and `RET` on a task before or after it shows that one.
+
+The new-task form (`n`) has four more fields:
+
+- `Profile:` what its sessions run on (`RET` picks, with each profile's model).
+- `After:` the tasks it waits on (`RET` adds one).
+- `Recipe:` make a trail of tasks from a recipe (`RET` picks; its
+  variables then fill `Vars:` with their defaults).
+- `Vars:` the recipe's variables: `check="cargo test" tests=tests/*`.
+
+With a recipe, `C-c C-c` makes one task per step and asks whether to
+set the trail going.
 
 ## Moving between sessions
 

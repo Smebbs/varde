@@ -122,8 +122,12 @@ impl App<'_> {
             project: project.clone(),
             take_over: start.take_over,
             run: start.run.clone(),
+            profile: None,
+            round: None,
+            base: None,
+            share: None,
         };
-        match start::prepare(store, id, opts, false)? {
+        match start::yours(store, id, opts, false)? {
             start::Outcome::Ask(start::Ask::TakeOver { .. }) => {
                 self.mode = Mode::TakeOver(start, asked);
                 Ok(None)

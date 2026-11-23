@@ -1,0 +1,16 @@
+# A question to explore: nothing can verify the answer, so no loop; you
+# read the report and decide.
+label = "research"
+description = "Explore a question on the strongest profile, and report; you read it."
+
+[[steps]]
+id = "research"
+title = "{{title}}"
+profile = "deep"
+gate = "approved"
+output = "report"
+prompt = """
+Research this and report what you found, with the evidence for each part,
+and what remains unsure. Change no files.
+
+{{context}}"""

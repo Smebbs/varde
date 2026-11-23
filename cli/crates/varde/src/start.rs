@@ -32,6 +32,35 @@ pub struct Options {
     /// Continue this run's conversation rather than the newest: its id,
     /// or the end of it `varde show` prints.
     pub run: Option<String>,
+    /// The profile a new conversation runs on; else the task's, else the
+    /// `work` role's.
+    pub profile: Option<String>,
+    /// For a loop's round, its number; 0 for a trail's start with no loop.
+    pub round: Option<i64>,
+    /// The branch a new worktree is cut from, in place of the base: a
+    /// trail's upstream.
+    pub base: Option<String>,
+    /// Run in this directory, an upstream's worktree, rather than make one.
+    pub share: Option<PathBuf>,
+}
+
+impl Options {
+    /// A fresh conversation, as a schedule, a loop or a trail starts one.
+    pub fn fresh(worktree: Option<bool>) -> Options {
+        Options {
+            want: Want::Fresh,
+            worktree,
+            context: None,
+            agent: None,
+            project: None,
+            take_over: false,
+            run: None,
+            profile: None,
+            round: None,
+            base: None,
+            share: None,
+        }
+    }
 }
 
 /// The agent a fresh run uses when none is asked for.
@@ -126,7 +155,7 @@ impl Ask {
 pub fn start(paths: &Paths, reference: &str, opts: Options, as_json: bool) -> Result<()> {
     let mut store = paths.open(Duration::from_secs(2))?;
     let id = task::resolve(&store, reference)?;
-    match prepare(&mut store, &id, opts, false)? {
+    match yours(&mut store, &id, opts, false)? {
         Outcome::Focus { run, fork } => {
             // The client is sent to the live session: that is looking at it.
             store::mark_seen(&store.conn, &id, now_ms())?;
@@ -168,14 +197,14 @@ pub fn attach(paths: &Paths, reference: &str, opts: Options) -> Result<i32> {
     let mut store = paths.open(Duration::from_secs(2))?;
     let id = task::resolve(&store, reference)?;
     let interactive = unsafe { libc::isatty(0) } == 1;
-    let mut outcome = prepare(&mut store, &id, opts.clone(), interactive)?;
+    let mut outcome = yours(&mut store, &id, opts.clone(), interactive)?;
     if let Outcome::Ask(Ask::TakeOver { .. }) = outcome {
         let q = format!(
             "{} is working in the background. Take it over? It stops, and carries on here.",
             task::short(&id)
         );
         if interactive && ask(&q)? {
-            outcome = prepare(&mut store, &id, Options { take_over: true, ..opts }, interactive)?;
+            outcome = yours(&mut store, &id, Options { take_over: true, ..opts }, interactive)?;
         }
     }
     match outcome {
@@ -236,6 +265,17 @@ fn running(task: &str, run: &str, fork: Option<&str>, place: &str) -> String {
 const UNLAUNCHED_MS: i64 = 60_000;
 /// How long a worktree's setup may run before the run counts as gone.
 const SETUP_MS: i64 = 10 * 60_000;
+
+/// [`prepare`], for a start of yours: a session of yours on a task that
+/// loops takes it over, and the loop pauses until `varde loop` resumes it.
+pub fn yours(store: &mut Store, task_id: &str, opts: Options, interactive: bool) -> Result<Outcome> {
+    let outcome = prepare(store, task_id, opts, interactive)?;
+    // Said on its row (`↺ paused`), not here: the board owns its screen.
+    if matches!(outcome, Outcome::Ready { .. } | Outcome::Focus { .. }) {
+        crate::flow::taken_over(store, task_id)?;
+    }
+    Ok(outcome)
+}
 
 pub fn prepare(store: &mut Store, task_id: &str, opts: Options, interactive: bool) -> Result<Outcome> {
     // Planned again once a background session it takes over has stopped.
@@ -400,6 +440,31 @@ pub fn prepare(store: &mut Store, task_id: &str, opts: Options, interactive: boo
         return Ok(Outcome::Focus { run, fork });
     }
 
+    // The profile a new conversation runs on; a resume or fork keeps the
+    // one its conversation had, unless one is asked for.
+    let profile_name: Option<String> = match &session {
+        Session::Resume { run, .. } | Session::Fork { run, .. } if opts.profile.is_none() => {
+            store.conn.query_row("SELECT profile FROM run WHERE id = ?1", [run], |r| r.get(0))?
+        }
+        _ => match &opts.profile {
+            Some(p) => Some(p.clone()),
+            None => store
+                .conn
+                .query_row("SELECT profile FROM task WHERE id = ?1", [task_id], |r| {
+                    r.get::<_, Option<String>>(0)
+                })?
+                .or_else(|| config::get().roles.work.clone()),
+        },
+    };
+    let profile = match &profile_name {
+        Some(name) => Some((
+            name.clone(),
+            config::get().profile(name).with_context(|| {
+                format!("there is no profile {name}: add it under [profiles] in {}", config::path().display())
+            })?,
+        )),
+        None => None,
+    };
     // Known before anything is made, so a bad name leaves nothing behind.
     let agent_name = match &session {
         Session::Resume { run, .. } | Session::Fork { run, .. } => {
@@ -410,16 +475,23 @@ pub fn prepare(store: &mut Store, task_id: &str, opts: Options, interactive: boo
             }
             theirs
         }
-        _ => opts.agent.clone().unwrap_or_else(default_agent),
+        _ => opts
+            .agent
+            .clone()
+            .or_else(|| profile.as_ref().and_then(|(_, p)| p.agent.clone()))
+            .unwrap_or_else(default_agent),
     };
     let agent = varde_agent::by_name(&agent_name)
         .with_context(|| format!("varde does not know the agent {agent_name}: it runs claude or pi"))?;
 
     let project = project.map(PathBuf::from);
-    let here = match &project {
-        Some(p) => p.clone(),
-        None => std::env::current_dir()?,
+    let here = match (&opts.share, &project) {
+        (Some(dir), _) => dir.clone(),
+        (None, Some(p)) => p.clone(),
+        (None, None) => std::env::current_dir()?,
     };
+    // A trail's step that shares its upstream's worktree makes none.
+    let tree = if opts.share.is_some() { Tree::Root } else { tree };
     let mut notices: Vec<String> = repo_cfg.warning.take().into_iter().collect();
     // Outside a repository there is no worktree to make, so none is asked about.
     let tree = match tree {
@@ -462,7 +534,7 @@ pub fn prepare(store: &mut Store, task_id: &str, opts: Options, interactive: boo
             let layout = git::Layout {
                 dir: cfg.worktree_dir(&git::main_checkout(repo)),
                 prefix: cfg.branch_prefix().to_string(),
-                base: repo_cfg.base.clone(),
+                base: opts.base.clone().or_else(|| repo_cfg.base.clone()),
             };
             let slug = git::slug(&title, &task::short(task_id));
             // Made again where it was, a worktree is on the branch it had.
@@ -566,8 +638,9 @@ pub fn prepare(store: &mut Store, task_id: &str, opts: Options, interactive: boo
     // A resume needs no cursor of its own: a fold starts from the furthest
     // any run on its transcript got (`memory::enqueue`).
     tx.execute(
-        "INSERT INTO run (id, task, agent, native_id, parent_run, relation, cwd, started, launch, prompt, holdout)
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'managed', ?9, ?10)",
+        "INSERT INTO run (id, task, agent, native_id, parent_run, relation, cwd, started, launch, prompt, holdout,
+                          profile, model, effort, round)
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, 'managed', ?9, ?10, ?11, ?12, ?13, ?14)",
         params![
             run,
             task_id,
@@ -578,7 +651,11 @@ pub fn prepare(store: &mut Store, task_id: &str, opts: Options, interactive: boo
             cwd.to_string_lossy(),
             now_ms(),
             prompt,
-            holdout
+            holdout,
+            profile.as_ref().map(|(n, _)| n),
+            profile.as_ref().and_then(|(_, p)| p.model.clone()),
+            profile.as_ref().and_then(|(_, p)| p.effort.clone()),
+            opts.round
         ],
     )?;
     // Starting a task picks it up: back from done, parked or dropped, and

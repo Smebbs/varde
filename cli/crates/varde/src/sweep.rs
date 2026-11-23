@@ -66,6 +66,9 @@ struct Checked {
     task: String,
     facts: Option<(String, String, Option<&'static str>, String)>,
     checked: i64,
+    /// The files there now, for a task with a check or an approval: what
+    /// says whether it is still verified.
+    tree: Option<String>,
 }
 
 /// `varde git-refresh`: check every task the board tracks, and every done
@@ -110,7 +113,16 @@ pub fn run(paths: &Paths) -> Result<()> {
                     store.conn.query_row("SELECT state, closed FROM task WHERE id = ?1", [task], |r| {
                         Ok((r.get(0)?, r.get(1)?))
                     })?;
-                if state == "done" && done::live_runs(&store, task)?.is_empty() {
+                // A task a trail's open task waits on, or works in, keeps its
+                // worktree and branch: they are what that task builds on.
+                let needed: bool = store.conn.query_row(
+                    "SELECT EXISTS (SELECT 1 FROM edge e JOIN task d ON d.id = e.task
+                                    WHERE e.after = ?1 AND d.state = 'open')
+                         OR EXISTS (SELECT 1 FROM task d WHERE d.share = ?1 AND d.state = 'open')",
+                    [task],
+                    |r| r.get(0),
+                )?;
+                if state == "done" && !needed && done::live_runs(&store, task)?.is_empty() {
                     let waited = closed.is_some_and(|c| now_ms() - c >= PUT_AWAY_AFTER_MS);
                     let action = match &facts {
                         // A failure here must not stop the others being checked.
@@ -140,7 +152,17 @@ pub fn run(paths: &Paths) -> Result<()> {
                     .map(row)
             }
         };
-        out.push(Checked { task: task.to_string(), facts, checked });
+        let judged: bool = store.conn.query_row(
+            "SELECT EXISTS (SELECT 1 FROM check_def WHERE task = ?1) OR EXISTS (SELECT 1 FROM approval WHERE task = ?1)",
+            [task],
+            |r| r.get(0),
+        )?;
+        let tree = if judged {
+            crate::flow::checkout(&store, task)?.and_then(|c| crate::flow::tree(&c))
+        } else {
+            None
+        };
+        out.push(Checked { task: task.to_string(), facts, checked, tree });
     }
 
     let tx = store.conn.unchecked_transaction()?;
@@ -153,9 +175,10 @@ pub fn run(paths: &Paths) -> Result<()> {
             None => (None, None, None, None),
         };
         tx.execute(
-            "INSERT INTO git_state (task, stage, label, checks, facts, checked) VALUES (?1, ?2, ?3, ?4, ?5, ?6)
-             ON CONFLICT (task) DO UPDATE SET stage = ?2, label = ?3, checks = ?4, facts = ?5, checked = ?6",
-            params![c.task, stage, label, checks, facts, c.checked],
+            "INSERT INTO git_state (task, stage, label, checks, facts, checked, tree) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
+             ON CONFLICT (task) DO UPDATE SET stage = ?2, label = ?3, checks = ?4, facts = ?5, checked = ?6,
+               tree = coalesce(?7, tree)",
+            params![c.task, stage, label, checks, facts, c.checked, c.tree],
         )?;
     }
     tx.commit()?;

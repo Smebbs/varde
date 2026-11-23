@@ -43,6 +43,7 @@ pub fn run(paths: &Paths, as_json: bool) -> Result<()> {
         },
     ];
     checks.push(agent());
+    checks.push(profiles());
     checks.extend(agents());
     checks.push(pending(paths));
     if let Ok(s) = &store {
@@ -355,6 +356,26 @@ fn worktrees(conn: &rusqlite::Connection) -> Result<Value> {
 
 /// With a task scheduled, something must run `varde tick`: the heartbeat,
 /// installed and running.
+/// Whether every profile can work in the background as it is set up.
+fn profiles() -> Value {
+    let c = crate::config::get();
+    // A review is a call with no tools: how a session runs is not its.
+    let warnings: Vec<String> = c
+        .profiles()
+        .into_iter()
+        .filter(|(n, _)| *n != c.roles.review)
+        .filter_map(|(n, _)| c.background_warning(&n))
+        .collect();
+    match warnings.first() {
+        None => ok("profiles", format!("{} profiles; varde profiles lists them", c.profiles().len())),
+        Some(w) => fail(
+            "profiles",
+            w.clone(),
+            "give the profile its own background arguments in the config, as said",
+        ),
+    }
+}
+
 fn schedules(paths: &Paths, conn: &rusqlite::Connection) -> Result<Value> {
     let n: i64 = conn.query_row(
         "SELECT count(*) FROM schedule s JOIN task t ON t.id = s.task WHERE t.state = 'open'",

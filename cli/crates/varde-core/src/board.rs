@@ -104,6 +104,9 @@ pub struct Row {
     /// Until when the task is handed to the steward (§6.6), in unix ms.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub steward_until: Option<i64>,
+    /// Its check, loop or trail, when it has one: `↺ 2/3 ✗ exit 1`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub flow: Option<crate::flow::Flow>,
 }
 
 #[derive(Debug, Serialize)]
@@ -193,6 +196,16 @@ pub fn build(
     // shows whichever run is most urgent, not just the newest.
     let (others, busy_older, results) = urgent_older_runs(store, now, alive)?;
 
+    // Tasks with a check, a loop or an edge: only these are asked about
+    // them, so the rest of the board costs nothing more.
+    let flowing: std::collections::HashSet<String> = store
+        .conn
+        .prepare_cached(
+            "SELECT task FROM check_def UNION SELECT task FROM loop UNION SELECT task FROM edge
+             UNION SELECT after FROM edge UNION SELECT task FROM approval",
+        )?
+        .query_map([], |r| r.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
     let handed: std::collections::HashMap<String, i64> =
         crate::steward::trusts(&store.conn, now)?.into_iter().map(|t| (t.task, t.until)).collect();
     let mut stmt = store.conn.prepare_cached(sql)?;
@@ -267,6 +280,11 @@ pub fn build(
             Some(rule) if state == "open" => Some(schedule_of(rule, r.get(26)?, r.get(27)?, now)),
             _ => None,
         };
+        let flow = if flowing.contains(&task) {
+            crate::flow::row(&store.conn, &task, &state, now, alive)?
+        } else {
+            None
+        };
         let (group, label) = if state == "done" {
             (5, "done")
         } else if state == "parked" {
@@ -292,6 +310,15 @@ pub fn build(
                 }
             }
         };
+        // A loop between rounds is at work, though its last round ended
+        // unread: the next one is coming.
+        let (group, label) = match flow.as_ref().and_then(|f| f.group) {
+            Some("working") if group != 1 && state == "open" => {
+                unread = false;
+                (1, "working")
+            }
+            _ => (group, label),
+        };
         let (agents, shells) = if group < 2 { counts } else { (0, 0) };
         let project: Option<String> = r.get(2)?;
         let tracked = worktree || (state == "open" && project.is_some() && run.is_some());
@@ -305,6 +332,7 @@ pub fn build(
         };
         let steward_until = handed.get(&task).copied();
         groups[group].rows.push(Row {
+            flow,
             steward_until,
             short: crate::task::short(&task),
             task,

@@ -13,6 +13,7 @@ mod diff;
 mod draft;
 mod draw;
 mod field;
+mod flow;
 mod keys;
 mod pick;
 mod session;
@@ -91,6 +92,10 @@ enum Mode {
     Scope(Pick),
     /// Asked whether to turn the steward on, to go to it.
     StewardOn,
+    /// A one-line prompt of loops, checks and recipes.
+    Ask(flow::Prompt),
+    /// Text over the board: a task's loop and trail, or a check's output.
+    Text(flow::Text),
 }
 
 impl Mode {
@@ -104,6 +109,7 @@ impl Mode {
                 | Mode::Project(..)
                 | Mode::Scope(_)
                 | Mode::Recall(_)
+                | Mode::Ask(_)
         )
     }
 }
@@ -771,6 +777,9 @@ impl<'a> App<'a> {
                 self.mode = Mode::Help;
             }
             Mode::Help => {}
+            // Any key closes it.
+            Mode::Text(_) => {}
+            Mode::Ask(p) => self.ask_key(p, key),
             Mode::New(mut draft) => match draft.key(key) {
                 Edit::Typing => self.mode = Mode::New(draft),
                 Edit::Editor => return Some(Away::Draft(draft)),
@@ -1210,6 +1219,14 @@ impl<'a> App<'a> {
                 self.stale = true;
             }
             Act::Scope => self.toggle_scope(),
+            Act::Loop
+            | Act::Check
+            | Act::CheckNow
+            | Act::Approve
+            | Act::Trail
+            | Act::Profile
+            | Act::Recipes
+            | Act::Output => self.flow_act(act),
             Act::Start
             | Act::Background
             | Act::Fresh
@@ -3181,10 +3198,14 @@ mod tests {
         assert!(help.lines().nth(cairn).unwrap().contains("› yours  ? stale: its code is gone"), "{help}");
         // Taller than 80x24, it scrolls to its end; any other key closes it.
         assert!(help.contains("↓ j more") && !help.contains("u undoes"), "{help}");
-        key(&mut app, KeyCode::Char('j'));
-        key(&mut app, KeyCode::Char('j'));
-        key(&mut app, KeyCode::Char('j'));
-        let end = screen(&mut app, 80, 24);
+        let mut end = screen(&mut app, 80, 24);
+        for _ in 0..20 {
+            if !end.contains("j more") {
+                break;
+            }
+            key(&mut app, KeyCode::Char('j'));
+            end = screen(&mut app, 80, 24);
+        }
         assert!(
             end.contains("u undoes the last x, d, P or X in the view") && !end.contains("j more"),
             "{end}"

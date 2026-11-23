@@ -25,7 +25,7 @@ pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
         .map_err(|e| anyhow!("{e}; runs come from `varde start`"))?;
     let row = store.conn.query_row(
         "SELECT r.agent, r.native_id, r.relation, r.cwd, r.prompt, r.pid, r.launch, t.title, p.native_id, r.task,
-                r.background
+                r.background, r.model, r.effort, r.profile
          FROM run r JOIN task t ON t.id = r.task LEFT JOIN run p ON p.id = r.parent_run
          WHERE r.id = ?1",
         [run_id],
@@ -42,11 +42,28 @@ pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
                 r.get::<_, Option<String>>(8)?,
                 r.get::<_, String>(9)?,
                 r.get::<_, bool>(10)?,
+                r.get::<_, Option<String>>(11)?,
+                r.get::<_, Option<String>>(12)?,
+                r.get::<_, Option<String>>(13)?,
             ))
         },
     );
-    let (agent, native, relation, cwd, prompt, pid, launch, title, parent_native, task, background) =
-        row.with_context(|| format!("no run {run_id}; runs come from `varde start`"))?;
+    let (
+        agent,
+        native,
+        relation,
+        cwd,
+        prompt,
+        pid,
+        launch,
+        title,
+        parent_native,
+        task,
+        background,
+        model,
+        effort,
+        profile_name,
+    ) = row.with_context(|| format!("no run {run_id}; runs come from `varde start`"))?;
     // Said for the task, not the run: the user typed `varde attach`, and a
     // second one racing the first lands here.
     let already = || {
@@ -67,10 +84,16 @@ pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
         _ => Launch::New { id: preset, name: &title, prompt: prompt.as_deref() },
     };
     let (argv, env) = adapter.launch(how);
+    // On the model and effort its profile asked for.
+    let argv = adapter.tuned(argv, model.as_deref(), effort.as_deref());
     // Started by a schedule, with nobody at it: to the end of its reply,
     // its output kept in a log beside the store.
     let config = crate::config::get();
-    let argv = if background { config.background(&agent, adapter.background(argv)) } else { argv };
+    let argv = if background {
+        config.background_on(&agent, profile_name.as_deref(), adapter.background(argv))
+    } else {
+        argv
+    };
     let argv = config.launch(&agent, argv);
     let log = if background { Some(background_log(paths, run_id)?) } else { None };
     crate::job::sync_memory(paths);
@@ -170,9 +193,15 @@ pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
 
     let now = now_ms();
     let recorded = paths.open(Duration::from_secs(5)).and_then(|mut store| {
+        if let Some(log) = &log {
+            // Its last words a question: a loop's round then waits for you.
+            let asked = ends_asking(log);
+            store.conn.execute("UPDATE run SET asked = ?2 WHERE id = ?1", params![run_id, asked])?;
+        }
         for run in store.record_exit(run_id, code, now)? {
             crate::job::maybe_fold(paths, &store, &run, "ended", now)?;
         }
+        crate::flow::ended(&store, &task, run_id)?;
         Ok(())
     });
     if recorded.is_err() {
@@ -180,6 +209,20 @@ pub fn run(paths: &Paths, run_id: &str) -> Result<i32> {
         crate::pending::append_exit(paths, run_id, code, now)?;
     }
     Ok(code)
+}
+
+/// Whether a background run's output ends on a question: its last line
+/// of text, past any trailing blank ones.
+fn ends_asking(log: &Path) -> bool {
+    let mut f = match std::fs::File::open(log) {
+        Ok(f) => f,
+        Err(_) => return false,
+    };
+    let len = f.metadata().map(|m| m.len()).unwrap_or(0);
+    let _ = f.seek(SeekFrom::Start(len.saturating_sub(4096)));
+    let mut tail = String::new();
+    let _ = f.read_to_string(&mut tail);
+    tail.lines().map(str::trim).rfind(|l| !l.is_empty()).is_some_and(|l| l.ends_with('?'))
 }
 
 /// Set for a session a schedule started in the background: its hooks
