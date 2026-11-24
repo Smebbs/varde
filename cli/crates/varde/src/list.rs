@@ -65,6 +65,14 @@ pub fn columns() -> usize {
 /// everything, which also adds the dropped tasks' group.
 fn table(board: &Board, now: i64, all: bool, width: usize) -> String {
     let mut out = String::new();
+    let longest = board
+        .groups
+        .iter()
+        .flat_map(|g| g.rows.iter())
+        .map(|r| varde_core::title::clean(&r.title).width())
+        .max()
+        .unwrap_or(0);
+    let title_w = crate::look::title_width(width, longest);
     for g in board.groups.iter().filter(|g| !g.rows.is_empty() || g.key != "dropped") {
         let hidden = g.collapsed && !all && !g.rows.is_empty();
         out.push_str(&format!(
@@ -75,13 +83,13 @@ fn table(board: &Board, now: i64, all: bool, width: usize) -> String {
         ));
         for r in g.rows.iter().filter(|_| !hidden) {
             // Under Needs you, a turn that is yours goes without saying.
-            let meta: Vec<String> = crate::look::meta(r, now, true)
+            let parts: Vec<_> = crate::look::meta(r, now, true)
                 .into_iter()
-                .map(|(t, _)| t)
-                .filter(|t| !(g.key == "needs_you" && t == crate::look::YOUR_TURN))
+                .filter(|(t, _)| !(g.key == "needs_you" && t == crate::look::YOUR_TURN))
                 .collect();
+            let room = width.saturating_sub(5 + title_w + 2 + r.short.width());
+            let meta: Vec<String> = crate::look::fit(parts, room).into_iter().map(|(t, _)| t).collect();
             let meta = format!("{}  {}", meta.join(crate::look::SEP), r.short);
-            let title_w = width.saturating_sub(5 + meta.width()).max(20);
             out.push_str(&format!(
                 " {} {}  {meta}\n",
                 crate::look::glyph(r).0,
@@ -195,7 +203,7 @@ mod tests {
         for width in [80, 120] {
             let t = table(&board, 10, false, width);
             assert!(t.lines().all(|l| l.width() <= width), "{width}:\n{t}");
-            assert!(t.lines().any(|l| l.width() == width), "the title takes the room:\n{t}");
+            assert!(t.contains('…'), "a long title is cut to its column:\n{t}");
         }
     }
 

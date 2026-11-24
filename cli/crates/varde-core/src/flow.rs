@@ -525,6 +525,28 @@ pub fn held(conn: &Connection, task: &str) -> Result<Option<Wait>> {
     Ok(waits(conn, task)?.into_iter().find(|w| !w.met))
 }
 
+/// What approving `task` lets go on, while you have not: `its plan`
+/// (one whose output is a trail), or `to go on` (a step waits on it).
+fn asks_approval(conn: &Connection, task: &str) -> Result<Option<&'static str>> {
+    if approved(conn, task)? {
+        return Ok(None);
+    }
+    let plan: bool = conn
+        .query_row("SELECT coalesce(output, '') = 'trail' FROM task WHERE id = ?1", [task], |r| r.get(0))
+        .optional()?
+        .unwrap_or(false);
+    if plan {
+        return Ok(Some("its plan"));
+    }
+    let waited: bool = conn.query_row(
+        "SELECT EXISTS (SELECT 1 FROM edge e WHERE e.after = ?1 AND e.kind = 'approved'
+           AND NOT EXISTS (SELECT 1 FROM run WHERE run.task = e.task))",
+        [task],
+        |r| r.get(0),
+    )?;
+    Ok(waited.then_some("to go on"))
+}
+
 /// The tasks joined to `task` by edges, either way: its trail, in the
 /// order they were made.
 pub fn trail(conn: &Connection, task: &str) -> Result<Vec<String>> {
@@ -615,10 +637,10 @@ pub fn row(
     }
     // What it waits on comes first: a loop of it cannot start before.
     let waits = waits(conn, task)?;
+    // (What the one it waits on needs, that one's row says.)
     if let Some(w) = held(conn, task)? {
-        let what = if w.kind == "approved" { "your approval of " } else { "" };
         return Ok(Some(Flow {
-            label: format!("⧗ {what}{}", crate::task::short(&w.after)),
+            label: format!("⧗ after {}", crate::task::short(&w.after)),
             tone: "quiet",
             state: None,
             group: None,
@@ -626,6 +648,14 @@ pub fn row(
     }
     let auto: bool =
         conn.query_row("SELECT coalesce(auto, 0) FROM task WHERE id = ?1", [task], |r| r.get(0))?;
+    // What goes on once you approve it: its plan made into steps, or the
+    // step that waits on it. Said where the approving is to be done.
+    let asks = asks_approval(conn, task)?.map(|what| Flow {
+        label: format!("◆ approve {what}"),
+        tone: "needs",
+        state: None,
+        group: Some("needs_you"),
+    });
     if let Some(def) = loop_of(conn, task)? {
         let st = self::state(conn, task, now, alive)?.expect("a loop");
         let last_fail = || -> Result<String> {
@@ -655,6 +685,7 @@ pub fn row(
                 "working",
                 Some("working"),
             ),
+            State::Verified { .. } if asks.is_some() => return Ok(asks),
             State::Verified { .. } => ("✓ verified".to_string(), "good", Some("needs_you")),
             State::Flagged { why, .. } => (format!("⚑ {why}"), "failing", Some("needs_you")),
             State::Error { why, .. } => (format!("✗ {why}"), "failing", Some("needs_you")),
@@ -666,6 +697,9 @@ pub fn row(
             State::Attended { .. } => ("↺ with you".to_string(), "working", None),
         };
         return Ok(Some(Flow { label, tone, state: Some(st.name()), group }));
+    }
+    if asks.is_some() {
+        return Ok(asks);
     }
     let started: bool =
         conn.query_row("SELECT EXISTS (SELECT 1 FROM run WHERE task = ?1)", [task], |r| r.get(0))?;

@@ -207,7 +207,7 @@ output = "report"
     );
     // Nothing starts until the trail is set going; the second waits.
     assert!(runs(&e, &a).is_empty());
-    assert_eq!(row(&e.board(), &b)["flow"]["label"], format!("⧗ {a}"));
+    assert_eq!(row(&e.board(), &b)["flow"]["label"], format!("⧗ after {a}"));
     e.ok(&["trail", &a, "--start"]);
     poll(400, || e.show(&b)["flow"]["verified"].as_bool().unwrap_or(false));
     // The second ran on its profile, in the first's worktree, told it follows it.
@@ -249,7 +249,7 @@ check = { cmd = "true" }
     poll(200, || runs(&e, &spec).first().is_some_and(|r| r["status"] == "exited"));
     e.ok(&["tick"]);
     assert!(runs(&e, &build).is_empty(), "waits for your approval");
-    assert_eq!(row(&e.board(), &build)["flow"]["label"], format!("⧗ your approval of {spec}"));
+    assert_eq!(row(&e.board(), &build)["flow"]["label"], format!("⧗ after {spec}"));
     assert!(e.ok(&["approve", &spec]).contains(&build));
     poll(400, || e.show(&build)["flow"]["verified"].as_bool().unwrap_or(false));
     assert_eq!(runs(&e, &build)[0]["cwd"], runs(&e, &spec)[0]["cwd"], "it works in the spec's tree");

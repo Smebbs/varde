@@ -73,6 +73,14 @@ impl App<'_> {
         // A pane open has the keys: the board dims under it, its selection
         // still marked; so it does under the form and the help.
         let dim = detail_area.is_some() || matches!(self.mode, Mode::New(_) | Mode::Help | Mode::Text(_));
+        let longest = self
+            .groups
+            .iter()
+            .flat_map(|g| g.rows.iter())
+            .map(|r| clean(&r.title).width())
+            .max()
+            .unwrap_or(0);
+        let title_w = look::title_width(width.saturating_sub(5), longest);
         let items: Vec<ListItem> = self
             .items
             .iter()
@@ -87,7 +95,7 @@ impl App<'_> {
                         let needs_you = self.groups[g].key == "needs_you";
                         let r = &self.groups[g].rows[r];
                         let (marked, at) = (self.is_marked(&r.task), selected == Some(n));
-                        row_line(r, marked, at, now, width, projects, dim, needs_you)
+                        row_line(r, marked, at, now, width, title_w, projects, dim, needs_you)
                     }
                 })
             })
@@ -659,6 +667,7 @@ fn row_line(
     selected: bool,
     now: i64,
     width: usize,
+    title_w: usize,
     projects: bool,
     dim: bool,
     needs_you: bool,
@@ -670,17 +679,18 @@ fn row_line(
     };
     let (glyph, tone) = look::glyph(r);
     let mut meta: Vec<Span> = Vec::new();
-    let parts =
-        look::meta(r, now, projects).into_iter().filter(|(t, _)| !(needs_you && t == look::YOUR_TURN));
-    for (i, (text, tone)) in parts.enumerate() {
+    let parts: Vec<_> = look::meta(r, now, projects)
+        .into_iter()
+        .filter(|(t, _)| !(needs_you && t == look::YOUR_TURN))
+        .collect();
+    let room = width.saturating_sub(3 + title_w + 2 + 2 + r.short.width());
+    for (i, (text, tone)) in look::fit(parts, room).into_iter().enumerate() {
         if i > 0 {
             meta.push(Span::styled(look::SEP, style(Tone::Quiet)));
         }
         meta.push(Span::styled(clean(&text), style(tone)));
     }
     meta.push(Span::styled(format!("  {}", r.short), style(Tone::Quiet)));
-    let meta_w: usize = meta.iter().map(Span::width).sum();
-    let title_w = width.saturating_sub(3 + 2 + meta_w).max(12);
     let closed = super::is_closed(&r.state);
     let mut line = vec![
         Span::raw(if marked { "*" } else { " " }).bold(),

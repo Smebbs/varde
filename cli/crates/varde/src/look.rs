@@ -61,7 +61,9 @@ pub fn word(status: &str) -> Option<(&'static str, Tone)> {
 /// the project when the board shows several, and how long ago.
 pub fn meta(r: &Row, now: i64, project: bool) -> Vec<(String, Tone)> {
     let mut out = Vec::new();
-    if let Some((w, t)) = word(r.status) {
+    // A loop or check at work says so itself.
+    let working = r.flow.as_ref().is_some_and(|f| f.tone == "working");
+    if let Some((w, t)) = word(r.status).filter(|(w, _)| !(working && *w == "working")) {
         out.push((w.to_string(), t));
     }
     let n = |k: u32, what: &str| (k > 0).then(|| format!("{k} {what}{}", if k == 1 { "" } else { "s" }));
@@ -128,3 +130,36 @@ pub fn meta(r: &Row, now: i64, project: bool) -> Vec<(String, Tone)> {
 
 /// Between the parts of a row's meta.
 pub const SEP: &str = " · ";
+
+/// The title column of a board `width` wide whose longest title is
+/// `longest`: one for every row, so they line up, of at most a little
+/// over half the width.
+pub fn title_width(width: usize, longest: usize) -> usize {
+    longest.min(width * 11 / 20).min(width.saturating_sub(44)).max(16)
+}
+
+/// `parts` in `w` columns: the last dropped first (how long ago, the
+/// project, git, which say least), down to the first; then that
+/// shortened.
+pub fn fit(mut parts: Vec<(String, Tone)>, w: usize) -> Vec<(String, Tone)> {
+    use unicode_width::UnicodeWidthStr;
+    let width = |p: &[(String, Tone)]| {
+        p.iter().map(|(t, _)| t.width()).sum::<usize>() + SEP.width() * p.len().saturating_sub(1)
+    };
+    while width(&parts) > w && parts.len() > 1 {
+        parts.pop();
+    }
+    while width(&parts) > w {
+        let Some((i, longest)) =
+            parts.iter().enumerate().map(|(i, (t, _))| (i, t.width())).max_by_key(|(_, n)| *n)
+        else {
+            break;
+        };
+        let shorter = longest.saturating_sub(width(&parts) - w).max(8);
+        if shorter >= longest {
+            break;
+        }
+        parts[i].0 = crate::list::clip(&parts[i].0, shorter);
+    }
+    parts
+}
