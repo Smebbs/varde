@@ -1473,14 +1473,14 @@ fn review(
     // As long as a check may take: a strong model reading a diff at high
     // effort takes minutes.
     let limit = Duration::from_secs(config::get().loops.check_minutes.max(1) * 60);
-    let answer = match crate::job::ask_model(
-        &paths.home,
-        agent.as_ref(),
-        model.as_deref(),
-        system,
-        &material,
-        limit,
-    ) {
+    // Once more after a failed call: a model's service fails now and then,
+    // and one failure should not stop a loop.
+    let ask =
+        || crate::job::ask_model(&paths.home, agent.as_ref(), model.as_deref(), system, &material, limit);
+    let answer = match ask().or_else(|_| {
+        std::thread::sleep(Duration::from_secs(20));
+        ask()
+    }) {
         Ok(a) => a.text,
         Err(e) => return Ok(Found::error(&format!("the review failed: {e:#}"))),
     };

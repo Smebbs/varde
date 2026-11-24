@@ -394,8 +394,14 @@ pub(crate) fn ask_model(
     };
     let out = reader.join().map_err(|_| anyhow::anyhow!("reading the reply failed"))??;
     if !status.success() {
+        // Said on stderr, or, by an agent that answers in JSON, in its
+        // reply (Claude's `is_error`).
         let said = errors.join().ok().and_then(Result::ok).unwrap_or_default();
-        bail!("the model call failed ({status}){}", last_words(&String::from_utf8_lossy(&said)));
+        let said = match agent.headless_reply(&String::from_utf8_lossy(&out)) {
+            Err(e) if said.iter().all(u8::is_ascii_whitespace) => e,
+            _ => String::from_utf8_lossy(&said).into_owned(),
+        };
+        bail!("the model call failed ({status}){}", last_words(&said));
     }
     agent
         .headless_reply(&String::from_utf8_lossy(&out))
