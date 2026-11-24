@@ -124,10 +124,13 @@ fn a_guarded_test_you_fix_is_yours_once_you_say_the_guard_again() {
     git(&e.repo(), &["commit", "-q", "-m", "tests"]);
     let t = e.new_task("A test of mine was wrong");
     e.ok(&["check", &t, "--guard", "tests/*", "--", "true"]);
-    std::fs::write(e.repo().join("tests/a.txt"), "expects 39\n").unwrap();
+    // (Of another size: git cannot tell a change of the same size made
+    // within the second.)
+    std::fs::write(e.repo().join("tests/a.txt"), "expects 39, fixed\n").unwrap();
     assert!(e.ok(&["check", &t, "--now"]).contains("touched tests/a.txt"));
     e.ok(&["check", &t, "--guard", "tests/*"]);
-    assert!(e.ok(&["check", &t, "--now"]).contains("✓ pass"));
+    let said = e.ok(&["check", &t, "--now"]);
+    assert!(said.contains("✓ pass"), "{said}");
 }
 
 #[test]
