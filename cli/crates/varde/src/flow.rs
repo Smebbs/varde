@@ -2053,10 +2053,11 @@ pub fn draw(
         name: &dyn Fn(&str) -> String,
     ) {
         let text = lines.iter().find(|l| l.0 == id).map(|l| l.1.clone()).unwrap_or_default();
-        let others: Vec<String> = edges
+        // Drawn under its last upstream, after the others; those named.
+        let ups: Vec<&(String, String, String)> = edges.iter().filter(|e| e.0 == id).collect();
+        let others: Vec<String> = ups
             .iter()
-            .filter(|e| e.0 == id)
-            .skip(1)
+            .take(ups.len().saturating_sub(1))
             // Unnamed (a recipe's steps, whose line starts with its id), by its id.
             .map(|e| {
                 let n = name(&e.1);
@@ -2069,7 +2070,7 @@ pub fn draw(
             .collect();
         let also =
             if others.is_empty() { String::new() } else { format!("  (also after {})", others.join(", ")) };
-        let gate = edges.iter().find(|e| e.0 == id).filter(|e| e.2 == "approved").map_or("", |_| "T ");
+        let gate = ups.last().filter(|e| e.2 == "approved").map_or("", |_| "T ");
         let branch = if root {
             ""
         } else if last {
@@ -2084,7 +2085,7 @@ pub fn draw(
         let kids: Vec<&String> = lines
             .iter()
             .map(|l| &l.0)
-            .filter(|k| edges.iter().find(|e| &e.0 == *k).is_some_and(|e| e.1 == id) && !placed.contains(k))
+            .filter(|k| edges.iter().rfind(|e| &e.0 == *k).is_some_and(|e| e.1 == id) && !placed.contains(k))
             .collect();
         let next =
             if root { String::new() } else { format!("{prefix}{}", if last { "   " } else { "│  " }) };
@@ -2762,8 +2763,8 @@ mod tests {
             vec![
                 "SPEC  spec",
                 "├─ STORE  store",
-                "│  └─ T INTEGRATE  integrate  (also after api (approved))",
                 "└─ API  api",
+                "   └─ T INTEGRATE  integrate  (also after store (approved))",
             ]
         );
         let m = mermaid(&lines, &edges, &|s| s.to_string());
