@@ -3395,15 +3395,19 @@ line, RET shows it."
          (after (plist-get flow :after))
          (before (plist-get flow :before))
          (profile (plist-get flow :profile))
-         (recipe (plist-get flow :recipe)))
+         (recipe (plist-get flow :recipe))
+         ;; What is next, as the board says it, and the key that takes it on.
+         (next (plist-get flow :next))
+         (said (and next
+                    (concat "· " (plist-get next :label)
+                            (if (string-prefix-p "◆" (plist-get next :label)) "  (A approves)" "")))))
     (when (or check lp after before profile recipe)
       (when (org-varde--view-heading "loop" (cond (lp "Loop") ((or after before) "Trail") (check "Check") (t "Runs on"))
-                                     (and lp (plist-get lp :words) (concat "· " (plist-get lp :words)))
-                                     t)
+                                     said t)
         (when (or profile recipe)
           (org-varde--view-line
-           (org-varde--quiet (string-join (delq nil (list (and profile (concat "runs on " profile))
-                                                          (and recipe (concat "made from recipe " recipe))))
+           (org-varde--quiet (string-join (delq nil (list profile
+                                                          (and recipe (concat "recipe " (car (split-string recipe "@"))))))
                                           " · "))))
         (when check
           (org-varde--view-line

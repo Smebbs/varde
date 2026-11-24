@@ -2117,17 +2117,8 @@ pub fn show(paths: &Paths, store: &Store, task: &str) -> Result<Vec<String>> {
             store.conn.query_row("SELECT state FROM task WHERE id = ?1", [t], |r| r.get(0))?;
         Ok(core::row(&store.conn, t, &state, now, &alive)?.map(|f| f.label))
     };
-    // What is next: the board's word for it, and what to do.
-    if let Some(next) = label(task)? {
-        let todo = match next.as_str() {
-            n if n.starts_with("◆ approve its plan") => {
-                format!(": read {} in its worktree, then varde approve {short}", crate::recipe::TRAIL)
-            }
-            n if n.starts_with("◆") => format!(": varde approve {short}"),
-            n if n.starts_with("✓ verified") => format!(": varde done {short} lands it"),
-            _ => String::new(),
-        };
-        out.push(format!("Next    {next}{todo}"));
+    if let Some((next, _, todo)) = next_of(store, task, now)? {
+        out.push(format!("Next    {next}{}", todo.map(|t| format!(": {t}")).unwrap_or_default()));
     } else if output.as_deref() == Some("trail") {
         out.push(format!("Next    {short} has written no {} yet", crate::recipe::TRAIL));
     }
@@ -2294,6 +2285,28 @@ pub fn state_words(st: &State) -> String {
     }
 }
 
+/// What is next for `task`: the board's word for it, its tone, and the
+/// command that takes it on, where one does.
+pub fn next_of(
+    store: &Store,
+    task: &str,
+    now: i64,
+) -> Result<Option<(String, &'static str, Option<String>)>> {
+    let alive = |pid: i64, start: i64| crate::process::alive(pid, start);
+    let state: String = store.conn.query_row("SELECT state FROM task WHERE id = ?1", [task], |r| r.get(0))?;
+    let Some(f) = core::row(&store.conn, task, &state, now, &alive)? else { return Ok(None) };
+    let short = task::short(task);
+    let todo = match f.label.as_str() {
+        n if n.starts_with("◆ approve its plan") => {
+            Some(format!("read {} in its worktree, then varde approve {short}", crate::recipe::TRAIL))
+        }
+        n if n.starts_with("◆") => Some(format!("varde approve {short}")),
+        n if n.starts_with("✓ verified") => Some(format!("varde done {short} lands it")),
+        _ => None,
+    };
+    Ok(Some((f.label, f.tone, todo)))
+}
+
 /// The same, as `show --json` has it.
 pub fn json(paths: &Paths, store: &Store, task: &str) -> Result<serde_json::Value> {
     let now = now_ms();
@@ -2336,7 +2349,10 @@ pub fn json(paths: &Paths, store: &Store, task: &str) -> Result<serde_json::Valu
         store.conn.query_row("SELECT profile, recipe, sandbox FROM task WHERE id = ?1", [task], |r| {
             Ok((r.get(0)?, r.get(1)?, r.get(2)?))
         })?;
+    let next = next_of(store, task, now)?
+        .map(|(label, tone, todo)| serde_json::json!({"label": label, "tone": tone, "todo": todo}));
     Ok(serde_json::json!({
+        "next": next,
         "profile": profile, "recipe": recipe, "before": before,
         "sandbox": {"name": sandbox.as_deref().unwrap_or("default"), "words": sandbox_words(sandbox.as_deref())},
         "check": check, "last_check": last, "loop": lp,

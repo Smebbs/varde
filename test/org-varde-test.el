@@ -2156,7 +2156,7 @@ the question, or nil."
 ;;; --- Loops, checks and trails -----------------------------------------------
 
 (defconst org-varde-test--flow
-  (concat ",\"flow\":{\"profile\":\"fast\",\"recipe\":\"bugfix@abc\",\"before\":[\"T0000000000000000000NEXT11\"],"
+  (concat ",\"flow\":{\"next\":{\"label\":\"↺ next round on deep\",\"tone\":\"working\",\"todo\":null},\"profile\":\"fast\",\"recipe\":\"bugfix@abc\",\"before\":[\"T0000000000000000000NEXT11\"],"
           "\"check\":{\"cmd\":\"cargo test\",\"review\":false,\"guard\":[\"tests/*\"],\"again\":1,\"running\":false,"
           "\"words\":\"`cargo test`; guarding tests/*\"},"
           "\"sandbox\":{\"name\":\"default\",\"words\":\"default, in bwrap\"},"
@@ -2177,8 +2177,8 @@ the question, or nil."
   (org-varde-test-with-varde
     (let ((org-varde-test--shown (concat (string-remove-suffix "}" org-varde-test--shown) org-varde-test--flow "}")))
       (org-varde-test--viewing
-        (should (string-match-p "^Loop · round 3 next, on deep$" (buffer-string)))
-        (should (string-match-p "runs on fast · made from recipe bugfix@abc" (buffer-string)))
+        (should (string-match-p "^Loop · ↺ next round on deep$" (buffer-string)))
+        (should (string-match-p "fast · recipe bugfix$" (buffer-string)))
         (should (string-match-p "Check  `cargo test`; guarding tests/\\*" (buffer-string)))
         (should (string-match-p "Sandbox  default, in bwrap" (buffer-string)))
         (should (string-match-p "#1  fast      3m  ✗ 1 failed" (buffer-string)))
