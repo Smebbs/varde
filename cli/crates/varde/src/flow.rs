@@ -1470,8 +1470,17 @@ fn review(
                   change does not do what the task asks, breaks the rubric, or weakens or removes a test. Then \
                   at most eight findings, one per line, each citing a file and line (path:line). Nothing else.";
     let model = profile.model.clone();
-    let answer = match crate::job::ask_model(&paths.home, agent.as_ref(), model.as_deref(), system, &material)
-    {
+    // As long as a check may take: a strong model reading a diff at high
+    // effort takes minutes.
+    let limit = Duration::from_secs(config::get().loops.check_minutes.max(1) * 60);
+    let answer = match crate::job::ask_model(
+        &paths.home,
+        agent.as_ref(),
+        model.as_deref(),
+        system,
+        &material,
+        limit,
+    ) {
         Ok(a) => a.text,
         Err(e) => return Ok(Found::error(&format!("the review failed: {e:#}"))),
     };

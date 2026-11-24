@@ -16,6 +16,9 @@ Notable changes to varde and org-varde.
   failure, and past its last profile a loop stays there.
 - A check's guard given again takes its paths as they are now, so a
   guarded test you fix yourself no longer flags every later round.
+- A check's review may take as long as a check (`loops.check_minutes`),
+  not the three minutes of a cairn update: a strong model at high effort
+  timed out and stopped the loop.
 
 ## 1.6.0-beta3 - 2026-11-23
 

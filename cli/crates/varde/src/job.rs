@@ -17,6 +17,7 @@ use crate::{now_ms, Paths};
 
 /// Characters of transcript digest one update reads.
 const DIGEST_BUDGET: usize = 12_000;
+/// How long a cairn update's model may take.
 const MODEL_TIMEOUT: Duration = Duration::from_secs(180);
 
 /// Queue a fold of `run` if `kind` calls for one, and start it detached.
@@ -335,7 +336,7 @@ pub(crate) fn ask(
     system: &str,
     prompt: &str,
 ) -> Result<varde_agent::Answer> {
-    ask_model(home, agent, crate::config::get().memory.model.as_deref(), system, prompt)
+    ask_model(home, agent, crate::config::get().memory.model.as_deref(), system, prompt, MODEL_TIMEOUT)
 }
 
 /// The same on `model`: a check's review asks the review profile's.
@@ -345,6 +346,7 @@ pub(crate) fn ask_model(
     model: Option<&str>,
     system: &str,
     prompt: &str,
+    limit: Duration,
 ) -> Result<varde_agent::Answer> {
     let config = crate::config::get();
     let (argv, env) = agent.headless(model, system);
@@ -383,10 +385,10 @@ pub(crate) fn ask_model(
         if let Some(status) = child.try_wait()? {
             break status;
         }
-        if started.elapsed() > MODEL_TIMEOUT {
+        if started.elapsed() > limit {
             let _ = child.kill();
             let _ = child.wait();
-            bail!("the model did not answer within {}s", MODEL_TIMEOUT.as_secs());
+            bail!("the model did not answer within {}s", limit.as_secs());
         }
         std::thread::sleep(Duration::from_millis(100));
     };
