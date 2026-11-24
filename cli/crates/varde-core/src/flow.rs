@@ -160,21 +160,12 @@ impl State {
     }
 }
 
-/// With nothing but a model's review to decide, a loop gets this many
-/// rounds and then ends with you.
-pub const REVIEW_ONLY_MAX: i64 = 2;
-
 /// Where a loop stands, from its rounds (oldest first) and the checks
 /// run since it was set (oldest first). `base` is the profile a round
-/// runs on before any escalation; `review_only` says no command decides.
-pub fn derive(
-    def: &LoopDef,
-    base: Option<&str>,
-    review_only: bool,
-    rounds: &[Round],
-    checks: &[Check],
-) -> State {
-    let max = if review_only { def.max.min(REVIEW_ONLY_MAX) } else { def.max };
+/// runs on before any escalation. A review or an agent's verdict alone
+/// is as much a check as a command: the same rounds, the same stops.
+pub fn derive(def: &LoopDef, base: Option<&str>, rounds: &[Round], checks: &[Check]) -> State {
+    let max = def.max;
     let done = rounds.len() as i64;
     let Some(last) = rounds.last() else {
         return if def.paused {
@@ -415,14 +406,6 @@ pub fn attending(conn: &Connection, task: &str, now: i64, alive: &dyn Fn(i64, i6
 /// A run recorded this long ago and never launched is not coming.
 const LAUNCHING_MS: i64 = 2 * 60 * 1000;
 
-/// Whether the task's check is a model's review alone.
-pub fn review_only(conn: &Connection, task: &str) -> Result<bool> {
-    Ok(conn
-        .query_row("SELECT cmd IS NULL AND review FROM check_def WHERE task = ?1", [task], |r| r.get(0))
-        .optional()?
-        .unwrap_or(false))
-}
-
 /// Where a task's loop stands, if it has one.
 pub fn state(
     conn: &Connection,
@@ -434,7 +417,7 @@ pub fn state(
     let base: Option<String> =
         conn.query_row("SELECT profile FROM task WHERE id = ?1", [task], |r| r.get(0))?;
     let (rounds, checks) = with_turns(conn, task, &def, now, alive)?;
-    let st = derive(&def, base.as_deref(), review_only(conn, task)?, &rounds, &checks);
+    let st = derive(&def, base.as_deref(), &rounds, &checks);
     // A session of yours on it: the loop goes on there, a turn a round.
     if attending(conn, task, now, alive)? && matches!(st, State::Due { .. } | State::Checking { .. }) {
         return Ok(Some(State::Attended { round: rounds.len() as i64 + 1 }));
@@ -666,7 +649,7 @@ pub fn row(
                 .map(|s| format!(" ✗ {s}"))
                 .unwrap_or_default())
         };
-        let max = if review_only(conn, task)? { def.max.min(REVIEW_ONLY_MAX) } else { def.max };
+        let max = def.max;
         // The rounds are a budget, not news: said only of the last one.
         let last = |round: i64| if round >= max { " · last round" } else { "" };
         let on = |p: &Option<String>| p.as_ref().map(|p| format!(" on {p}")).unwrap_or_default();
@@ -776,7 +759,7 @@ mod tests {
     #[test]
     fn a_new_loop_starts_its_first_round() {
         assert_eq!(
-            derive(&def(3, &[]), Some("build"), false, &[], &[]),
+            derive(&def(3, &[]), Some("build"), &[], &[]),
             State::Due { round: 1, profile: Some("build".into()) }
         );
     }
@@ -784,13 +767,10 @@ mod tests {
     #[test]
     fn a_round_at_work_then_its_check_then_the_next() {
         let d = def(3, &[]);
-        assert_eq!(derive(&d, None, false, &[round(1, true)], &[]), State::Working { round: 1 });
-        assert_eq!(
-            derive(&d, None, false, &[round(1, false)], &[]),
-            State::Checking { round: 1, run: "r1".into() }
-        );
+        assert_eq!(derive(&d, None, &[round(1, true)], &[]), State::Working { round: 1 });
+        assert_eq!(derive(&d, None, &[round(1, false)], &[]), State::Checking { round: 1, run: "r1".into() });
         let c = [check(1, Verdict::Fail, "a", "t1")];
-        assert_eq!(derive(&d, None, false, &[round(1, false)], &c), State::Due { round: 2, profile: None });
+        assert_eq!(derive(&d, None, &[round(1, false)], &c), State::Due { round: 2, profile: None });
     }
 
     #[test]
@@ -798,9 +778,9 @@ mod tests {
         let d = def(2, &[]);
         let rs = [round(1, false), round(2, false)];
         let pass = [check(1, Verdict::Fail, "a", "t1"), check(2, Verdict::Pass, "", "t2")];
-        assert_eq!(derive(&d, None, false, &rs, &pass), State::Verified { rounds: 2 });
+        assert_eq!(derive(&d, None, &rs, &pass), State::Verified { rounds: 2 });
         let fail = [check(1, Verdict::Fail, "a", "t1"), check(2, Verdict::Fail, "b", "t2")];
-        assert!(matches!(derive(&d, None, false, &rs, &fail), State::Spent { rounds: 2, .. }));
+        assert!(matches!(derive(&d, None, &rs, &fail), State::Spent { rounds: 2, .. }));
     }
 
     #[test]
@@ -809,7 +789,7 @@ mod tests {
         let rs = [round(1, false), round(2, false)];
         let same = [check(1, Verdict::Fail, "a", "t1"), check(2, Verdict::Fail, "a", "t1")];
         assert_eq!(
-            derive(&d, Some("build"), false, &rs, &same),
+            derive(&d, Some("build"), &rs, &same),
             State::Due { round: 3, profile: Some("deep".into()) }
         );
         let rs3 = [round(1, false), round(2, false), round(3, false)];
@@ -818,12 +798,12 @@ mod tests {
             check(2, Verdict::Fail, "a", "t1"),
             check(3, Verdict::Fail, "a", "t1"),
         ];
-        assert_eq!(derive(&d, Some("build"), false, &rs3, &again), State::Stuck { rounds: 3 });
+        assert_eq!(derive(&d, Some("build"), &rs3, &again), State::Stuck { rounds: 3 });
         // The files changed: not stuck, but failing the same way still
         // moves it up, and past the last it stays there.
         let moved = [check(1, Verdict::Fail, "a", "t1"), check(2, Verdict::Fail, "a", "t2")];
         assert_eq!(
-            derive(&d, Some("build"), false, &rs, &moved),
+            derive(&d, Some("build"), &rs, &moved),
             State::Due { round: 3, profile: Some("deep".into()) }
         );
         let moved3 = [
@@ -832,13 +812,13 @@ mod tests {
             check(3, Verdict::Fail, "a", "t3"),
         ];
         assert_eq!(
-            derive(&d, Some("build"), false, &rs3, &moved3),
+            derive(&d, Some("build"), &rs3, &moved3),
             State::Due { round: 4, profile: Some("deep".into()) }
         );
         // A different failure: no repeat, its own profile.
         let other = [check(1, Verdict::Fail, "a", "t1"), check(2, Verdict::Fail, "b", "t2")];
         assert_eq!(
-            derive(&d, Some("build"), false, &rs, &other),
+            derive(&d, Some("build"), &rs, &other),
             State::Due { round: 3, profile: Some("build".into()) }
         );
     }
@@ -847,7 +827,7 @@ mod tests {
     fn flagged_wins_over_everything() {
         let d = def(1, &[]);
         let c = [check(1, Verdict::Flagged, "", "t1")];
-        assert!(matches!(derive(&d, None, false, &[round(1, false)], &c), State::Flagged { .. }));
+        assert!(matches!(derive(&d, None, &[round(1, false)], &c), State::Flagged { .. }));
     }
 
     #[test]
@@ -856,21 +836,21 @@ mod tests {
         let mut r = round(1, false);
         r.asked = true;
         assert_eq!(
-            derive(&d, None, false, &[r.clone()], &[check(1, Verdict::Fail, "a", "t")]),
+            derive(&d, None, &[r.clone()], &[check(1, Verdict::Fail, "a", "t")]),
             State::Asked { rounds: 1 }
         );
         assert_eq!(
-            derive(&d, None, false, &[r], &[check(1, Verdict::Pass, "", "t")]),
+            derive(&d, None, &[r], &[check(1, Verdict::Pass, "", "t")]),
             State::Verified { rounds: 1 }
         );
     }
 
     #[test]
-    fn a_review_alone_gets_two_rounds() {
+    fn a_review_alone_gets_the_loops_rounds() {
         let d = def(5, &[]);
         let rs = [round(1, false), round(2, false)];
         let c = [check(1, Verdict::Fail, "a", "t1"), check(2, Verdict::Fail, "b", "t2")];
-        assert!(matches!(derive(&d, None, true, &rs, &c), State::Spent { .. }));
+        assert!(matches!(derive(&d, None, &rs, &c), State::Due { round: 3, .. }));
     }
 
     #[test]
@@ -881,6 +861,6 @@ mod tests {
         let mut b = round(2, false);
         b.exit_code = Some(1);
         let c = [check(1, Verdict::Fail, "a", "t1"), check(2, Verdict::Fail, "b", "t2")];
-        assert!(matches!(derive(&d, None, false, &[a, b], &c), State::Error { .. }));
+        assert!(matches!(derive(&d, None, &[a, b], &c), State::Error { .. }));
     }
 }

@@ -933,8 +933,9 @@ fix.loop.max=5, fix.loop.escalate=deep,deep:xhigh.
 Rules of thumb
 - Few steps: 1 to 4 (a trail a plan writes: 2 to 6). A step is a whole session;
   steps that run at the same time need files of their own.
-- Every step that loops has a check, and a command beats a review: a review
-  alone gets two rounds and then the user.
+- Every step that loops has a check: a command, a review (`review = true`
+  with a rubric) or an agent that verifies (`verify`), alone or together.
+  A command is the hardest to argue with; use one where one exists.
 - Guard what the check reads (tests/*) when a step must not change it.
 - Put the user where only they can judge: gate = "approved" on a spec or a repro.
 - No branch names or merge steps in prompts: varde starts a step from what it

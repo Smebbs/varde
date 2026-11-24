@@ -40,6 +40,9 @@ Notable changes to varde and org-varde.
   proposes, from its `trail.toml`. A recipe's drawing names a step's
   other upstreams (it printed `also after , `), and leaves out what goes
   without saying: `output branch`, and three rounds.
+- A loop whose check is a review or a verifier alone gets its `--max`
+  rounds like any other, not a hidden two: a review agent is as much
+  the check as a command.
 - Planners are told varde starts each step from what it needs and names
   the branches to merge, so plans carry no branch names or merging.
 

@@ -692,8 +692,10 @@ are what those lack.
   `varde_core::flow::derive`, a pure function of the rounds and checks:
   flagged, error, verified, spent, stuck (the same fingerprint on the
   same tree twice, after the escalation list runs out), asked (a round's
-  last words a question), then working, checking or due. A review-only
-  check gets 2 rounds. Each repeat of a fingerprint, the tree changed or not,
+  last words a question), then working, checking or due. A check that
+  is a review or a verifier alone gets the loop's rounds like any other:
+  a model's verdict is a check, and the budget, the stuck rule and the
+  guard bound it as they do a command. Each repeat of a fingerprint, the tree changed or not,
   moves the next round one profile up the escalation list, and it stays
   on the last; a review's or a verifier's rejection has one fingerprint
   each, however it is worded.
