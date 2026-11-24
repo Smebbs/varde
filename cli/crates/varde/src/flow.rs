@@ -1915,30 +1915,25 @@ pub fn trail(paths: &Paths, reference: &str, go: bool, format: &str, as_json: bo
         drop(store);
         crate::schedule::tick(paths)?;
         let store = paths.open(BUSY)?;
-        return print_trail(&store, &tasks, format, as_json);
+        return print_trail(&store, &tasks, format, as_json, &[]);
     }
-    print_trail(&store, &tasks, format, as_json)?;
     // A plan not yet approved: the trail it proposes, drawn.
     let plan: bool = store.conn.query_row(
         "SELECT coalesce(output, '') = 'trail' FROM task WHERE id = ?1",
         [&id],
         |r| r.get(0),
     )?;
-    if plan && !as_json && format != "mermaid" && !core::approved(&store.conn, &id)? {
+    let mut proposed = vec![];
+    if plan && !core::approved(&store.conn, &id)? {
         if let Some(f) = checkout(&store, &id)?.map(|c| c.join(crate::recipe::TRAIL)).filter(|f| f.is_file())
         {
-            match crate::recipe::proposed(&f) {
-                Ok(lines) => {
-                    println!("\nWhat it makes once you approve it (varde approve {}):", task::short(&id));
-                    for l in lines {
-                        println!("  {l}");
-                    }
-                }
-                Err(e) => println!("\nIts {} cannot be read: {e:#}", crate::recipe::TRAIL),
-            }
+            proposed = match crate::recipe::proposed(&f) {
+                Ok(lines) => lines,
+                Err(e) => vec![format!("its {} cannot be read: {e:#}", crate::recipe::TRAIL)],
+            };
         }
     }
-    Ok(())
+    print_trail(&store, &tasks, format, as_json, &proposed)
 }
 
 /// One line per node of a trail: the facts `trail` and `recipe show` print.
@@ -1982,7 +1977,13 @@ fn nodes(store: &Store, tasks: &[String]) -> Result<Vec<Node>> {
         .collect()
 }
 
-fn print_trail(store: &Store, tasks: &[String], format: &str, as_json: bool) -> Result<()> {
+fn print_trail(
+    store: &Store,
+    tasks: &[String],
+    format: &str,
+    as_json: bool,
+    proposed: &[String],
+) -> Result<()> {
     let nodes = nodes(store, tasks)?;
     if as_json {
         let v: Vec<_> = nodes
@@ -1995,7 +1996,7 @@ fn print_trail(store: &Store, tasks: &[String], format: &str, as_json: bool) -> 
                 })
             })
             .collect();
-        println!("{}", serde_json::json!({"v": 1, "tasks": v}));
+        println!("{}", serde_json::json!({"v": 1, "tasks": v, "proposed": proposed}));
         return Ok(());
     }
     let lines: Vec<(String, String)> = nodes
@@ -2018,6 +2019,12 @@ fn print_trail(store: &Store, tasks: &[String], format: &str, as_json: bool) -> 
     } else {
         for l in draw(&lines, &edges, &|id| task::short(id)) {
             println!("{l}");
+        }
+        if !proposed.is_empty() {
+            println!("\nWhat it makes once you approve it (varde approve {}):", task::short(&tasks[0]));
+            for l in proposed {
+                println!("  {l}");
+            }
         }
     }
     Ok(())

@@ -2245,6 +2245,20 @@ the question, or nil."
       (should (member (format "set %s --profile fast" org-varde-test--id) calls))
       (should (member (format "check %s --review --verify use /verify-app --guard tests/* -- cargo test" org-varde-test--id) calls)))))
 
+(ert-deftest org-varde-trail-draws-what-a-plan-proposes-before-it-is-approved ()
+  (org-varde-test-with-varde
+    (org-varde-test-reply
+     "trail" (concat "{\"v\":1,\"tasks\":["
+                     "{\"task\":\"T0000000000000000000AAA111\",\"short\":\"aaa111\",\"title\":\"Plan\",\"label\":\"◆ approve its plan\",\"after\":[]}],"
+                     "\"proposed\":[\"store · build\",\"└─ api · build\"]}"))
+    (with-temp-buffer
+      (insert (propertize "row" 'org-varde-row (list :task "T0000000000000000000AAA111" :short "aaa111")))
+      (goto-char (point-min))
+      (save-window-excursion (org-varde-trail)))
+    (with-current-buffer org-varde-trail-buffer
+      (should (string-match-p "^What it makes once you approve it (A approves)$" (buffer-string)))
+      (should (string-match-p "^  └─ api · build$" (buffer-string))))))
+
 (ert-deftest org-varde-trail-draws-a-tree-and-shows-its-tasks ()
   (org-varde-test-with-varde
     (org-varde-test-reply

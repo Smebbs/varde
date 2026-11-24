@@ -3572,6 +3572,12 @@ for loops and checks work on its lines."
       (dolist (n nodes)
         (unless (or (plist-get n :after) (member (plist-get n :task) placed))
           (walk n "" t t))))
+    ;; A plan not yet approved: the trail it proposes.
+    (when-let* ((proposed (append (plist-get data :proposed) nil)))
+      (insert "\n" (propertize "What it makes once you approve it" 'face 'org-varde-heading)
+              (org-varde--quiet " (A approves)\n"))
+      (dolist (l proposed)
+        (insert (org-varde--quiet (concat "  " l "\n")))))
     (goto-char (point-min))
     (if-let* ((m (and here (text-property-search-forward 'org-varde-trail-task here t))))
         (goto-char (prop-match-beginning m))
