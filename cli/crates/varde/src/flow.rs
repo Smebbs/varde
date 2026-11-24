@@ -130,6 +130,43 @@ fn put_back(dir: &Path, was: &str, now: &str) -> bool {
     with(&["read-tree", was]) && with(&["checkout-index", "-a", "-f"])
 }
 
+/// The tree `base` with the paths `guard` matches as they are in `now`.
+fn with_guarded(dir: &Path, base: &str, now: &str, guard: &[String]) -> Option<String> {
+    let scratch = tempfile::NamedTempFile::new().ok()?;
+    let with = |args: &[&str], input: Option<&[u8]>| {
+        let mut c = crate::git::command(dir, args);
+        c.env("GIT_INDEX_FILE", scratch.path());
+        match input {
+            Some(i) => crate::git::bounded_input(&mut c, i),
+            None => crate::git::bounded(&mut c),
+        }
+        .ok()
+        .filter(|o| o.status.success())
+    };
+    with(&["read-tree", base], None)?;
+    let guarded: Vec<String> = changed(dir, base, now)
+        .into_iter()
+        .filter(|p| guard.iter().any(|g| varde_core::steward::glob(g, p)))
+        .collect();
+    let mut info = String::new();
+    for p in &guarded {
+        let entry = with(&["ls-tree", "-z", now, "--", p], None)?;
+        match String::from_utf8_lossy(&entry.stdout).trim_end_matches('\0').split_once('\t') {
+            // As it is now: mode, blob.
+            Some((meta, _)) => {
+                let mut f = meta.split(' ');
+                let (mode, _, oid) = (f.next()?, f.next()?, f.next()?);
+                info.push_str(&format!("{mode} {oid}\t{p}\0"));
+            }
+            // Gone now: gone from the base.
+            None => info.push_str(&format!("0 {}\t{p}\0", "0".repeat(40))),
+        }
+    }
+    with(&["update-index", "-z", "--index-info"], Some(info.as_bytes()))?;
+    let out = with(&["write-tree"], None)?;
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
+}
+
 fn changed(dir: &Path, a: &str, b: &str) -> Vec<String> {
     crate::git::bounded(&mut crate::git::command(dir, &["diff-tree", "-r", "--name-only", a, b]))
         .map(|o| String::from_utf8_lossy(&o.stdout).lines().map(String::from).collect())
@@ -269,10 +306,15 @@ pub fn check(paths: &Paths, reference: &str, a: CheckArgs) -> Result<()> {
             d.verify = Some(rubric_arg(&v)?).filter(|v| !v.trim().is_empty());
         }
         // Given again, the guard takes its files as they are now: a test
-        // you changed is yours (a session cannot set a check).
+        // you changed is yours (a session cannot set a check). Only its
+        // files: the rest of the base is what the review reads the change
+        // against.
         if !a.guard.is_empty() {
+            let checkout = checkout(&store, &id)?;
+            if let (Some(base), Some(dir)) = (d.base_tree.clone(), checkout) {
+                d.base_tree = tree(&dir).and_then(|now| with_guarded(&dir, &base, &now, &a.guard));
+            }
             d.guard = a.guard;
-            d.base_tree = None;
         }
         if let Some(n) = a.again {
             d.again = n.max(1);
