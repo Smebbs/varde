@@ -390,7 +390,7 @@ impl View {
             facts.push("in the Inbox".into());
         }
         if let Some(p) = &d.project {
-            facts.push(format!("{} ({})", crate::list::project_name(Some(p)), tilde(p)));
+            facts.push(crate::list::project_name(Some(p)).to_string());
         }
         if let Some(o) = &d.origin {
             facts.push(format!("deferred from {}", task::short(o)));
@@ -405,16 +405,20 @@ impl View {
         if let Some(s) = &self.schedule {
             out.push((Part::Fact, format!("scheduled {s}")));
         }
-        if let Some(w) = d.worktree.as_ref().filter(|w| w.state == "active") {
-            out.push((Part::Fact, format!("worktree {} on {} from {}", tilde(&w.path), w.branch, w.base)));
-        }
-        if let Some(g) = &self.git {
-            out.push((Part::Fact, format!("git {g}")));
+        // What is next, first.
+        out.extend(self.flow.iter().filter(|l| l.starts_with("Next")).map(|l| (Part::Fact, l.clone())));
+        // Its git and where: one line.
+        let worktree = d.worktree.as_ref().filter(|w| w.state == "active");
+        match (&self.git, worktree) {
+            (Some(g), Some(w)) => out.push((Part::Fact, format!("Git     {g} · {}", tilde(&w.path)))),
+            (Some(g), None) => out.push((Part::Fact, format!("Git     {g}"))),
+            (None, Some(w)) => out.push((Part::Fact, format!("Git     {} on {}", tilde(&w.path), w.branch))),
+            (None, None) => {}
         }
         if let Some(p) = &self.pr {
             out.push((Part::Fact, format!("PR {p}")));
         }
-        out.extend(self.flow.iter().map(|l| (Part::Fact, l.clone())));
+        out.extend(self.flow.iter().filter(|l| !l.starts_with("Next")).map(|l| (Part::Fact, l.clone())));
         out
     }
 
@@ -425,12 +429,21 @@ impl View {
         if let Some(b) = d.body.as_deref().filter(|b| !b.trim().is_empty()) {
             out.push((Part::Heading, "Context".into()));
             // As text: a session can write a task's context, and nothing it
-            // writes steers the terminal.
-            out.extend(b.lines().map(|l| {
+            // writes steers the terminal. A long one, a recipe's prompt
+            // mostly, folded: `varde edit` shows it whole.
+            let lines: Vec<&str> = b.lines().collect();
+            let fold = lines.len() > 8;
+            out.extend(lines.iter().take(if fold { 6 } else { lines.len() }).map(|l| {
                 let l: String =
                     l.chars().map(|c| if c.is_control() && c != '\t' { '?' } else { c }).collect();
                 (Part::Text, format!("  {l}"))
             }));
+            if fold {
+                out.push((
+                    Part::Quiet,
+                    format!("  … {} more lines (varde edit {} shows them)", lines.len() - 6, d.short),
+                ));
+            }
         }
         let runs: Vec<&task::RunDetail> = d.runs.iter().rev().collect();
         if !runs.is_empty() {

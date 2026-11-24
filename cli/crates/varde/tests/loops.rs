@@ -71,7 +71,7 @@ fn a_loop_starts_fresh_rounds_until_its_check_passes() {
     let r = row(&board, &t);
     assert_eq!(r["flow"]["label"], "✓ verified", "{r}");
     assert!(group(&board, "needs_you").iter().any(|x| x["short"] == t.as_str()), "{board}");
-    assert!(e.ok(&["show", &t]).contains("Loop    verified after 2 rounds"));
+    assert!(e.ok(&["show", &t]).contains("Next    ✓ verified"));
     // Followed once it is over: what it ended on, and then it stops.
     let followed = e.ok(&["follow", &t]);
     assert!(followed.contains("── round 2") && followed.contains("── check: ✓ pass"), "{followed}");
@@ -166,7 +166,7 @@ fn a_session_of_yours_attends_the_loop() {
     assert!(text.contains("Round 2 of 3") && text.contains("the test failed"), "{text}");
     assert_eq!(loop_state(&e, &t), "attended");
     assert_eq!(row(&e.board(), &t)["flow"]["label"], "↺ with you");
-    assert!(e.ok(&["show", &t]).contains("in your session"));
+    assert!(e.ok(&["show", &t]).contains("↺ with you"));
     // Left, the loop goes on in the background.
     unsafe { libc::kill(session.id() as i32, libc::SIGTERM) };
     session.wait().unwrap();
@@ -218,7 +218,7 @@ output = "report"
     assert!(e.argv()[1].contains("This task follows"), "{:?}", e.argv());
     let drawn = e.ok(&["trail", &a]);
     assert!(drawn.contains("├─") || drawn.contains("└─"), "{drawn}");
-    assert!(e.ok(&["show", &b]).contains("made from recipe two@"));
+    assert!(e.ok(&["show", &b]).contains("recipe two"));
 }
 
 #[test]
@@ -337,7 +337,7 @@ fn a_round_runs_in_the_sandbox_and_reaches_only_its_checkout() {
     assert!(argv[0].contains("--allowedTools Bash WebFetch WebSearch"), "{argv:?}");
     assert!(argv[0].contains("You work in a sandbox"), "{argv:?}");
     let shown = e.cmd(&["show", &t]).env("VARDE_SANDBOX", "on").output().unwrap();
-    assert!(String::from_utf8_lossy(&shown.stdout).contains("Sandbox default, in bwrap"), "{shown:?}");
+    assert!(String::from_utf8_lossy(&shown.stdout).contains("sandbox default, in bwrap"), "{shown:?}");
 }
 
 #[test]
@@ -451,7 +451,7 @@ fn an_agent_verifies_the_work_as_asked_and_its_last_word_decides() {
     );
     let t = e.new_task("Write the work");
     let out = e.ok(&["check", &t, "--verify", "run it and use /verify-app"]);
-    assert!(out.contains("verified by an agent on review"), "{out}");
+    assert!(out.contains("verified by an agent on opus"), "{out}");
     e.ok(&["loop", &t, "--max", "2"]);
     assert_eq!(settle(&e, &t), "verified");
     let last = flow(&e, &t)["last_check"].clone();

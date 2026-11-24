@@ -26,6 +26,16 @@ Notable changes to varde and org-varde.
   (`↺ working ✗ 2 failed`, `↺ next round on deep`, `✓ verified`, `■
   stuck ✗ …`), not its round count, which is a budget: it is named only
   on the last round. `varde show` and `follow` still list every round.
+- The board lines up: one title column, and when a row is short of room
+  it drops how long ago, the project and git before it cuts what the
+  loop or check says. A loop at work no longer says "working" twice.
+- What waits on you is said where you act: a plan to approve reads `◆
+  approve its plan`, a step another waits on `◆ approve to go on`, and
+  the waiting one `⧗ after abc123`.
+- `varde show` leads with `Next` (what it is doing, or the command to
+  run), puts how it runs on one line (`Runs`), its git and worktree on
+  one (`Git`), lists rounds under `Rounds`, draws its trail a step a
+  line in the order they go, and folds a long context.
 
 ## 1.6.0-beta3 - 2026-11-23
 

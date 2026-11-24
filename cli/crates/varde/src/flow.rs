@@ -373,17 +373,20 @@ pub fn describe(d: &Def) -> String {
         (Some(c), n) => parts.push(format!("`{c}`, {n} passes in a row")),
         (None, _) => {}
     }
+    // The reviewer by its model, where its profile names one.
+    let who = || {
+        let name = d.reviewer.clone().unwrap_or_else(|| config::get().roles.review.clone());
+        config::get().profile(&name).and_then(|p| p.model.clone()).unwrap_or(name)
+    };
     if d.review {
-        let who = d.reviewer.clone().unwrap_or_else(|| config::get().roles.review.clone());
-        parts.push(format!("{}a review by {who}", if d.cmd.is_some() { "then " } else { "" }));
+        parts.push(format!("reviewed by {}", who()));
     }
     if d.verify.is_some() {
-        let who = d.reviewer.clone().unwrap_or_else(|| config::get().roles.review.clone());
-        parts.push(format!("{}verified by an agent on {who}", if parts.is_empty() { "" } else { "then " }));
+        parts.push(format!("verified by an agent on {}", who()));
     }
-    let mut out = parts.join(", ");
+    let mut out = parts.join(" + ");
     if !d.guard.is_empty() {
-        out.push_str(&format!("; guarding {}", d.guard.join(" ")));
+        out.push_str(&format!(" · guards {}", d.guard.join(" ")));
     }
     out
 }
@@ -2086,40 +2089,76 @@ pub fn mermaid(
 
 // ---------------------------------------------------------------- show
 
-/// The lines `varde show` prints for a task's check, loop and trail.
+/// The lines `varde show` prints for a task's check, loop and trail:
+/// what is next first, then how it runs, its check, its rounds and the
+/// trail it is in, a line for each step.
 pub fn show(paths: &Paths, store: &Store, task: &str) -> Result<Vec<String>> {
     let now = now_ms();
     let alive = |pid: i64, start: i64| crate::process::alive(pid, start);
     let mut out = vec![];
-    let (profile, recipe): (Option<String>, Option<String>) =
-        store.conn.query_row("SELECT profile, recipe FROM task WHERE id = ?1", [task], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })?;
-    match (profile, recipe) {
-        (Some(p), Some(r)) => out.push(format!("profile {p} · made from recipe {r}")),
-        (Some(p), None) => out.push(format!("profile {p}")),
-        (None, Some(r)) => out.push(format!("made from recipe {r}")),
-        (None, None) => {}
+    let short = task::short(task);
+    let (profile, recipe, state, named, auto, output): (
+        Option<String>,
+        Option<String>,
+        String,
+        Option<String>,
+        bool,
+        Option<String>,
+    ) = store.conn.query_row(
+        "SELECT profile, recipe, state, sandbox, coalesce(auto, 0), output FROM task WHERE id = ?1",
+        [task],
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+    )?;
+    let d = def(store, task)?;
+    let l = core::loop_of(&store.conn, task)?;
+    let trail = core::trail(&store.conn, task)?;
+    let label = |t: &str| -> Result<Option<String>> {
+        let state: String =
+            store.conn.query_row("SELECT state FROM task WHERE id = ?1", [t], |r| r.get(0))?;
+        Ok(core::row(&store.conn, t, &state, now, &alive)?.map(|f| f.label))
+    };
+    // What is next: the board's word for it, and what to do.
+    if let Some(next) = label(task)? {
+        let todo = match next.as_str() {
+            n if n.starts_with("◆ approve its plan") => {
+                format!(": read {} in its worktree, then varde approve {short}", crate::recipe::TRAIL)
+            }
+            n if n.starts_with("◆") => format!(": varde approve {short}"),
+            n if n.starts_with("✓ verified") => format!(": varde done {short} lands it"),
+            _ => String::new(),
+        };
+        out.push(format!("Next    {next}{todo}"));
+    } else if output.as_deref() == Some("trail") {
+        out.push(format!("Next    {short} has written no {} yet", crate::recipe::TRAIL));
     }
-    if let Some(d) = def(store, task)? {
-        out.push(format!("Check   {}", describe(&d)));
+    // How it runs: one line.
+    let mut runs = vec![];
+    runs.extend(profile);
+    if named.is_some() || auto || d.is_some() || !trail.is_empty() {
+        runs.push(format!("sandbox {}", sandbox_words(named.as_deref())));
+    }
+    if let Some(r) = recipe {
+        runs.push(format!("recipe {}", r.split('@').next().unwrap_or(&r)));
+    }
+    if !runs.is_empty() {
+        out.push(format!("Runs    {}", runs.join(" · ")));
+    }
+    if let Some(d) = &d {
+        out.push(format!("Check   {}", describe(d)));
         if checking(paths, task) {
             out.push("        … checking now".into());
         }
-        if let Some(c) = core::last_check(&store.conn, task)? {
+        // A loop's rounds say each result; without one, the last here.
+        if let (None, Some(c)) = (&l, core::last_check(&store.conn, task)?) {
             out.push(format!("        last {}", result_line(&c, now)));
         }
     }
-    if let Some(l) = core::loop_of(&store.conn, task)? {
-        let st = core::state(&store.conn, task, now, &alive)?.context("a loop")?;
-        let esc = if l.escalate.is_empty() {
-            String::new()
-        } else {
-            format!(", escalating to {}", l.escalate.join(", "))
-        };
+    if let Some(l) = &l {
+        let esc =
+            if l.escalate.is_empty() { String::new() } else { format!(", then {}", l.escalate.join(", ")) };
         let budget = l.minutes.map(|m| format!(", {m} min")).unwrap_or_default();
-        out.push(format!("Loop    {} · at most {} rounds{budget}{esc}", state_words(&st), l.max));
-        let (rounds, checks) = core::with_turns(&store.conn, task, &l, now, &alive)?;
+        out.push(format!("Rounds  at most {}{budget}{esc}", l.max));
+        let (rounds, checks) = core::with_turns(&store.conn, task, l, now, &alive)?;
         for r in &rounds {
             let c = checks.iter().rev().find(|c| c.run.as_deref() == Some(&r.run));
             let mins = r
@@ -2154,58 +2193,54 @@ pub fn show(paths: &Paths, store: &Store, task: &str) -> Result<Vec<String>> {
             ));
         }
     }
-    let waits = core::waits(&store.conn, task)?;
-    let dependents: Vec<String> = store
-        .conn
-        .prepare("SELECT task FROM edge WHERE after = ?1")?
-        .query_map([task], |r| r.get(0))?
-        .collect::<rusqlite::Result<_>>()?;
-    let (named, auto): (Option<String>, bool) =
-        store.conn.query_row("SELECT sandbox, coalesce(auto, 0) FROM task WHERE id = ?1", [task], |r| {
-            Ok((r.get(0)?, r.get(1)?))
-        })?;
-    if named.is_some() || auto || def(store, task)?.is_some() || !waits.is_empty() {
-        out.push(format!("Sandbox {}", sandbox_words(named.as_deref())));
-    }
-    // A plan whose trail is yours to accept: where to read it first.
-    let output: Option<String> =
-        store.conn.query_row("SELECT output FROM task WHERE id = ?1", [task], |r| r.get(0))?;
-    if output.as_deref() == Some("trail") {
-        let short = task::short(task);
-        match checkout(store, task)?.map(|c| c.join(crate::recipe::TRAIL)).filter(|f| f.is_file()) {
-            Some(f) => out.push(format!(
-                "Plan    varde recipe show {} draws its trail; varde approve {short} makes it and sets it going",
-                f.display()
-            )),
-            None => out.push(format!("Plan    {short} has written no {} yet", crate::recipe::TRAIL)),
-        }
-    }
-    if !waits.is_empty() || !dependents.is_empty() {
-        let w: Vec<String> = waits
-            .iter()
-            .map(|w| {
-                format!(
-                    "{} {}{}",
-                    if w.met { "✓" } else { "⧗" },
-                    task::short(&w.after),
-                    if w.kind == "approved" { " (your approval)" } else { "" }
-                )
-            })
-            .collect();
-        let mut line = String::from("Trail  ");
-        if !w.is_empty() {
-            line.push_str(&format!(" after {}", w.join(", ")));
-        }
-        if !dependents.is_empty() {
-            line.push_str(&format!(
-                "{}before {}",
-                if w.is_empty() { " " } else { "; " },
-                dependents.iter().map(|d| task::short(d)).collect::<Vec<_>>().join(", ")
+    // The trail it is in, a line for each step, in order: where it stands
+    // and what each is doing.
+    if trail.len() > 1 {
+        out.push(format!("Trail   (varde trail {short} draws it)"));
+        // In the order they go: each after what it waits on.
+        let depth = |t: &str| -> Result<usize> {
+            let mut d = 0;
+            let mut at = vec![t.to_string()];
+            while d <= trail.len() {
+                let mut next = vec![];
+                for a in &at {
+                    let before: Vec<String> = store
+                        .conn
+                        .prepare_cached("SELECT after FROM edge WHERE task = ?1")?
+                        .query_map([a], |r| r.get(0))?
+                        .collect::<rusqlite::Result<_>>()?;
+                    next.extend(before);
+                }
+                if next.is_empty() {
+                    break;
+                }
+                d += 1;
+                at = next;
+            }
+            Ok(d)
+        };
+        let mut ordered: Vec<(usize, &String)> =
+            trail.iter().map(|t| Ok((depth(t)?, t))).collect::<Result<_>>()?;
+        ordered.sort_by_key(|(d, _)| *d);
+        for (_, t) in ordered {
+            let title: String =
+                store.conn.query_row("SELECT title FROM task WHERE id = ?1", [t], |r| r.get(0))?;
+            let state: String =
+                store.conn.query_row("SELECT state FROM task WHERE id = ?1", [t], |r| r.get(0))?;
+            let said = match label(t)? {
+                Some(l) => l,
+                None if state == "done" => "✓ done".into(),
+                None => state,
+            };
+            out.push(format!(
+                "      {} {}  {}  {said}",
+                if t == task { "▸" } else { " " },
+                task::short(t),
+                crate::list::clip(&varde_core::title::clean(&title), 40)
             ));
         }
-        line.push_str(&format!("  (varde trail {})", task::short(task)));
-        out.push(line);
     }
+    let _ = state;
     Ok(out)
 }
 
