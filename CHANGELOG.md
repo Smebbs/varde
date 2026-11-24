@@ -4,6 +4,12 @@ Notable changes to varde and org-varde.
 
 ## Unreleased
 
+### Fixed
+
+- A config written for 1.6.0-beta2, whose profiles name `background`
+  arguments, loads whole again: the key is read and ignored, the
+  sandbox and each agent's grant saying it now.
+
 ## 1.6.0-beta3 - 2026-11-23
 
 Still a beta. Background sessions now run in a sandbox, a loop carries

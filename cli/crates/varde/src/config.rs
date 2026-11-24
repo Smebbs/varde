@@ -81,6 +81,16 @@ pub struct Profile {
     pub model: Option<String>,
     /// `low`, `medium`, `high`, `xhigh` or `max`.
     pub effort: Option<String>,
+    /// 1.6.0-beta2's arguments for a background session, which the
+    /// sandbox and the agent's grant now say: read, and ignored, so a file
+    /// written for it still loads whole.
+    #[serde(deserialize_with = "ignored")]
+    background: (),
+}
+
+/// A key read and let go.
+fn ignored<'de, D: serde::Deserializer<'de>>(d: D) -> std::result::Result<(), D::Error> {
+    serde::de::IgnoredAny::deserialize(d).map(|_| ())
 }
 
 #[derive(Debug, Deserialize)]
@@ -393,7 +403,7 @@ impl Config {
         // On the agent you use, at the model it names for the tier.
         let agent = crate::start::default_agent();
         let model = varde_agent::by_name(&agent).and_then(|a| a.tier(name)).map(String::from);
-        Some(Profile { agent: Some(agent), model, effort: Some(effort.into()) })
+        Some(Profile { agent: Some(agent), model, effort: Some(effort.into()), ..Default::default() })
     }
 
     /// What is wrong with running on `profile`, as its agent sees it: on
@@ -466,6 +476,19 @@ impl Repo {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_profile_written_for_beta2_still_loads_whole() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("config.toml");
+        std::fs::write(
+            &file,
+            "[profiles]\nquick = { model = \"haiku\", effort = \"medium\", background = [\"--permission-mode\", \"acceptEdits\"] }\n",
+        )
+        .unwrap();
+        let c = load(&file).unwrap();
+        assert_eq!(c.profiles["quick"].model.as_deref(), Some("haiku"));
+    }
 
     #[test]
     fn every_key_is_optional_and_unknown_ones_are_refused() {
