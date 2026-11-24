@@ -169,20 +169,10 @@ impl App<'_> {
                     .unwrap_or_default()
                     .lines()
                     .filter(|l| {
-                        [
-                            "profile ",
-                            "made from ",
-                            "Check ",
-                            "Loop ",
-                            "Sandbox ",
-                            "Plan ",
-                            "Trail ",
-                            "        #",
-                            "        last ",
-                            "        …",
-                        ]
-                        .iter()
-                        .any(|p| l.starts_with(p))
+                        // Its trail drawn below, not listed.
+                        ["Next ", "Runs ", "Check ", "Rounds ", "        #", "        last ", "        …"]
+                            .iter()
+                            .any(|p| l.starts_with(p))
                     })
                     .map(String::from)
                     .collect();
