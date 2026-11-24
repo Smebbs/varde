@@ -226,9 +226,11 @@ pub fn derive(
             return State::Spent { rounds: done, why: format!("{} of {limit} minutes", used / 60_000) };
         }
     }
-    // Stuck: a round that failed as the one before it did, on the same
-    // files. Each time moves the loop to the next profile it escalates to.
-    let mut stuck = 0usize;
+    // A round that failed as the one before it did: the model is not
+    // getting it, and each time moves the loop to the next profile it
+    // escalates to. Stuck, and stopped, when it also changed nothing and
+    // there is no profile left to move to.
+    let mut repeats = 0usize;
     let mut now_stuck = false;
     for pair in rounds.windows(2) {
         let (a, b) = (check_of(&pair[0]), check_of(&pair[1]));
@@ -238,16 +240,15 @@ pub fn derive(
                     && b.verdict == Verdict::Fail
                     && a.fingerprint.is_some()
                     && a.fingerprint == b.fingerprint
-                    && a.tree == b.tree
             }
             _ => false,
         };
         if same {
-            stuck += 1;
+            repeats += 1;
         }
-        now_stuck = same;
+        now_stuck = same && matches!((a, b), (Some(a), Some(b)) if a.tree == b.tree);
     }
-    if now_stuck && stuck > def.escalate.len() {
+    if now_stuck && repeats > def.escalate.len() {
         return State::Stuck { rounds: done };
     }
     if last.asked {
@@ -256,9 +257,10 @@ pub fn derive(
     if def.paused {
         return State::Paused { rounds: done };
     }
-    let profile = match stuck {
+    // Past the last, it stays there.
+    let profile = match repeats {
         0 => base.map(String::from),
-        n => def.escalate.get(n - 1).cloned().or_else(|| base.map(String::from)),
+        n => def.escalate.get(n - 1).or(def.escalate.last()).cloned().or_else(|| base.map(String::from)),
     };
     State::Due { round: last.n + 1, profile }
 }
@@ -781,10 +783,26 @@ mod tests {
             check(3, Verdict::Fail, "a", "t1"),
         ];
         assert_eq!(derive(&d, Some("build"), false, &rs3, &again), State::Stuck { rounds: 3 });
-        // The files changed: progress, so not stuck.
+        // The files changed: not stuck, but failing the same way still
+        // moves it up, and past the last it stays there.
         let moved = [check(1, Verdict::Fail, "a", "t1"), check(2, Verdict::Fail, "a", "t2")];
         assert_eq!(
             derive(&d, Some("build"), false, &rs, &moved),
+            State::Due { round: 3, profile: Some("deep".into()) }
+        );
+        let moved3 = [
+            check(1, Verdict::Fail, "a", "t1"),
+            check(2, Verdict::Fail, "a", "t2"),
+            check(3, Verdict::Fail, "a", "t3"),
+        ];
+        assert_eq!(
+            derive(&d, Some("build"), false, &rs3, &moved3),
+            State::Due { round: 4, profile: Some("deep".into()) }
+        );
+        // A different failure: no repeat, its own profile.
+        let other = [check(1, Verdict::Fail, "a", "t1"), check(2, Verdict::Fail, "b", "t2")];
+        assert_eq!(
+            derive(&d, Some("build"), false, &rs, &other),
             State::Due { round: 3, profile: Some("build".into()) }
         );
     }

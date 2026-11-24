@@ -693,7 +693,10 @@ are what those lack.
   flagged, error, verified, spent, stuck (the same fingerprint on the
   same tree twice, after the escalation list runs out), asked (a round's
   last words a question), then working, checking or due. A review-only
-  check gets 2 rounds.
+  check gets 2 rounds. Each repeat of a fingerprint, the tree changed or not,
+  moves the next round one profile up the escalation list, and it stays
+  on the last; a review's or a verifier's rejection has one fingerprint
+  each, however it is worded.
 - **Attended.** A start of yours takes the loop over rather than pausing
   it: while your session of the task is live, each turn of it that
   changed the files is checked as it ends and counts as a round

@@ -9,6 +9,11 @@ Notable changes to varde and org-varde.
 - A config written for 1.6.0-beta2, whose profiles name `background`
   arguments, loads whole again: the key is read and ignored, the
   sandbox and each agent's grant saying it now.
+- `--escalate` moves a loop up when two rounds fail the same way, even
+  when each changed the code; it stopped only on the same failure with
+  nothing changed, so a model rewriting its way past a reviewer never
+  escalated. Two review (or verifier) rejections count as the same
+  failure, and past its last profile a loop stays there.
 
 ## 1.6.0-beta3 - 2026-11-23
 

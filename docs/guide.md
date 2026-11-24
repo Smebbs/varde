@@ -194,7 +194,10 @@ varde loop fix1 --check 'cargo test' --max 3 --escalate deep
 
 It stops when the check passes (`✓ verified in 2`, in Needs you), after
 `--max` rounds or `--minutes`, when two rounds fail the same way with no
-change and no profile is left to escalate to (`■ stuck`), when a round
+change and no profile is left to escalate to (`■ stuck`; two rounds
+failing the same way move it up one of `--escalate`'s, even when they
+changed something, and two rejections by the review count as the same
+way), when a round
 asks you something (`? asked you`), or when a round touches the guard
 (`⚑ touched tests/a.rs`). `varde show fix1` lists every round. Each is
 an ordinary session of the task, so RET in the view opens any of them.

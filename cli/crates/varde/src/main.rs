@@ -238,7 +238,8 @@ enum Cmd {
     /// Each round is a new session of the task, told its cairn and how the
     /// last check failed. It stops when the check passes, after --max
     /// rounds (3) or --minutes, when two rounds fail the same way with no
-    /// change (after moving up --escalate's profiles), when a round asks
+    /// change and no --escalate profile is left (two failing the same way
+    /// move it up one, changed or not), when a round asks
     /// you something, or when a session touches the check's guard. Opening
     /// the task takes it over and pauses the loop; `varde loop <task>`
     /// resumes it.

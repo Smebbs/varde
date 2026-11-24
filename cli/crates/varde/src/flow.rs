@@ -1338,7 +1338,7 @@ fn verifier(paths: &Paths, store: &Store, task: &str, d: &Def, dir: &Path, out: 
             verdict: Verdict::Fail,
             exit: None,
             summary: Some(format!("{name}: {}", finding.unwrap_or_else(|| "fail".into()))),
-            fingerprint: Some(fingerprint(&said)),
+            fingerprint: Some("verify".into()),
         },
         _ => Found::error("the verifier ended on neither PASS nor FAIL"),
     })
@@ -1492,7 +1492,9 @@ fn review(
             verdict: Verdict::Fail,
             exit: None,
             summary: Some(format!("{name}: {}", finding.unwrap_or_else(|| "fail".into()))),
-            fingerprint: Some(fingerprint(&answer)),
+            // Two rejections in a row are the same failure, however each
+            // is worded: what moves a loop up its profiles.
+            fingerprint: Some("review".into()),
         }
     } else {
         Found::error("the review said neither PASS nor FAIL")
