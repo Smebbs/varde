@@ -89,17 +89,36 @@ which NEED-YOU need you.  Said shorter where it must be; else nothing."
                    (t (list (concat "every project (none in " name " yet)") "every project"))))
         "")))
 
+(defvar org-varde-board--width 100
+  "The width of the board's window, while it is drawn.")
+
+(defun org-varde-board--fit (parts room)
+  "PARTS in ROOM columns, as the terminal board fits them: the last
+dropped first (how long ago, the project, git, which say least), down
+to the first; then that shortened."
+  (let ((width (lambda (ps) (+ (apply #'+ (mapcar #'string-width ps)) (* 3 (max 0 (1- (length ps))))))))
+    (while (and (> (funcall width parts) room) (cdr parts))
+      (setq parts (butlast parts)))
+    (if (and parts (> (funcall width parts) room))
+        (let ((p (car parts)))
+          (list (propertize (truncate-string-to-width p (max 8 room) nil nil "…")
+                            'face (get-text-property 0 'face p))))
+      parts)))
+
 (defun org-varde-board--meta (row now kept group)
   "What follows ROW's title at time NOW in ms, as the terminal board shows it:
 a live session's status, what it left running, where deferred work came
 from, git, the project unless KEPT to one, how long ago, and its short
 id.  In Needs you, GROUP says it is your turn: the row does not again."
   (let* ((project (plist-get row :project))
+         ;; A loop or check at work says so itself.
+         (flowing (equal (plist-get (plist-get row :flow) :tone) "working"))
          (parts
           (delq nil
                 (append
                  (list (pcase (plist-get row :status)
-                         ((or "working" "delegated") (propertize "working" 'face 'org-varde-board-working))
+                         ((or "working" "delegated")
+                          (unless flowing (propertize "working" 'face 'org-varde-board-working)))
                          ("waiting" (unless (equal group "needs_you")
                                       (propertize "your turn" 'face 'org-varde-board-waiting)))
                          ("blocked" (propertize "needs input" 'face 'org-varde-board-blocked))))
@@ -114,11 +133,9 @@ id.  In Needs you, GROUP says it is your turn: the row does not again."
                            (concat (if mark (concat mark (propertize " · " 'face 'org-varde-board-empty)) "")
                                    (org-varde--age (- now (plist-get row :last)))))))))))
     (concat (mapconcat (lambda (p) (if (get-text-property 0 'face p) p (propertize p 'face 'org-varde-board-empty)))
-                       parts (propertize " · " 'face 'org-varde-board-empty))
+                       (org-varde-board--fit parts (max 24 (/ (* org-varde-board--width 9) 20)))
+                       (propertize " · " 'face 'org-varde-board-empty))
             (propertize (concat "  " (plist-get row :short)) 'face 'org-varde-board-empty))))
-
-(defvar org-varde-board--width 100
-  "The width of the board's window, while it is drawn.")
 
 (defun org-varde-board--row (row now group &optional kept)
   "Insert one board ROW of GROUP, at time NOW in ms: a glyph for where it

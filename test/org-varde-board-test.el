@@ -115,6 +115,21 @@ test's, else one of its own."
     (org-varde-board-test--with data
       (should (string-match-p "^ ○ Fix login +↺ 2/3 ✗ exit 1 · proj · " (buffer-string))))))
 
+(ert-deftest org-varde-board-a-loop-at-work-says-working-once-and-keeps-its-label ()
+  (let ((data (org-varde-board-test--data
+               '(("working" "Working" ("T0000000000000000000AAA111" "Fix login" "open" "working"))))))
+    (plist-put (car (plist-get (car (plist-get data :groups)) :rows))
+               :flow '(:label "↺ working ✗ 2 failed" :tone "working"))
+    (org-varde-board-test--with data
+      (should (string-match-p "↺ working ✗ 2 failed" (buffer-string)))
+      (should-not (string-match-p "working · ↺" (buffer-string))))))
+
+(ert-deftest org-varde-board-fits-a-row-dropping-what-says-least ()
+  (should (equal (org-varde-board--fit (list "↺ working" "committed" "proj" "2m") 21)
+                 '("↺ working" "committed")))
+  (should (equal (org-varde-board--fit (list "↺ working ✗ a long failure" "proj") 12)
+                 '("↺ working ✗…"))))
+
 (ert-deftest org-varde-board-renders-what-varde-grouped ()
   (org-varde-board-test--with
       (org-varde-board-test--inbox
