@@ -36,6 +36,12 @@ Notable changes to varde and org-varde.
   run), puts how it runs on one line (`Runs`), its git and worktree on
   one (`Git`), lists rounds under `Rounds`, draws its trail a step a
   line in the order they go, and folds a long context.
+- `varde trail` on a plan you have not approved yet draws the trail it
+  proposes, from its `trail.toml`. A recipe's drawing names a step's
+  other upstreams (it printed `also after , `), and leaves out what goes
+  without saying: `output branch`, and three rounds.
+- Planners are told varde starts each step from what it needs and names
+  the branches to merge, so plans carry no branch names or merging.
 
 ## 1.6.0-beta3 - 2026-11-23
 

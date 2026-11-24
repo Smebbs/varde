@@ -724,12 +724,14 @@ fn step_line(s: &Step) -> String {
     if let Some(l) = &s.repeat {
         let esc =
             if l.escalate.is_empty() { String::new() } else { format!(" → {}", l.escalate.join(" → ")) };
-        parts.push(format!("↺ max {}{esc}", l.max.unwrap_or(3)));
+        // The rounds a budget: named when not the usual three.
+        let max = l.max.filter(|m| *m != 3).map(|m| format!(" max {m}")).unwrap_or_default();
+        parts.push(format!("↺{max}{esc}"));
     }
     if !s.guard.is_empty() {
         parts.push(format!("guard {}", s.guard.join(" ")));
     }
-    if let Some(o) = &s.output {
+    if let Some(o) = s.output.as_ref().filter(|o| *o != "branch") {
         parts.push(format!("output {o}"));
     }
     if let Some(b) = step_sandbox(s) {
@@ -769,6 +771,12 @@ fn drawn(r: &Recipe, origin: bool) -> Vec<String> {
         })
         .collect();
     flow::draw(&lines, &edges, &|_| String::new()).into_iter().map(|l| l.trim_end().to_string()).collect()
+}
+
+/// The trail the recipe at `path` would make, drawn: what a plan
+/// proposes, before you approve it.
+pub fn proposed(path: &Path) -> Result<Vec<String>> {
+    Ok(drawn(&resolve(&path.display().to_string(), &[], None)?, false))
 }
 
 /// `varde recipe show NAME`.

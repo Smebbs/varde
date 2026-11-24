@@ -1917,7 +1917,28 @@ pub fn trail(paths: &Paths, reference: &str, go: bool, format: &str, as_json: bo
         let store = paths.open(BUSY)?;
         return print_trail(&store, &tasks, format, as_json);
     }
-    print_trail(&store, &tasks, format, as_json)
+    print_trail(&store, &tasks, format, as_json)?;
+    // A plan not yet approved: the trail it proposes, drawn.
+    let plan: bool = store.conn.query_row(
+        "SELECT coalesce(output, '') = 'trail' FROM task WHERE id = ?1",
+        [&id],
+        |r| r.get(0),
+    )?;
+    if plan && !as_json && format != "mermaid" && !core::approved(&store.conn, &id)? {
+        if let Some(f) = checkout(&store, &id)?.map(|c| c.join(crate::recipe::TRAIL)).filter(|f| f.is_file())
+        {
+            match crate::recipe::proposed(&f) {
+                Ok(lines) => {
+                    println!("\nWhat it makes once you approve it (varde approve {}):", task::short(&id));
+                    for l in lines {
+                        println!("  {l}");
+                    }
+                }
+                Err(e) => println!("\nIts {} cannot be read: {e:#}", crate::recipe::TRAIL),
+            }
+        }
+    }
+    Ok(())
 }
 
 /// One line per node of a trail: the facts `trail` and `recipe show` print.
@@ -2030,7 +2051,15 @@ pub fn draw(
             .iter()
             .filter(|e| e.0 == id)
             .skip(1)
-            .map(|e| format!("{}{}", name(&e.1), if e.2 == "approved" { " (approved)" } else { "" }))
+            // Unnamed (a recipe's steps, whose line starts with its id), by its id.
+            .map(|e| {
+                let n = name(&e.1);
+                format!(
+                    "{}{}",
+                    if n.is_empty() { &e.1 } else { &n },
+                    if e.2 == "approved" { " (approved)" } else { "" }
+                )
+            })
             .collect();
         let also =
             if others.is_empty() { String::new() } else { format!("  (also after {})", others.join(", ")) };
@@ -2042,7 +2071,9 @@ pub fn draw(
         } else {
             "├─ "
         };
-        out.push(format!("{prefix}{branch}{gate}{text}  {}{also}", name(id)));
+        let n = name(id);
+        let n = if n.is_empty() { n } else { format!("  {n}") };
+        out.push(format!("{prefix}{branch}{gate}{text}{n}{also}"));
         placed.push(id.to_string());
         let kids: Vec<&String> = lines
             .iter()
