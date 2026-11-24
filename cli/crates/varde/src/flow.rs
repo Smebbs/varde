@@ -1113,7 +1113,7 @@ pub(crate) fn hold(at: &Path) -> Vec<String> {
         // `..`), and not the one the main checkout has, which your next
         // commit here would move.
         let main = common.as_ref().and_then(|c| crate::git::small_text(&c.join("HEAD"))).unwrap_or_default();
-        let main = Some(main.trim()).filter(|_| common.as_ref().is_some_and(|c| c.ends_with(".git")));
+        let main = common.as_ref().is_some_and(|c| c.ends_with(".git")).then_some(main.trim());
         let branch = head.strip_prefix("ref: refs/heads/").is_some_and(|b| {
             b.chars().all(|c| !c.is_control() && !" ~^:?*[\\".contains(c))
                 && b.split('/').all(|p| !p.is_empty() && !p.starts_with('.') && !p.ends_with(".lock"))
