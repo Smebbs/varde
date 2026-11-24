@@ -187,12 +187,15 @@ means for the loop. The same goes for a step's prompt: name the skill
 
 A **loop** runs a task in fresh background sessions until its check
 passes. Each round gets the task's cairn and how the last check failed.
+The board says what it is doing and what its check said
+(`↺ working ✗ 2 failed`, `↺ checking`, `↺ next round on deep`); the
+rounds are a budget, named there only on the last (`· last round`).
 
 ```sh
 varde loop fix1 --check 'cargo test' --max 3 --escalate deep
 ```
 
-It stops when the check passes (`✓ verified in 2`, in Needs you), after
+It stops when the check passes (`✓ verified`, in Needs you), after
 `--max` rounds or `--minutes`, when two rounds fail the same way with no
 change and no profile is left to escalate to (`■ stuck`; two rounds
 failing the same way move it up one of `--escalate`'s, even when they
@@ -209,7 +212,7 @@ taking it over: what each round says, the tools it calls, each check as
 it lands, and the next round as it starts.
 
 Opening the task (RET, `attach`) takes the loop over: your session is
-the round now (`↺ 2/3 with you`). Each of your turns that changes files
+the round now (`↺ with you`). Each of your turns that changes files
 is checked when it ends, and a failure comes back to you in the session.
 When you leave, the next round starts in the background.
 `varde loop fix1 --pause` stops it; `varde loop fix1` sets it going again.

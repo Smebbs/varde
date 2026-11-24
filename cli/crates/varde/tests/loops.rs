@@ -69,7 +69,7 @@ fn a_loop_starts_fresh_rounds_until_its_check_passes() {
     // It is yours now, saying so.
     let board = e.board();
     let r = row(&board, &t);
-    assert_eq!(r["flow"]["label"], "✓ verified in 2", "{r}");
+    assert_eq!(r["flow"]["label"], "✓ verified", "{r}");
     assert!(group(&board, "needs_you").iter().any(|x| x["short"] == t.as_str()), "{board}");
     assert!(e.ok(&["show", &t]).contains("Loop    verified after 2 rounds"));
     // Followed once it is over: what it ended on, and then it stops.
@@ -92,7 +92,7 @@ fn the_same_failure_twice_moves_up_a_profile_then_stops() {
     let argv = e.argv();
     assert!(argv[2].contains("--model opus --effort high"), "{argv:?}");
     assert!(!argv[0].contains("--model"), "{argv:?}");
-    assert!(row(&e.board(), &t)["flow"]["label"].as_str().unwrap().starts_with("■ stuck after 3"));
+    assert!(row(&e.board(), &t)["flow"]["label"].as_str().unwrap().starts_with("■ stuck"));
     // Run again, it keeps how it was set.
     e.ok(&["loop", &t, "--pause"]);
     e.ok(&["loop", &t]);
@@ -165,7 +165,7 @@ fn a_session_of_yours_attends_the_loop() {
     let text = said().unwrap();
     assert!(text.contains("Round 2 of 3") && text.contains("the test failed"), "{text}");
     assert_eq!(loop_state(&e, &t), "attended");
-    assert_eq!(row(&e.board(), &t)["flow"]["label"], "↺ 2/3 with you");
+    assert_eq!(row(&e.board(), &t)["flow"]["label"], "↺ with you");
     assert!(e.ok(&["show", &t]).contains("in your session"));
     // Left, the loop goes on in the background.
     unsafe { libc::kill(session.id() as i32, libc::SIGTERM) };

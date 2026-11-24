@@ -209,7 +209,7 @@ key on the same line picks it up again.
 ## Loops, checks and trails
 
 A task with a check, a loop or a trail says where it stands on its row:
-`↺ 2/3 ✗ 1 failed` while a loop works, `✓ verified in 2` once its check
+`↺ working ✗ 1 failed` while a loop works, `✓ verified` once its check
 passes, `⧗ abc123` while it waits on another, `⚑ touched tests/a.rs`
 when a round changed what its check guards. The view has a **Loop**
 section: its profile and recipe, its check and the last result, then one
@@ -219,7 +219,7 @@ round opens that session, `O` what its check printed, and `RET` on a
 task before or after it shows that one.
 
 Opening a task whose loop is going (`RET`) takes the loop over: your
-session is the round (`↺ 2/3 with you`), each of your turns that changes
+session is the round (`↺ with you`), each of your turns that changes
 files is checked as it ends, and a failure comes back into the session.
 When you close it, the next round starts in the background. To watch
 without taking over, `f`.

@@ -138,7 +138,7 @@ task it came from: put it next to that one if you can.
   came from, or `null`.
 - `flow`, present only for a task with a check, a loop or a trail edge,
   is `{"label", "tone", "state"}`: `label` is what to show after the
-  status word (`↺ 2/3 ✗ exit 1`, `✓ verified in 2`, `⧗ abc123`, `⚑
+  status word (`↺ working ✗ exit 1`, `✓ verified`, `⧗ abc123`, `⚑
   touched tests/a.rs`), `tone` one of `working`, `needs`, `failing`,
   `good` and `quiet` for its colour, and `state` the loop's (`working`,
   `checking`, `due`, `verified`, `flagged`, `error`, `spent`, `stuck`,

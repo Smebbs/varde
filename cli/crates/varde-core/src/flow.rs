@@ -585,7 +585,8 @@ pub fn would_cycle(conn: &Connection, task: &str, after: &str) -> Result<bool> {
 /// What a board row says of a task's check, loop or trail.
 #[derive(Debug, Clone, Serialize)]
 pub struct Flow {
-    /// `↺ 2/3 ✗ exit 101`, `✓ verified in 3`, `⧗ abc123`.
+    /// `↺ working ✗ exit 101`, `✓ verified`, `⧗ abc123`: what it is doing
+    /// and what its check said; the rounds only near their end.
     pub label: String,
     /// `working`, `needs`, `failing`, `quiet` or `good`: for whoever colours it.
     pub tone: &'static str,
@@ -636,32 +637,33 @@ pub fn row(
                 .unwrap_or_default())
         };
         let max = if review_only(conn, task)? { def.max.min(REVIEW_ONLY_MAX) } else { def.max };
+        // The rounds are a budget, not news: said only of the last one.
+        let last = |round: i64| if round >= max { " · last round" } else { "" };
+        let on = |p: &Option<String>| p.as_ref().map(|p| format!(" on {p}")).unwrap_or_default();
         let (label, tone, group) = match &st {
-            State::Paused { rounds } => (format!("↺ paused {rounds}/{max}"), "quiet", None),
+            State::Paused { .. } => ("↺ paused".to_string(), "quiet", None),
             State::Working { round } => {
-                (format!("↺ {round}/{max}{}", last_fail()?), "working", Some("working"))
+                (format!("↺ working{}{}", last(*round), last_fail()?), "working", Some("working"))
             }
             State::Checking { round, .. } => {
-                (format!("↺ {round}/{max} checking"), "working", Some("working"))
+                (format!("↺ checking{}", last(*round)), "working", Some("working"))
             }
             // Set but not going: its trail was not started.
             State::Due { round: 1, .. } if !auto => ("↺ ready to loop".to_string(), "quiet", None),
             State::Due { round, profile } => (
-                format!(
-                    "↺ {round}/{max}{}{}",
-                    profile.as_ref().map(|p| format!(" {p}")).unwrap_or_default(),
-                    last_fail()?
-                ),
+                format!("↺ next round{}{}{}", on(profile), last(*round), last_fail()?),
                 "working",
                 Some("working"),
             ),
-            State::Verified { rounds } => (format!("✓ verified in {rounds}"), "good", Some("needs_you")),
+            State::Verified { .. } => ("✓ verified".to_string(), "good", Some("needs_you")),
             State::Flagged { why, .. } => (format!("⚑ {why}"), "failing", Some("needs_you")),
             State::Error { why, .. } => (format!("✗ {why}"), "failing", Some("needs_you")),
-            State::Spent { why, .. } => (format!("■ spent, {why}"), "needs", Some("needs_you")),
-            State::Stuck { rounds } => (format!("■ stuck after {rounds}"), "needs", Some("needs_you")),
+            State::Spent { why, .. } => {
+                (format!("■ spent ({why}){}", last_fail()?), "needs", Some("needs_you"))
+            }
+            State::Stuck { .. } => (format!("■ stuck{}", last_fail()?), "needs", Some("needs_you")),
             State::Asked { .. } => ("? asked you".to_string(), "needs", Some("needs_you")),
-            State::Attended { round } => (format!("↺ {round}/{max} with you"), "working", None),
+            State::Attended { .. } => ("↺ with you".to_string(), "working", None),
         };
         return Ok(Some(Flow { label, tone, state: Some(st.name()), group }));
     }

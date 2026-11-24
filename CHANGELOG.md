@@ -20,6 +20,13 @@ Notable changes to varde and org-varde.
   not the three minutes of a cairn update: a strong model at high effort
   timed out and stopped the loop.
 
+### Changed
+
+- A loop's board label says what it is doing and what its check said
+  (`↺ working ✗ 2 failed`, `↺ next round on deep`, `✓ verified`, `■
+  stuck ✗ …`), not its round count, which is a budget: it is named only
+  on the last round. `varde show` and `follow` still list every round.
+
 ## 1.6.0-beta3 - 2026-11-23
 
 Still a beta. Background sessions now run in a sandbox, a loop carries

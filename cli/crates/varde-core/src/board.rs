@@ -104,7 +104,7 @@ pub struct Row {
     /// Until when the task is handed to the steward (§6.6), in unix ms.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub steward_until: Option<i64>,
-    /// Its check, loop or trail, when it has one: `↺ 2/3 ✗ exit 1`.
+    /// Its check, loop or trail, when it has one: `↺ working ✗ exit 1`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub flow: Option<crate::flow::Flow>,
 }

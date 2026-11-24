@@ -1855,7 +1855,7 @@ when that is nowhere in particular."
           (and (plist-get row :steward_until) (propertize "steward's" 'face 'org-varde-board-working))
           (let ((origin (plist-get row :origin)))
             (and origin (concat "← " (plist-get origin :short))))
-          ;; Its check, loop or trail: `↺ 2/3 ✗ exit 1', `⧗ abc123'.
+          ;; Its check, loop or trail: `↺ working ✗ exit 1', `⧗ abc123'.
           (let ((flow (plist-get row :flow)))
             (and flow
                  (propertize (plist-get flow :label) 'face
