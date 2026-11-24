@@ -434,7 +434,9 @@ fn output_words(output: &str) -> Option<String> {
              that a fresh session can build and check on its own, with its own check command; steps that do not \
              depend on each other run at the same time, each in its own worktree. End with a step that needs them \
              all, merges their branches and runs the whole check. Give steps that run at the same time files of \
-             their own, so the merge does not conflict. Write each command out in full: a trail takes no \
+             their own, so the merge does not conflict; write no branch names or merging into a step's prompt \
+             (varde starts each step from what it needs and names the branches to merge). Write each command \
+             out in full: a trail takes no \
              variables but {{{{title}}}} and {{{{context}}}}. Two to six steps; a check, not the user's approval, \
              between them, unless only the user can judge. Commit it. When the user approves this task, \
              varde makes the tasks from {TRAIL}, after this one, and sets them going."
@@ -906,6 +908,8 @@ The file
   guard = ["tests/*"]                   # paths a round must not change: it is flagged, the loop stops
   tree = "upstream"                     # own | upstream (its one upstream's worktree)
                                         #   default: upstream when it needs one step nothing else needs
+                                        #   own: cut from its one upstream's branch; with several,
+                                        #   varde names their branches and the step merges them
   output = "branch"                     # branch | draft-pr | file:PATH | report | trail
                                         #   trail: it writes trail.toml, a recipe of its own,
                                         #   whose tasks varde makes after it once you approve it
@@ -925,6 +929,8 @@ Rules of thumb
   alone gets two rounds and then the user.
 - Guard what the check reads (tests/*) when a step must not change it.
 - Put the user where only they can judge: gate = "approved" on a spec or a repro.
+- No branch names or merge steps in prompts: varde starts a step from what it
+  needs, tells it every upstream's branch, and asks a step of several to merge.
 - Any logic varde has no word for goes in the check's command or the prompt.
 - Skills are the how: name one in a prompt (`/spec`) or in a check's verify
   ("use /verify-app"), and every round runs it.
