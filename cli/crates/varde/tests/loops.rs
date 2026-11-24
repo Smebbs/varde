@@ -116,6 +116,21 @@ fn a_round_that_touches_the_guard_is_flagged() {
 }
 
 #[test]
+fn a_guarded_test_you_fix_is_yours_once_you_say_the_guard_again() {
+    let e = repo(":");
+    std::fs::create_dir(e.repo().join("tests")).unwrap();
+    std::fs::write(e.repo().join("tests/a.txt"), "expects 29\n").unwrap();
+    git(&e.repo(), &["add", "."]);
+    git(&e.repo(), &["commit", "-q", "-m", "tests"]);
+    let t = e.new_task("A test of mine was wrong");
+    e.ok(&["check", &t, "--guard", "tests/*", "--", "true"]);
+    std::fs::write(e.repo().join("tests/a.txt"), "expects 39\n").unwrap();
+    assert!(e.ok(&["check", &t, "--now"]).contains("touched tests/a.txt"));
+    e.ok(&["check", &t, "--guard", "tests/*"]);
+    assert!(e.ok(&["check", &t, "--now"]).contains("✓ pass"));
+}
+
+#[test]
 fn a_check_runs_on_demand_and_says_what_it_found() {
     let e = repo(":");
     let t = e.new_task("Just check");

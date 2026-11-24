@@ -268,8 +268,11 @@ pub fn check(paths: &Paths, reference: &str, a: CheckArgs) -> Result<()> {
         if let Some(v) = a.verify {
             d.verify = Some(rubric_arg(&v)?).filter(|v| !v.trim().is_empty());
         }
+        // Given again, the guard takes its files as they are now: a test
+        // you changed is yours (a session cannot set a check).
         if !a.guard.is_empty() {
             d.guard = a.guard;
+            d.base_tree = None;
         }
         if let Some(n) = a.again {
             d.again = n.max(1);

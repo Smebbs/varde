@@ -14,6 +14,8 @@ Notable changes to varde and org-varde.
   nothing changed, so a model rewriting its way past a reviewer never
   escalated. Two review (or verifier) rejections count as the same
   failure, and past its last profile a loop stays there.
+- A check's guard given again takes its paths as they are now, so a
+  guarded test you fix yourself no longer flags every later round.
 
 ## 1.6.0-beta3 - 2026-11-23
 

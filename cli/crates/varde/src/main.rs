@@ -206,7 +206,8 @@ enum Cmd {
         #[arg(long, value_name = "FILE|TEXT")]
         verify: Option<String>,
         /// A path a session must not change, `*` for any characters
-        /// (`tests/*`); again for more.
+        /// (`tests/*`); again for more. Given on a check that has one, its
+        /// paths are taken as they are now: a test you fixed is yours.
         #[arg(long, value_name = "GLOB")]
         guard: Vec<String>,
         /// Pass only after N passes in a row, for flaky work.

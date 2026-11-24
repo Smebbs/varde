@@ -199,7 +199,9 @@ failing the same way move it up one of `--escalate`'s, even when they
 changed something, and two rejections by the review count as the same
 way), when a round
 asks you something (`? asked you`), or when a round touches the guard
-(`⚑ touched tests/a.rs`). `varde show fix1` lists every round. Each is
+(`⚑ touched tests/a.rs`). If a guarded test was wrong, fix it yourself
+and give the guard again (`varde check fix1 --guard 'tests/*'`): it
+takes the tests as they are now. `varde show fix1` lists every round. Each is
 an ordinary session of the task, so RET in the view opens any of them.
 
 `varde follow fix1` (`f` on the boards) watches a task at work without
