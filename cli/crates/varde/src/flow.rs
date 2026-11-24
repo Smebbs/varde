@@ -1732,12 +1732,8 @@ pub fn set_loop(paths: &Paths, reference: &str, a: LoopArgs) -> Result<()> {
         }
     }
     store.conn.execute("UPDATE task SET auto = 1, inbox = 0 WHERE id = ?1", [&id])?;
-    let d = def(&store, &id)?.context("a check")?;
-    println!(
-        "{short} loops in the background until its check passes ({}), at most {} rounds; varde follow {short} watches it",
-        describe(&d),
-        core::loop_of(&store.conn, &id)?.map_or(3, |l| l.max)
-    );
+    def(&store, &id)?.context("a check")?;
+    println!("{short} loops in the background until its check passes; varde follow {short} watches it");
     if crate::schedule::heartbeat().is_none() {
         println!("nothing wakes varde between rounds yet: varde schedule --install");
     }
