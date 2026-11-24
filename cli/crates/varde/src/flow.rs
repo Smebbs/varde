@@ -1309,10 +1309,13 @@ fn verifier(paths: &Paths, store: &Store, task: &str, d: &Def, dir: &Path, out: 
     let (argv, env) = agent.launch(launch);
     let argv = agent.tuned(argv, profile.model.as_deref(), profile.effort.as_deref());
     let plan = crate::sandbox::plan(store, task)?;
+    // Without a sandbox: what it needs to look (the check's command, git's
+    // reading), and no more; its skills run on that.
+    let looks = ["git diff", "git log", "git show", "git status"].map(String::from);
     let grant = varde_agent::Grant {
         fenced: plan.fenced,
         trusted: plan.policy.is_none(),
-        commands: vec![],
+        commands: d.cmd.clone().into_iter().chain(looks).collect(),
         deny: plan.policy.as_ref().map(|p| p.deny.clone()).unwrap_or_default(),
     };
     let argv = match agent.unattended(agent.background(argv), &grant) {

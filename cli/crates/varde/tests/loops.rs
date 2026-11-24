@@ -492,6 +492,9 @@ fn an_agent_verifies_the_work_as_asked_and_its_last_word_decides() {
     // The verifier was asked what the check says, as a session of its own.
     let asked = std::fs::read_to_string(e.path("verify.log")).unwrap();
     assert!(asked.contains("use /verify-app") && asked.contains("--model opus"), "{asked}");
+    // Without a sandbox, it may still look: git's reading, for its skills.
+    assert!(asked.contains("Bash(git diff *)") && asked.contains("Bash(git log *)"), "{asked}");
+    assert!(!asked.contains("Bash(rm"), "{asked}");
 }
 
 #[test]

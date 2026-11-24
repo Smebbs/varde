@@ -45,6 +45,9 @@ Notable changes to varde and org-varde.
   on a recipe step), or when `sandbox.on = true` asks for every task.
   Asked for where none can start, it stops rather than run without one;
   a task made from inside a sandbox stays in it, by name.
+- A verifier without a sandbox may run its check's command and git's
+  reading (`diff`, `log`, `show`, `status`), so the review skills it is
+  asked to use can look at the change; before, it could only commit.
 - A loop whose check is a review or a verifier alone gets its `--max`
   rounds like any other, not a hidden two: a review agent is as much
   the check as a command.
