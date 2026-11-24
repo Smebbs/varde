@@ -695,7 +695,10 @@ pub fn list(as_json: bool) -> Result<()> {
 /// The sandbox a step names, or the one its output needs: a draft pull
 /// request is pushed, and pushing needs git's logins.
 fn step_sandbox(s: &Step) -> Option<&str> {
-    s.sandbox.as_deref().or((s.output.as_deref() == Some("draft-pr")).then_some("push"))
+    // A draft PR's step, where every task is sandboxed, gets git's logins.
+    s.sandbox
+        .as_deref()
+        .or((s.output.as_deref() == Some("draft-pr") && crate::sandbox::everywhere()).then_some("push"))
 }
 
 /// One line for a step, as `show` and `check` draw it.
@@ -921,9 +924,10 @@ The file
   output = "branch"                     # branch | draft-pr | file:PATH | report | trail
                                         #   trail: it writes trail.toml, a recipe of its own,
                                         #   whose tasks varde makes after it once you approve it
-  sandbox = "default"                   # what its background sessions reach: default | push |
-                                        #   off | yours ([sandboxes.NAME]); varde sandbox shows them
-                                        #   default: push for a draft-pr, else default
+  sandbox = "default"                   # run its background sessions and check in a sandbox:
+                                        #   default | push | off | yours ([sandboxes.NAME] in config)
+                                        #   left out: none, unless sandbox.on = true (then default,
+                                        #   push for a draft-pr); varde sandbox shows them
   use = "fix-until-green"               # start from that recipe's first step; keys here win
 
 {{title}} and {{context}} are the title and --context given to varde new.

@@ -40,6 +40,11 @@ Notable changes to varde and org-varde.
   proposes, from its `trail.toml`. A recipe's drawing names a step's
   other upstreams (it printed `also after , `), and leaves out what goes
   without saying: `output branch`, and three rounds.
+- Sandboxes are opt-in: a task runs in one when it asks (`varde new
+  --sandbox default`, `varde set <task> --sandbox NAME`, `sandbox = "…"`
+  on a recipe step), or when `sandbox.on = true` asks for every task.
+  Asked for where none can start, it stops rather than run without one;
+  a task made from inside a sandbox stays in it, by name.
 - A loop whose check is a review or a verifier alone gets its `--max`
   rounds like any other, not a hidden two: a review agent is as much
   the check as a command.

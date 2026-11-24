@@ -301,6 +301,29 @@ fn bwrap_works() -> bool {
 }
 
 #[test]
+fn a_sandbox_is_one_a_task_asks_for() {
+    if !bwrap_works() {
+        eprintln!("skipped: no bwrap here");
+        return;
+    }
+    let e = repo(":");
+    // (The tests' own default is off: here, neither on nor off.)
+    let shown = |t: &str, on: Option<&str>| {
+        let out = e.cmd(&["show", t]).env("VARDE_SANDBOX", on.unwrap_or("")).output().unwrap();
+        String::from_utf8_lossy(&out.stdout).into_owned()
+    };
+    // Asked for nothing: none, unless every task is to have one.
+    let plain = e.new_task("Plain");
+    e.ok(&["check", &plain, "--", "true"]);
+    assert!(!shown(&plain, None).contains("sandbox"), "{}", shown(&plain, None));
+    assert!(shown(&plain, Some("on")).contains("sandbox default, in bwrap"));
+    // Asked for: in it.
+    let fenced = e.ok(&["new", "Fenced", "--project", &e.repo().to_string_lossy(), "--sandbox", "default"]);
+    let fenced = fenced.split_whitespace().last().unwrap().to_string();
+    assert!(shown(&fenced, None).contains("sandbox default, in bwrap"), "{}", shown(&fenced, None));
+}
+
+#[test]
 fn a_round_runs_in_the_sandbox_and_reaches_only_its_checkout() {
     if !bwrap_works() {
         eprintln!("skipped: no bwrap here");
@@ -367,6 +390,16 @@ fn a_sandbox_of_yours_denies_commands_and_a_task_made_inside_one_keeps_it() {
     let made: Value = serde_json::from_slice(&made.stdout).unwrap();
     let short = made["short"].as_str().unwrap();
     assert_eq!(e.show(short)["flow"]["sandbox"]["name"], "look");
+    // From inside the default sandbox too: kept by name, not left unset,
+    // which is no sandbox at all.
+    let made = e.cmd(&["new", "Escape too", "--json"]).env("VARDE_FENCED", "default").output().unwrap();
+    let made: Value = serde_json::from_slice(&made.stdout).unwrap();
+    let short = made["short"].as_str().unwrap();
+    let sandbox: Option<String> = e
+        .db()
+        .query_row("SELECT sandbox FROM task WHERE id = ?1", [made["id"].as_str().unwrap()], |r| r.get(0))
+        .unwrap();
+    assert_eq!(sandbox.as_deref(), Some("default"), "{short}");
 }
 
 #[test]

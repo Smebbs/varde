@@ -144,11 +144,11 @@ keeps the row in Needs you, and RET opens them newest first. The view
 (`v`) lists every run (`●` unopened, `quiet` found nothing); RET opens
 one (`varde attach <task> --run <run>`).
 
-Nobody is around to approve tools, so a scheduled session runs in the
-sandbox, where it asks for nothing (see [The sandbox](#the-sandbox-beta)).
-A schedule that needs a login the sandbox hides (`gh`, `az`) gets a
-sandbox that shows it: `varde set <task> --sandbox push`, or one of
-yours. For the same reason, a first start that would ask about a
+Nobody is around to approve tools, so a scheduled session runs on what
+varde grants its agent, or, given one, in a sandbox, where it asks for
+nothing (see [The sandbox](#the-sandbox-beta)): `varde set <task>
+--sandbox default`. One that needs a login a sandbox hides (`gh`, `az`)
+gets one that shows it: `push`, or one of yours. For the same reason, a first start that would ask about a
 worktree needs `--worktree always|never` up front.
 
 Each run of a repeating task is a fresh conversation given the cairn,
@@ -289,10 +289,13 @@ sessions run at once.
 
 ### The sandbox (beta)
 
-Nobody is at a background session to approve its tools, so varde runs
-it, and every check, in the system's sandbox: bubblewrap on Linux
-(install `bubblewrap`), `sandbox-exec` on macOS. Inside, the agent may
-use any tool without asking. It can still only:
+Nobody is at a background session to approve its tools. A task that asks
+for a sandbox (`varde new --sandbox default`, `varde set <task> --sandbox
+NAME`, or `sandbox = "…"` on a recipe step) runs it, and its check, in
+the system's sandbox: bubblewrap on Linux (install `bubblewrap`),
+`sandbox-exec` on macOS. It is yours to opt into: `sandbox.on = true`
+puts every task in one unless it says `off`. Inside, the agent may use
+any tool without asking. It can still only:
 
 - write its checkout, its session files, temporary files and build caches;
 - commit, unsigned (sign them as you land them, `git rebase -S`, if your
@@ -312,15 +315,16 @@ And it cannot:
   Changing a check, a loop or a sandbox, approving, scheduling and
   starting things are yours.
 
-The network stays open, since the agent needs its model. Set
-`sandbox.on = true` (on macOS above all): then a round where no sandbox
-can start stops, rather than run without one, as it otherwise does. `varde sandbox`
+The network stays open, since the agent needs its model. A task that
+asks for a sandbox where none can start does not run without one: it
+stops, saying why. A task made from inside a sandbox is always in it.
+`varde sandbox`
 shows what it allows; `varde sandbox -- CMD` runs a command in it, to
 see; `varde doctor` checks that it, and the agent in it, start.
 
 A task or a recipe step picks its sandbox: `default`; `push`, which
-shows git's logins and your ssh agent, and which a `draft-pr` step gets;
-`off`; or one of yours. On macOS, check that `push` can push with
+shows git's logins and your ssh agent (a `draft-pr` step gets it when
+every task is sandboxed); `off`; or one of yours. On macOS, check that `push` can push with
 `varde sandbox push -- git push --dry-run`.
 
 ```toml
@@ -344,8 +348,8 @@ the changes. `deny` keeps the agent from a command it might run by
 mistake, but a script can still run one, so the real limit is what the
 login may do: give it the Reader role only.
 
-Where there is no sandbox (or with `sandbox.on = false`), a background
-session runs on what varde grants its agent. Claude may change files in
+Without a sandbox (the default, or with `sandbox.on = false`), a
+background session runs on what varde grants its agent. Claude may change files in
 its checkout, commit and run the check, and is refused everything else.
 pi asks before nothing, so it does not run in the background without a
 sandbox, unless you give the task the sandbox `off`.
@@ -558,7 +562,8 @@ parallel = 3                      # background rounds and checks at once
 check_minutes = 30                # a check that takes longer is an error
 
 [sandbox]
-# on = true                       # default: on where the system has one; false: none
+# on = true                       # every task in a sandbox unless it says off; false: none,
+                                  #   whatever a task asks; left out: only tasks that ask
 write = []                        # more every sandbox may write, e.g. "~/.m2"
 hide = []                         # more logins every sandbox hides
 

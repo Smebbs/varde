@@ -108,8 +108,9 @@ enum Cmd {
         /// The profile its sessions run on: quick, build, deep, review, or yours.
         #[arg(long)]
         profile: Option<String>,
-        /// The sandbox its background sessions and checks run in: default,
-        /// push, off, or yours (see `varde sandbox`).
+        /// Run its background sessions and checks in a sandbox: default,
+        /// push, off, or yours (see `varde sandbox`). Left out: none, unless
+        /// sandbox.on = true.
         #[arg(long, conflicts_with = "recipe")]
         sandbox: Option<String>,
         /// Make a trail of tasks from a recipe (see `varde recipe`), the

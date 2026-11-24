@@ -2131,17 +2131,16 @@ pub fn show(paths: &Paths, store: &Store, task: &str) -> Result<Vec<String>> {
     let alive = |pid: i64, start: i64| crate::process::alive(pid, start);
     let mut out = vec![];
     let short = task::short(task);
-    let (profile, recipe, state, named, auto, output): (
+    let (profile, recipe, state, named, output): (
         Option<String>,
         Option<String>,
         String,
         Option<String>,
-        bool,
         Option<String>,
     ) = store.conn.query_row(
-        "SELECT profile, recipe, state, sandbox, coalesce(auto, 0), output FROM task WHERE id = ?1",
+        "SELECT profile, recipe, state, sandbox, output FROM task WHERE id = ?1",
         [task],
-        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?, r.get(5)?)),
+        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?, r.get(4)?)),
     )?;
     let d = def(store, task)?;
     let l = core::loop_of(&store.conn, task)?;
@@ -2159,8 +2158,13 @@ pub fn show(paths: &Paths, store: &Store, task: &str) -> Result<Vec<String>> {
     // How it runs: one line.
     let mut runs = vec![];
     runs.extend(profile);
-    if named.is_some() || auto || d.is_some() || !trail.is_empty() {
-        runs.push(format!("sandbox {}", sandbox_words(named.as_deref())));
+    // Its sandbox, when it has one.
+    match crate::sandbox::plan(store, task) {
+        Ok(crate::sandbox::Plan { policy: Some(_), .. }) => {
+            runs.push(format!("sandbox {}", sandbox_words(named.as_deref())))
+        }
+        Ok(_) => {}
+        Err(e) => runs.push(format!("sandbox: {e:#}")),
     }
     if let Some(r) = recipe {
         runs.push(format!("recipe {}", r.split('@').next().unwrap_or(&r)));

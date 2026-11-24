@@ -245,15 +245,27 @@ pub fn writable(dir: &Path) -> Vec<PathBuf> {
 /// the default). A task made from inside a sandbox gets that sandbox,
 /// whatever was asked: a session cannot make itself a way out.
 pub fn for_new(asked: Option<&str>) -> Result<Option<String>> {
+    // Made from inside one: in it, always; a session makes no way out.
     if let Some(inside) = std::env::var(FENCED).ok().filter(|v| !v.is_empty()) {
-        return Ok((inside != "default").then_some(inside));
+        return Ok(Some(inside));
     }
     if let Some((held, _)) = HELD.with(|h| h.borrow().clone()) {
         return Ok(held);
     }
     let Some(name) = asked.map(str::trim).filter(|n| !n.is_empty()) else { return Ok(None) };
     policy(Some(name))?;
-    Ok((name != "default").then(|| name.to_string()))
+    Ok(Some(name.to_string()))
+}
+
+/// Whether every task's background work runs in a sandbox unless it says
+/// `off`: `sandbox.on = true`, or `$VARDE_SANDBOX=on`. Else only a task
+/// that names one does.
+pub fn everywhere() -> bool {
+    match std::env::var("VARDE_SANDBOX").ok().as_deref() {
+        Some("on") => true,
+        Some("off") => false,
+        _ => config::get().sandbox.on == Some(true),
+    }
 }
 
 thread_local! {
@@ -281,7 +293,7 @@ pub fn set(paths: &crate::Paths, reference: &str, name: &str) -> Result<()> {
     let short = varde_core::task::short(&id);
     println!(
         "{short}'s background sessions and checks run in the sandbox {} from the next one",
-        kept.as_deref().unwrap_or("default")
+        kept.as_deref().unwrap_or("none")
     );
     Ok(())
 }
@@ -384,21 +396,20 @@ pub fn plan(store: &Store, task: &str) -> Result<Plan> {
         .query_row("SELECT sandbox FROM task WHERE id = ?1", [task], |r| r.get(0))
         .optional()?
         .flatten();
-    let mut policy = policy(name.as_deref())?;
+    // Opt in: a task that names one, or every task when sandbox.on says so.
+    let mut policy = match (&name, everywhere()) {
+        (None, false) => None,
+        (n, _) => policy(n.as_deref())?,
+    };
     if let Some(p) = policy.as_mut() {
         p.branch = crate::sweep::active_worktree(store, task)?.map(|(_, _, branch, _)| branch);
         p.guard = crate::flow::def(store, task)?.map(|d| d.guard).unwrap_or_default();
     }
     let fenced = policy.is_some() && enabled()?;
-    // A checkout a sandboxed session worked in is not run in without one,
-    // unless you turned it off.
+    // Asked for, and none runs here: not run without it, unless you
+    // turned sandboxes off.
     if policy.is_some() && !fenced && !turned_off() {
-        if let Some(dir) = crate::flow::checkout(store, task)?.filter(|d| crate::git::untrusted(d)) {
-            bail!(
-                "{} was worked in by a sandboxed session, and no sandbox runs here now: varde doctor says why",
-                dir.display()
-            );
-        }
+        bail!("its sandbox cannot run here: {}", install_hint());
     }
     Ok(Plan { policy, fenced })
 }
@@ -1218,7 +1229,14 @@ fn describe(name: &str, p: Option<&Policy>) -> Vec<String> {
     let s = config::get();
     let mut out = vec![];
     let state = match (enabled(), backend()) {
-        (Ok(true), Some(b)) => format!("on ({}): background sessions and checks run in it", b.name()),
+        (Ok(true), Some(b)) if everywhere() => {
+            format!("on ({}): every task's background sessions and checks run in it", b.name())
+        }
+        (Ok(true), Some(b)) => format!(
+            "{} here, for a task that asks (varde new --sandbox NAME, a recipe step's sandbox); \
+             sandbox.on = true puts every task in one",
+            b.name()
+        ),
         (Ok(false), Some(_)) => {
             "off (sandbox.on = false): background sessions run on their agent's grant".into()
         }

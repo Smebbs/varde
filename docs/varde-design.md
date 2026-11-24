@@ -739,10 +739,14 @@ are what those lack.
 
 What makes a session with nobody at it safe to leave is not its agent's
 permission rules, which differ per agent and ask a question nobody is
-there to answer, but a wall around it. Background sessions (rounds,
-trail steps, schedules) and every check run inside the system's own
-sandbox, around whatever agent runs: bubblewrap on Linux, `sandbox-exec`
-on macOS (`sandbox.rs`). The check is inside too: what a session wrote
+there to answer, but a wall around it. A task that asks for one (by
+name, on itself or its recipe step, or every task with `sandbox.on =
+true`) runs its background sessions (rounds, trail steps, schedules) and
+its check inside the system's own sandbox, around whatever agent runs:
+bubblewrap on Linux, `sandbox-exec` on macOS (`sandbox.rs`). It is
+opt-in: a task that asks for none runs on its agent's grant, as before.
+One that asks where none can start stops; one made from inside a
+sandbox is in it, by name. The check is inside too: what a session wrote
 (a test, a build script) runs when it runs.
 
 - **What it allows.** Writes to the checkout; of the git directory a
